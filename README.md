@@ -48,8 +48,8 @@ after every update, because trust is tied to the plugin's contents.
 
 ## Pair with the SimpleTerm app
 
-The plugin sends nothing until the app links this server. In SimpleTerm, open the host's
-**Agents** settings and turn on alerts. Over SFTP the app writes one link file per device to
+The plugin sends nothing until the app links this server. Turn on agent alerts for the host in
+SimpleTerm. Over SFTP the app writes one link file per device to
 `~/.simpleterm/links/<linkId>.conf`, holding the relay address and the keys for that device.
 The app only writes its own files under `~/.simpleterm`; it does not run commands on the server
 or edit your Claude Code and Codex settings. Revoking the link in the app stops delivery at the
@@ -140,8 +140,8 @@ Not tested on Windows yet.
   PowerShell 5.1+ (no extra tools needed).
 - **Claude Code**: plugin hooks have no per-OS command, so the hooks run `scripts/agent-hook.sh`
   through Git Bash ([Git for Windows](https://git-scm.com/downloads/win)). Without Git Bash the
-  hooks fail and alerts are not sent. They are marked `"onFailure": "continue"` so a failure never
-  blocks or denies a tool call.
+  hooks fail and alerts are not sent. The permission and question hooks are marked
+  `"onFailure": "continue"`, so such a failure never blocks or denies a tool call.
 
 ## Layout
 
