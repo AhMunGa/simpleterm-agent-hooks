@@ -1,0 +1,5 @@
+{
+  "name": "simpleterm",
+  "version": "0.3.0",
+  "description": "SimpleTerm agent hooks for Gemini CLI: alerts in the SimpleTerm app when Gemini needs your permission or finishes a turn"
+}

@@ -1,12 +1,21 @@
 #!/bin/sh
-# SimpleTerm agent hook v1 (POSIX sh). Installed by the SimpleTerm app as
-# ~/.simpleterm/agent-hook.sh; see README.md and
-# docs/tech_specs/TDS_AGENT_ALERTS.md (sections 5 and 6) for the contract.
+# SimpleTerm agent hook v1 (POSIX sh), part of the simpleterm-agent-hooks
+# plugin; see README.md and docs/tech_specs/TDS_AGENT_ALERTS.md (sections 5
+# and 6) of the SimpleTerm app for the contract.
 #
-#   sh agent-hook.sh claude          Claude Code hook (event JSON on stdin)
+#   sh agent-hook.sh claude          Claude Code hook (event JSON on stdin). Run
+#                                    by Grok Build (GROK_HOOK_EVENT set) it acts
+#                                    as `grok`.
 #   sh agent-hook.sh claude signal   Claude Code PermissionRequest status only
 #   sh agent-hook.sh codex           Codex hook (event JSON on stdin)
 #   sh agent-hook.sh codex-notify J  Codex `notify` program (JSON is last arg)
+#   sh agent-hook.sh gemini          Gemini CLI hook (event JSON on stdin)
+#   sh agent-hook.sh agy EVENT       Antigravity CLI hook (event JSON on stdin;
+#                                    the event is not in it)
+#   sh agent-hook.sh grok            Grok Build hook (event JSON on stdin)
+#   sh agent-hook.sh opencode        OpenCode, from the plugin's bridge
+#                                    (Claude-shaped event JSON on stdin)
+#   sh agent-hook.sh notify T [B]    `simpleterm notify` (simpleterm-notify.sh)
 #
 # Turns agent events into end-to-end encrypted relay events and, for
 # permission requests, waits for a decision made on a SimpleTerm device.
@@ -30,6 +39,8 @@ LOGGED=0
 
 MAX_INPUT=262144
 MAX_LINKS=16
+# Bumped when the ~/.simpleterm/bin/simpleterm wrapper must be rewritten.
+CLI_REV=1
 CR=$(printf '\r')
 
 log() {
@@ -48,45 +59,61 @@ trim_log() {
 }
 
 finish() {
+  agy_default
   trim_log
   exit 0
 }
 
+# Antigravity treats `{}` (and a crash) from PreToolUse as a denial: every
+# PreToolUse run ends with a decision, `allow` (the permission policy
+# decides) unless the device answered. Stop gets `{}` (the stop proceeds).
+ANSWERED=0
+agy_default() {
+  [ "$AGENT" = agy ] && [ "$ANSWERED" = 0 ] || return 0
+  ANSWERED=1
+  if [ "$MODE" = PreToolUse ]; then printf '{"decision":"allow"}\n'; else printf '{}\n'; fi
+}
+
 # --- JSON helpers (awk, byte semantics) ------------------------------------
 
-# Prints `path=value` for each wanted path (comma list) found in the JSON on
-# stdin. String values stay JSON-escaped (they are re-embedded as-is, never
-# decoded or evaluated). Paths: `a`, `a.b`, `a.0.b`. Tolerates truncation.
-JSON_GET='
-function path(   d, p) {
+# jwalk(s) records `GOT[path] = value` for each wanted path (jwant("a,b.c"))
+# found in the JSON text s, in document order in GOTK[1..GOTN]. String values
+# stay JSON-escaped (they are re-embedded as-is, never decoded or
+# evaluated). Paths: `a`, `a.b`, `a.0.b`. Tolerates truncation.
+JSON_FN='
+function jpath(   d, p) {
   p = ""
-  for (d = 1; d <= depth; d++) p = p (d > 1 ? "." : "") K[d]
+  for (d = 1; d <= JD; d++) p = p (d > 1 ? "." : "") JK[d]
   return p
 }
-function emit(v,   p) {
-  if (depth == 0) return
-  p = path()
-  if ((p in WANT) && !(p in GOT)) { GOT[p] = 1; need--; print p "=" v }
+function jemit(v,   p) {
+  if (JD == 0) return
+  p = jpath()
+  if ((p in WANT) && !(p in GOT)) { GOT[p] = v; GOTN++; GOTK[GOTN] = p; jneed-- }
 }
-BEGIN { need = split(want, W, ","); for (k = 1; k <= need; k++) WANT[W[k]] = 1 }
-{ s = s $0 "\n" }
-END {
-  len = length(s); i = 1; depth = 0
-  while (i <= len && need > 0) {
+function jwant(list,   W, k) {
+  split("", WANT)
+  WANTN = split(list, W, ",")
+  for (k = 1; k <= WANTN; k++) WANT[W[k]] = 1
+}
+function jwalk(s,   len, i, c, j, seg, m, str) {
+  split("", GOT); GOTN = 0; jneed = WANTN
+  len = length(s); i = 1; JD = 0
+  while (i <= len && jneed > 0) {
     c = substr(s, i, 1)
     if (c == " " || c == "\t" || c == "\n" || c == "\r") { i++; continue }
     if (c == ",") {
-      if (depth > 0) { if (T[depth] == "a") K[depth]++; else EXPK[depth] = 1 }
+      if (JD > 0) { if (JT[JD] == "a") JK[JD]++; else JE[JD] = 1 }
       i++; continue
     }
-    if (c == ":") { if (depth > 0) EXPK[depth] = 0; i++; continue }
+    if (c == ":") { if (JD > 0) JE[JD] = 0; i++; continue }
     if (c == "{" || c == "[") {
-      depth++
-      if (c == "{") { T[depth] = "o"; K[depth] = ""; EXPK[depth] = 1 }
-      else { T[depth] = "a"; K[depth] = 0; EXPK[depth] = 0 }
+      JD++
+      if (c == "{") { JT[JD] = "o"; JK[JD] = ""; JE[JD] = 1 }
+      else { JT[JD] = "a"; JK[JD] = 0; JE[JD] = 0 }
       i++; continue
     }
-    if (c == "}" || c == "]") { if (depth > 0) depth--; i++; continue }
+    if (c == "}" || c == "]") { if (JD > 0) JD--; i++; continue }
     if (c == "\"") {
       j = i + 1
       while (j <= len) {
@@ -100,15 +127,24 @@ END {
       if (j > len) break
       str = substr(s, i + 1, j - i - 1)
       i = j + 1
-      if (depth > 0 && T[depth] == "o" && EXPK[depth]) { K[depth] = str; continue }
-      emit(str); continue
+      if (JD > 0 && JT[JD] == "o" && JE[JD]) { JK[JD] = str; continue }
+      jemit(str); continue
     }
     j = i
     while (j <= len && index(" \t\r\n,:}]", substr(s, j, 1)) == 0) j++
-    emit(substr(s, i, j - i))
+    jemit(substr(s, i, j - i))
     i = j
   }
-}'
+}
+function isnum(v) { return v ~ /^[0-9]+$/ }
+function isdec(v) { return v ~ /^[0-9]+([.][0-9]+)?$/ }'
+
+# Prints `path=value` for each wanted path (comma list) found in the JSON on
+# stdin, in document order.
+JSON_GET=$JSON_FN'
+BEGIN { jwant(want) }
+{ s = s $0 "\n" }
+END { jwalk(s); for (k = 1; k <= GOTN; k++) print GOTK[k] "=" GOT[GOTK[k]] }'
 
 # Truncates JSON-escaped string content (one value per line on stdin) to at
 # most `maxu` characters and `maxb` bytes without splitting an escape or a
@@ -182,10 +218,34 @@ json_trim() { # value maxu maxb [mode]
   printf '%s\n' "$1" | awk -v maxu="$2" -v maxb="$3" -v mode="${4:-}" "$JSON_TRIM" 2>/dev/null
 }
 
-# Escapes plain text (from our own config files) as JSON string content.
-json_text() { # text maxu maxb
+# Escapes plain text (our own config files, command-line arguments) as JSON
+# string content.
+json_text() { # text maxu maxb [mode]
   t=$(printf '%s' "$1" | tr -d '\000-\037\177' | sed 's/\\/\\\\/g; s/"/\\"/g')
-  json_trim "$t" "$2" "$3"
+  json_trim "$t" "$2" "$3" "${4:-}"
+}
+
+# Plain text (no control characters) cut to at most $2 bytes without
+# splitting a UTF-8 sequence; for terminal sequences.
+UTF8_CUT='
+{
+  s = (NR > 1 ? s " " : "") $0
+}
+END {
+  n = length(s); i = 1; out = ""
+  while (i <= n) {
+    c = substr(s, i, 1); w = 1
+    if (c >= "\300") { if (c < "\340") w = 2; else if (c < "\360") w = 3; else w = 4 }
+    else if (c >= "\200") { i++; continue }
+    if (length(out) + w > maxb) break
+    out = out substr(s, i, w); i += w
+  }
+  printf "%s", out
+}'
+
+plain_cut() { # text maxb
+  printf '%s' "$1" | tr -d '\000-\010\013-\037\177' | tr '\t\n' '  ' |
+    awk -v maxb="$2" "$UTF8_CUT" 2>/dev/null
 }
 
 is_hex() { # value length
@@ -333,10 +393,16 @@ resp_get() { # file wanted-paths
 
 # --- event payload ---------------------------------------------------------
 
-# Builds the section 5.2 plaintext for the loaded link.
+# Builds the section 5.2 plaintext for the loaded link. `usage` carries
+# USAGE_JSON instead of a message; `notify` adds a title.
 plaintext() { # rid ev nonce
   host=$(json_text "$L_LABEL" 64 256)
-  p='{"v":1,"rid":"'$1'","ev":"'$2'","app":"'$APP'","host":"'$host'","cwd":"'$CWD_BASE'","msg":"'$MSG'"'
+  p='{"v":1,"rid":"'$1'","ev":"'$2'","app":"'$APP'","host":"'$host'","cwd":"'$CWD_BASE'"'
+  case $2 in
+    usage) p=$p$USAGE_JSON ;;
+    notify) p=$p',"title":"'$TITLE'","msg":"'$MSG'"' ;;
+    *) p=$p',"msg":"'$MSG'"' ;;
+  esac
   [ -n "$3" ] && p=$p',"nonce":"'$3'"'
   printf '%s,"ts":%s}' "$p" "$TS"
 }
@@ -366,19 +432,25 @@ ingest_one() { # rid ev nonce outfile
   printf '%s' "${push:-http$code}"
 }
 
-# Sends $1 to every link in the background and returns at once. Tunnels go
-# first: the app reports a shown event to the relay ("seen"), which holds a
-# push for a few seconds to hear that, so a device that is connected gets
-# no second alert.
-send_bg() { # ev
+# Sends event $1 to every link in the background and returns at once.
+# Tunnels go first: the app reports a shown event to the relay ("seen"),
+# which holds a push for a few seconds to hear that, so a device that is
+# connected gets no second alert. $3 limits it to `tunnel` or `relay` links.
+send_bg() { # ev [rid] [all|tunnel|relay]
   [ -n "$LINKS" ] || return 0
+  sb_rid=${2:-$RID}
+  sb_scope=${3:-all}
+  [ -n "$sb_rid" ] || return 0
+  # Ignored before the fork, so the sender also outlives a terminal that
+  # closes right after `simpleterm notify` (its children get SIGHUP).
+  trap '' HUP
   (
-    trap '' HUP
     for pass in tunnel relay; do
+      [ "$sb_scope" = all ] || [ "$sb_scope" = "$pass" ] || continue
       printf '%s\n' "$LINKS" | while IFS= read -r f; do
         load_link "$f" || continue
         if [ "$L_KIND" = tunnel ]; then [ "$pass" = tunnel ] || continue; else [ "$pass" = relay ] || continue; fi
-        ingest_one "$RID" "$1" '' "$RUN_DIR/ing.$$.$RID.$(printf %.8s "$L_LINK")" >/dev/null
+        ingest_one "$sb_rid" "$1" '' "$RUN_DIR/ing.$$.$sb_rid.$(printf %.8s "$L_LINK")" >/dev/null
       done
     done
     trim_log
@@ -387,12 +459,18 @@ send_bg() { # ev
 
 # --- terminal sequence (Claude Code only, SimpleTerm sessions only) ---------
 
+# USAGE_SEQ is the JSON-escaped usage OSC to append, if any (usage_report).
 print_state() { # running|waiting|done [message]
   [ "$AGENT" = claude ] || return 0
   [ "${SIMPLETERM:-}" = 1 ] || return 0
   m=''
   [ -n "${2:-}" ] && m=' '$(json_trim "$2" 80 320)
-  printf '{"terminalSequence":"\\u001b]9;simpleterm:state=%s%s\\u0007"}\n' "$1" "$m"
+  printf '{"terminalSequence":"\\u001b]9;simpleterm:state=%s%s\\u0007%s"}\n' "$1" "$m" "$USAGE_SEQ"
+}
+
+print_usage() {
+  [ "$AGENT" = claude ] && [ "${SIMPLETERM:-}" = 1 ] && [ -n "$USAGE_SEQ" ] || return 0
+  printf '{"terminalSequence":"%s"}\n' "$USAGE_SEQ"
 }
 
 state_json() { # running|waiting|done -> ,"terminalSequence":... or nothing
@@ -512,13 +590,39 @@ EOF
   return 1
 }
 
+# Prints a device decision (allow|deny) or the no-decision answer (none) in
+# the agent's own format.
+emit_decision() {
+  case $AGENT:$1 in
+    claude:allow | codex:allow)
+      printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}%s}\n' \
+        "$(state_json running)"
+      ;;
+    claude:deny | codex:deny)
+      printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from SimpleTerm"}}%s}\n' \
+        "$(state_json running)"
+      ;;
+    # Antigravity: auto_approve approves a call that would ask; allow leaves
+    # it to the permission policy (the terminal prompt).
+    agy:allow) ANSWERED=1; printf '{"decision":"auto_approve"}\n' ;;
+    agy:deny) ANSWERED=1; printf '{"decision":"deny","reason":"Denied from SimpleTerm"}\n' ;;
+    agy:none) agy_default ;;
+    # OpenCode: the plugin's bridge replies once/reject.
+    opencode:allow) printf '{"decision":"allow"}\n' ;;
+    opencode:deny) printf '{"decision":"deny"}\n' ;;
+  esac
+}
+
 permission_flow() {
-  if [ "$AGENT" = codex ]; then
-    cap=$(conf_int codex_wait 60)
-  else
-    cap=$(conf_int claude_wait 540)
-  fi
+  case $AGENT in
+    codex) cap=$(conf_int codex_wait 60) ;;
+    agy) cap=$(conf_int agy_wait 0) ;;
+    opencode) cap=$(conf_int opencode_wait 540) ;;
+    *) cap=$(conf_int claude_wait 540) ;;
+  esac
   [ "$cap" -le 540 ] || cap=540
+  # The Antigravity hook's timeout is 120 seconds (hooks.json).
+  [ "$AGENT" = agy ] && [ "$cap" -gt 110 ] && cap=110
   POLL_WAIT=$(conf_int poll_wait 25)
   [ "$POLL_WAIT" -ge 1 ] && [ "$POLL_WAIT" -le 25 ] || POLL_WAIT=25
   start=$(date +%s)
@@ -532,7 +636,8 @@ permission_flow() {
     rm -f "$RUN_DIR"/ing."$$".* "$RUN_DIR"/out."$$".* "$RUN_DIR"/dec."$$".* 2>/dev/null
   }
   # The agent may end the wait (Claude Code signals hooks when a turn is
-  # interrupted): print nothing and leave the decision to the agent.
+  # interrupted, the OpenCode bridge when its prompt was answered): print
+  # nothing and leave the decision to the agent.
   trap 'cleanup_perm; log "permission signal"; trim_log; exit 0' TERM INT HUP
 
   # Ingest to every link in parallel; each job leaves its nonce and result.
@@ -604,24 +709,377 @@ EOF
   LOGGED=1
 
   case $decision in
-    allow)
-      printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}%s}\n' \
-        "$(state_json running)"
-      log "permission allow"
+    allow | deny)
+      emit_decision "$decision"
+      log "permission $decision"
       ;;
-    deny)
-      printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from SimpleTerm"}}%s}\n' \
-        "$(state_json running)"
-      log "permission deny"
+    *) emit_decision none ;;
+  esac
+}
+
+# --- usage (#342) ------------------------------------------------------------
+
+# How much of a transcript to read: its end only, where the newest record
+# is. The last 256 KiB nearly always hold it; 2 MiB is the most we read.
+USAGE_TAIL=2097152
+
+# Claude Code transcript (JSONL) -> "<context tokens> <model>": the newest
+# main-thread assistant usage (input + cache creation + cache read, the
+# status line's formula) or, if a compaction came after it, its postTokens.
+# Only these keys are read; message text is never looked at.
+USAGE_CLAUDE=$JSON_FN'
+BEGIN {
+  jwant("type,isSidechain,subtype,message.model,message.usage.input_tokens,message.usage.cache_creation_input_tokens,message.usage.cache_read_input_tokens,message.usage.cache_creation.ephemeral_5m_input_tokens,message.usage.cache_creation.ephemeral_1h_input_tokens,compactMetadata.postTokens")
+  n = 0
+}
+NR == 1 && skip { next }
+index($0, "\"compact_boundary\"") || (index($0, "\"usage\":{") && index($0, "\"type\":\"assistant\"")) { n++; L[n % 8] = $0 }
+END {
+  ctx = ""; model = ""
+  for (k = n; k >= 1 && k > n - 8; k--) {
+    jwalk(L[k % 8])
+    if (GOT["type"] == "system") {
+      if (GOT["subtype"] == "compact_boundary" && ctx == "" && isnum(GOT["compactMetadata.postTokens"]))
+        ctx = GOT["compactMetadata.postTokens"] + 0
+      continue
+    }
+    if (GOT["type"] != "assistant" || GOT["isSidechain"] == "true" || GOT["message.model"] == "<synthetic>") continue
+    if (ctx == "") {
+      if (!isnum(GOT["message.usage.input_tokens"])) continue
+      cc = GOT["message.usage.cache_creation_input_tokens"]
+      cc = isnum(cc) ? cc + 0 : 0
+      if (cc == 0) {
+        if (isnum(GOT["message.usage.cache_creation.ephemeral_5m_input_tokens"])) cc += GOT["message.usage.cache_creation.ephemeral_5m_input_tokens"]
+        if (isnum(GOT["message.usage.cache_creation.ephemeral_1h_input_tokens"])) cc += GOT["message.usage.cache_creation.ephemeral_1h_input_tokens"]
+      }
+      cr = GOT["message.usage.cache_read_input_tokens"]
+      cr = isnum(cr) ? cr + 0 : 0
+      ctx = GOT["message.usage.input_tokens"] + cc + cr
+    }
+    if (GOT["message.model"] != "") { model = GOT["message.model"]; break }
+  }
+  if (ctx != "") printf "%.0f %s\n", ctx, (model == "" ? "-" : model)
+}'
+
+# Codex rollout (JSONL) -> a usage line (see usage_report): the newest
+# token_count event with info (context) and the newest with rate limits.
+USAGE_CODEX=$JSON_FN'
+function lim(id, p, w, r) {
+  if (!isdec(p) || !isnum(w) || !isnum(r)) return
+  lims = lims " " id ":" p ":" w ":" r
+}
+BEGIN {
+  jwant("payload.type,payload.info.last_token_usage.total_tokens,payload.info.model_context_window,payload.rate_limits.limit_id,payload.rate_limits.primary.used_percent,payload.rate_limits.primary.window_minutes,payload.rate_limits.primary.resets_at,payload.rate_limits.secondary.used_percent,payload.rate_limits.secondary.window_minutes,payload.rate_limits.secondary.resets_at,payload.rate_limits.plan_type,payload.rate_limits.rate_limit_reached_type")
+  n = 0
+}
+NR == 1 && skip { next }
+index($0, "\"token_count\"") { n++; L[n % 8] = $0 }
+END {
+  ctx = ""; win = "-"; rl = 0; lims = ""; plan = "-"; reached = 0
+  for (k = n; k >= 1 && k > n - 8; k--) {
+    jwalk(L[k % 8])
+    if (GOT["payload.type"] != "token_count") continue
+    if (ctx == "" && isnum(GOT["payload.info.last_token_usage.total_tokens"])) {
+      ctx = GOT["payload.info.last_token_usage.total_tokens"]
+      if (isnum(GOT["payload.info.model_context_window"])) win = GOT["payload.info.model_context_window"]
+    }
+    if (!rl && (("payload.rate_limits.primary.used_percent" in GOT) || ("payload.rate_limits.plan_type" in GOT))) {
+      rl = 1
+      id = GOT["payload.rate_limits.limit_id"]
+      gsub(/[^A-Za-z0-9_.-]/, "", id)
+      if (id == "") id = "codex"
+      lim(id ".primary", GOT["payload.rate_limits.primary.used_percent"], GOT["payload.rate_limits.primary.window_minutes"], GOT["payload.rate_limits.primary.resets_at"])
+      lim(id ".secondary", GOT["payload.rate_limits.secondary.used_percent"], GOT["payload.rate_limits.secondary.window_minutes"], GOT["payload.rate_limits.secondary.resets_at"])
+      p = GOT["payload.rate_limits.plan_type"]
+      if (p ~ /^[A-Za-z0-9_-]+$/ && p != "null") plan = p
+      r = GOT["payload.rate_limits.rate_limit_reached_type"]
+      if (r != "" && r != "null") reached = 1
+    }
+    if (ctx != "" && rl) break
+  }
+  if (ctx != "") print ctx, win, "rollout", 0, 12000, plan, reached lims
+}'
+
+# Gemini CLI chat record (JSONL, or the pretty JSON of older versions) ->
+# "<prompt tokens> <model>" of the newest model response.
+USAGE_GEMINI='
+NR == 1 && skip { next }
+{
+  line = $0
+  if (index(line, "\"tokens\":{")) {
+    if (match(line, /"tokens":[{]"input":[0-9]+/)) {
+      v = substr(line, RSTART, RLENGTH); sub(/.*:/, "", v); inp = v; mdl = ""
+      if (match(line, /[}],"model":"[^"]*"/)) mdl = substr(line, RSTART + 11, RLENGTH - 12)
+    }
+  } else if (line ~ /^[ \t]*"tokens": [{][ \t]*$/) { intok = 1; pinp = "" }
+  else if (intok && line ~ /^[ \t]*"input": [0-9]+/) { v = line; gsub(/[^0-9]/, "", v); pinp = v }
+  else if (intok && line ~ /^[ \t]*[}]/) {
+    intok = 0
+    if (pinp != "") { inp = pinp; mdl = ""; wantm = 1 }
+  } else if (wantm && line ~ /^[ \t]*"model": "/) {
+    m = line; sub(/^[ \t]*"model": "/, "", m); sub(/".*$/, "", m); mdl = m; wantm = 0
+  }
+}
+END { if (inp != "") print inp, (mdl == "" ? "-" : mdl) }'
+
+# Status line data saved by scripts/statusline-tap.sh (optional, the user
+# registers it): "<id>:<used %>:<window minutes>:<reset epoch>" entries.
+STATUSLINE_LIMS=$JSON_FN'
+function lim(id, p, w, r) {
+  if (!isdec(p) || !isnum(w) || !isnum(r) || r + 0 <= now + 0) return
+  printf " %s:%s:%s:%s", id, p, w, r
+}
+BEGIN {
+  jwant("context_window.context_window_size,rate_limits.five_hour.used_percentage,rate_limits.five_hour.resets_at,rate_limits.seven_day.used_percentage,rate_limits.seven_day.resets_at,rate_limits.spend_limit.used_percentage,rate_limits.spend_limit.resets_at,rate_limits.spend_limit.period")
+}
+NR > 1 { s = s $0 "\n" }
+END {
+  jwalk(s)
+  w = GOT["context_window.context_window_size"]
+  printf "%s", (isnum(w) ? w : "-")
+  lim("five_hour", GOT["rate_limits.five_hour.used_percentage"], 300, GOT["rate_limits.five_hour.resets_at"])
+  lim("seven_day", GOT["rate_limits.seven_day.used_percentage"], 10080, GOT["rate_limits.seven_day.resets_at"])
+  p = GOT["rate_limits.spend_limit.period"]
+  pw = (p == "daily" ? 1440 : (p == "weekly" ? 10080 : (p == "monthly" ? 43200 : 0)))
+  lim("spend_limit", GOT["rate_limits.spend_limit.used_percentage"], pw, GOT["rate_limits.spend_limit.resets_at"])
+  printf "\n"
+}'
+
+# A usage line "<ctx> <win|-> <src> <est 0|1> <baseline|-> <plan|-> <reached
+# 0|1> [<id>:<pct>:<win min>:<reset epoch>]..." -> two lines: the OSC 9
+# body and the plaintext fields of the `usage` event.
+USAGE_FMT='
+function num(v) { return v ~ /^[0-9]+$/ }
+function dec(v) { return v ~ /^[0-9]+([.][0-9]+)?$/ }
+NR == 1 {
+  if (!num($1) || !($3 ~ /^[a-z]+$/)) exit
+  osc = "simpleterm:usage v=1 agent=" app " ctx=" $1
+  js = ",\"ctx\":{\"used\":" $1
+  if (num($2)) { osc = osc " win=" $2; js = js ",\"win\":" $2 }
+  if (num($5)) js = js ",\"baseline\":" $5
+  osc = osc " src=" $3; js = js ",\"src\":\"" $3 "\""
+  if ($4 == 1) { osc = osc " est=1"; js = js ",\"est\":true" }
+  js = js "}"
+  la = ""
+  for (i = 8; i <= NF; i++) {
+    if (split($i, P, ":") != 4) continue
+    if (!(P[1] ~ /^[A-Za-z0-9_.-]+$/) || !dec(P[2]) || !num(P[3]) || !num(P[4])) continue
+    osc = osc " lim=" $i
+    la = la (la == "" ? "" : ",") "{\"id\":\"" P[1] "\",\"pct\":" P[2] ",\"win_min\":" P[3] ",\"resets_at\":" P[4] "}"
+  }
+  if ($7 == 1) { osc = osc " lim=reached"; la = la (la == "" ? "" : ",") "{\"id\":\"reached\"}" }
+  js = js ",\"lims\":[" la "]"
+  if ($6 ~ /^[A-Za-z0-9_-]+$/ && $6 != "-") js = js ",\"plan\":\"" $6 "\""
+  print osc
+  print js
+}'
+
+# A file path from the hook input (JSON-escaped) that can be read, or empty.
+input_file() {
+  case $1 in '' | null) return 0 ;; esac
+  p=$(printf '%s\n' "$1" | awk '{
+    s = $0; out = ""
+    for (i = 1; i <= length(s); i++) {
+      c = substr(s, i, 1)
+      if (c == "\\") {
+        e = substr(s, i + 1, 1)
+        if (e != "\\" && e != "/" && e != "\"") exit 1
+        c = e; i++
+      }
+      out = out c
+    }
+    print out
+  }' 2>/dev/null) || return 0
+  [ -f "$p" ] && [ -r "$p" ] && printf '%s' "$p"
+}
+
+# The end of file $1 through awk program $2 (a cut first line is skipped):
+# the last 256 KiB, or the last USAGE_TAIL bytes when that found nothing or
+# no model name (a result ending in " -").
+tail_awk() { # file program
+  size=$(wc -c <"$1" 2>/dev/null | tr -d ' ')
+  is_uint "$size" || return 0
+  for lim in 262144 "$USAGE_TAIL"; do
+    skip=0
+    [ "$size" -gt "$lim" ] && skip=1
+    r=$(tail -c "$lim" "$1" 2>/dev/null | awk -v skip="$skip" -v now="$NOW" "$2" 2>/dev/null)
+    case $r in '' | *' -') ;; *) printf '%s\n' "$r"; return 0 ;; esac
+    [ "$skip" = 1 ] || break
+  done
+  [ -n "$r" ] && printf '%s\n' "$r"
+}
+
+# Context window of a Claude model: what Claude Code would use, from the
+# environment it passed on, or a guess from the model name (est=1).
+claude_window() { # model
+  U_EST=0
+  v=${CLAUDE_CODE_MAX_CONTEXT_TOKENS:-}
+  if is_uint "$v" && [ "$v" -ge 1000 ]; then U_WIN=$v; return; fi
+  case ${CLAUDE_CODE_DISABLE_1M_CONTEXT:-} in 1 | true | TRUE | True) U_WIN=200000; return ;; esac
+  U_EST=1 U_WIN=200000
+  case $(printf '%s' "$1" | tr 'A-Z' 'a-z') in
+    *'[1m]'*) U_WIN=1000000 U_EST=0 ;;
+    *claude-fable-*) U_WIN=1000000 ;;
+    *claude-sonnet-[5-9]* | *claude-sonnet-[1-9][0-9]*) U_WIN=1000000 ;;
+    *claude-opus-4-[7-9]* | *claude-opus-[5-9]* | *claude-opus-[1-9][0-9]*) U_WIN=1000000 ;;
+    *claude-haiku-5-[5-9]* | *claude-haiku-[6-9]* | *claude-haiku-[1-9][0-9]*) U_WIN=1000000 ;;
+  esac
+}
+
+# Sets U_LINE (see USAGE_FMT) for the current event, or leaves it empty.
+usage_compute() {
+  U_LINE=''
+  case $AGENT in
+    claude)
+      reached=0
+      [ "$EVENT" = StopFailure ] && [ "$ERR" = rate_limit ] && reached=1
+      src=transcript ctx='' model=$MODEL
+      if is_uint "$CTXTOK" && [ "$CTXTOK" -gt 0 ]; then
+        # SessionStart (resume, fork) and PostModelSwitch say it themselves.
+        ctx=$CTXTOK src=hook
+      else
+        f=$(input_file "$TPATH")
+        if [ -n "$f" ]; then
+          # Split the awk result into words; no pathname expansion of them.
+          set -f
+          set -- $(tail_awk "$f" "$USAGE_CLAUDE")
+          set +f
+          ctx=${1:-}
+          [ "${2:--}" = - ] || [ -n "$model" ] || model=$2
+        fi
+      fi
+      is_uint "$ctx" || return 0
+      model=$(printf '%s' "$model" | tr -cd 'A-Za-z0-9._:@/[]-')
+      claude_window "$model"
+      lims=''
+      sl=$RUN_DIR/usage.$SID.json
+      if [ -f "$sl" ]; then
+        t=$(head -n 1 "$sl" 2>/dev/null)
+        if is_uint "$t" && [ $((NOW - t)) -le 600 ] && [ $((t - NOW)) -le 60 ]; then
+          set -f
+          set -- $(head -c 65536 "$sl" | awk -v now="$NOW" "$STATUSLINE_LIMS" 2>/dev/null)
+          set +f
+          is_uint "${1:-}" && U_WIN=$1 U_EST=0
+          [ $# -gt 0 ] && shift
+          lims=$*
+        fi
+      fi
+      U_LINE="$ctx $U_WIN $src $U_EST - - $reached $lims"
+      ;;
+    codex)
+      f=$(input_file "$TPATH")
+      [ -n "$f" ] || return 0
+      U_LINE=$(tail_awk "$f" "$USAGE_CODEX")
+      ;;
+    gemini)
+      f=$(input_file "$TPATH")
+      [ -n "$f" ] || return 0
+      set -f
+      set -- $(tail_awk "$f" "$USAGE_GEMINI")
+      set +f
+      is_uint "${1:-}" || return 0
+      win=1048576 est=1
+      case ${2:-} in gemini-*) est=0 ;; gemma-4*) win=256000 est=0 ;; esac
+      U_LINE="$1 $win transcript $est - - 0"
       ;;
   esac
+}
+
+# Reports context and rate limits: an OSC 9 for the terminal (Claude Code in
+# SimpleTerm, USAGE_SEQ) and a `usage` event for the links. Only changes go
+# out. Tunnels get every change; the relay only the turn's last one ($1 =
+# turn), since it costs a push service round trip and the app is away then.
+usage_report() { # turn|update
+  USAGE_SEQ=''
+  [ "$(conf_int usage 1)" = 0 ] && return 0
+  usage_compute
+  [ -n "$U_LINE" ] || return 0
+  out=$(printf '%s\n' "$U_LINE" | awk -v app="$APP" "$USAGE_FMT" 2>/dev/null)
+  osc=$(printf '%s\n' "$out" | sed -n 1p)
+  USAGE_JSON=$(printf '%s\n' "$out" | sed -n 2p)
+  [ -n "$osc" ] && [ -n "$USAGE_JSON" ] || return 0
+  scope=''
+  if [ "$(cat "$RUN_DIR/$SID.usage" 2>/dev/null)" != "$osc" ]; then
+    printf '%s\n' "$osc" >"$RUN_DIR/$SID.usage" 2>/dev/null
+    USAGE_SEQ='\u001b]9;'$osc'\u0007'
+    scope=tunnel
+  fi
+  if [ "$1" = turn ] && [ "$(cat "$RUN_DIR/$SID.usage-relay" 2>/dev/null)" != "$osc" ]; then
+    printf '%s\n' "$osc" >"$RUN_DIR/$SID.usage-relay" 2>/dev/null
+    if [ -n "$scope" ]; then scope=all; else scope=relay; fi
+  fi
+  [ -n "$scope" ] || return 0
+  urid=$(rand_hex 8)
+  is_hex "$urid" 16 && send_bg usage "$urid" "$scope"
+}
+
+# --- the `simpleterm` command --------------------------------------------------
+
+# Keeps ~/.simpleterm/bin/simpleterm pointing at this plugin's
+# simpleterm-notify.sh. Rewritten only when missing, when the script it
+# names is gone (the plugin moved: updated or removed) or when older.
+ensure_cli() {
+  [ -d "$ST_DIR" ] || return 0
+  here=${0%/*}
+  case $here in /*) ;; *) here=$(cd "$here" 2>/dev/null && pwd) || return 0 ;; esac
+  src=$here/simpleterm-notify.sh
+  [ -f "$src" ] || return 0
+  case $src in *"'"* | *"$CR"* | *'
+'*) return 0 ;; esac
+  w=$ST_DIR/bin/simpleterm
+  if [ -f "$w" ]; then
+    cur=$(sed -n "s/^s='\\(.*\\)'\$/\\1/p" "$w" 2>/dev/null | head -n 1)
+    rev=$(sed -n 's/^# rev=\([0-9]*\)$/\1/p' "$w" 2>/dev/null | head -n 1)
+    [ -n "$cur" ] && [ -f "$cur" ] && is_uint "$rev" && [ "$rev" -ge "$CLI_REV" ] && return 0
+  fi
+  mkdir -p "$ST_DIR/bin" 2>/dev/null || return 0
+  {
+    printf '#!/bin/sh\n'
+    printf '# simpleterm: written by the SimpleTerm agent hooks plugin, which keeps it\n'
+    printf '# pointing at the plugin (see its README). Edits are overwritten.\n'
+    printf '# rev=%s\n' "$CLI_REV"
+    printf "s='%s'\n" "$src"
+    printf '[ -f "$s" ] || { echo "simpleterm: $s is gone; start your agent once to update this command" >&2; exit 1; }\n'
+    printf 'exec sh "$s" "$@"\n'
+  } >"$w.$$" 2>/dev/null && chmod 755 "$w.$$" 2>/dev/null && mv -f "$w.$$" "$w" 2>/dev/null &&
+    log "cli installed"
+  rm -f "$w.$$" 2>/dev/null
+}
+
+# --- de-duplication ------------------------------------------------------------
+
+# True for the first delivery of an event (key $1) within 30 seconds. Grok
+# Build loads a plugin name once (the Claude Code plugin and the one installed
+# in Grok are the same `simpleterm`), but a copy configured another way
+# (another plugin name, a settings file) runs the same hook again; the copies
+# of one event carry the same timestamp.
+once() { # key
+  f=$RUN_DIR/dd.$1
+  ( set -C; printf '%s\n' "$NOW" >"$f" ) 2>/dev/null && return 0
+  t=$(cat "$f" 2>/dev/null)
+  if is_uint "$t" && [ $((NOW - t)) -gt 30 ]; then
+    rm -f "$f"
+    ( set -C; printf '%s\n' "$NOW" >"$f" ) 2>/dev/null && return 0
+  fi
+  log "duplicate $EVENT"
+  return 1
 }
 
 # --- main ----------------------------------------------------------------
 
 case $AGENT in
-  claude) APP=claude-code ;;
+  claude)
+    APP=claude-code
+    # Grok Build runs Claude Code plugins' hooks (and this plugin installed
+    # in Grok uses the same hooks file): it sets GROK_HOOK_EVENT.
+    if [ -n "${GROK_HOOK_EVENT:-}" ]; then AGENT=grok APP=grok-build; fi
+    ;;
   codex | codex-notify) APP=codex ;;
+  gemini) APP=gemini-cli ;;
+  agy) APP=antigravity ;;
+  grok) APP=grok-build ;;
+  opencode) APP=opencode ;;
+  notify) APP=script ;;
   *) exit 0 ;;
 esac
 
@@ -629,13 +1087,20 @@ if [ "$AGENT" = codex-notify ]; then
   INPUT=''
   for a in "$@"; do INPUT=$a; done
   [ "${#INPUT}" -le "$MAX_INPUT" ] || INPUT=''
+elif [ "$AGENT" = notify ]; then
+  INPUT=''
 else
   INPUT=$(head -c "$MAX_INPUT" 2>/dev/null) || INPUT=$(dd bs=4096 count=64 2>/dev/null)
 fi
 
 # Nothing to do without a link or a SimpleTerm session.
 LINKS=$(list_links)
-[ -n "$LINKS" ] || [ "${SIMPLETERM:-}" = 1 ] || exit 0
+if [ -z "$LINKS" ] && [ "${SIMPLETERM:-}" != 1 ]; then
+  [ "$AGENT" = notify ] && [ -t 2 ] &&
+    echo 'simpleterm: not a SimpleTerm session and no linked device (~/.simpleterm/links); nothing sent' >&2
+  agy_default
+  exit 0
+fi
 
 mkdir -p "$RUN_DIR" 2>/dev/null
 chmod 700 "$ST_DIR" "$RUN_DIR" 2>/dev/null
@@ -660,43 +1125,113 @@ if [ -n "$LINKS" ]; then
   done
 fi
 
-EVENT='' NTYPE='' TOOL='' DETAIL='' DESC='' SID='' CWD='' LAST='' ERR='' QTEXT='' FIRSTIN='' NTYPE2=''
-while IFS= read -r kv; do
-  case $kv in
-    hook_event_name=*) EVENT=${kv#*=} ;;
-    notification_type=*) NTYPE=${kv#*=} ;;
-    type=*) NTYPE2=${kv#*=} ;;
-    tool_name=*) TOOL=${kv#*=} ;;
-    tool_input.command=* | tool_input.file_path=* | tool_input.url=*) [ -n "$DETAIL" ] || DETAIL=${kv#*=} ;;
-    tool_input.description=*) DESC=${kv#*=} ;;
-    tool_input.questions.0.question=*) QTEXT=${kv#*=} ;;
-    session_id=*) SID=${kv#*=} ;;
-    cwd=*) CWD=${kv#*=} ;;
-    message=*) LAST=${kv#*=} ;;
-    last_assistant_message=*) LAST=${kv#*=} ;;
-    last-assistant-message=*) LAST=${kv#*=} ;;
-    input-messages.0=*) FIRSTIN=${kv#*=} ;;
-    error=*) ERR=${kv#*=} ;;
-  esac
-done <<EOF
-$(printf '%s' "$INPUT" | awk -v want='hook_event_name,notification_type,type,tool_name,tool_input.command,tool_input.file_path,tool_input.url,tool_input.description,tool_input.questions.0.question,session_id,cwd,message,last_assistant_message,last-assistant-message,input-messages.0,error' "$JSON_GET" 2>/dev/null)
-EOF
-
-[ "$AGENT" = codex-notify ] && EVENT=notify
-SID=$(printf '%s' "$SID" | tr -c 'A-Za-z0-9_-' '_' | cut -c1-80)
-[ -n "$SID" ] || SID=nosession
-
 RID=$(rand_hex 8)
 TS=$(date +%s)
+NOW=$TS
 if [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ]; then
   [ -n "${SIMPLETERM_HOOK_TEST_RID:-}" ] && RID=$SIMPLETERM_HOOK_TEST_RID
   [ -n "${SIMPLETERM_HOOK_TEST_TS:-}" ] && TS=$SIMPLETERM_HOOK_TEST_TS
 fi
 is_hex "$RID" 16 || RID=''
 is_uint "$TS" || TS=0
+is_uint "$NOW" || NOW=0
 [ -n "$RID" ] || LINKS=''
+USAGE_SEQ='' USAGE_JSON='' TITLE='' MSG=''
 
-CWD_BASE=$(json_trim "$CWD" 64 256 base)
+# `simpleterm notify "title" ["body"]`: an OSC 777 notification on this
+# terminal (in a SimpleTerm session) and a `notify` event to every link.
+if [ "$AGENT" = notify ]; then
+  t=$(plain_cut "${2:-}" 256)
+  b=$(plain_cut "${3:-}" 800)
+  [ -n "$t$b" ] || finish
+  if [ "${SIMPLETERM:-}" = 1 ] && { : >/dev/tty; } 2>/dev/null; then
+    if [ -n "${TMUX:-}" ]; then
+      # tmux forwards it only with `set -g allow-passthrough on`.
+      printf '\033Ptmux;\033\033]777;notify;%s;%s\007\033\\' "$t" "$b" >/dev/tty 2>/dev/null
+    else
+      printf '\033]777;notify;%s;%s\007' "$t" "$b" >/dev/tty 2>/dev/null
+    fi
+  fi
+  TITLE=$(json_text "$t" 64 256)
+  MSG=$(json_text "$b" 200 800)
+  CWD_BASE=$(json_text "$PWD" 64 256 base)
+  send_bg notify
+  finish
+fi
+
+# Fields of the agent's event JSON. Agents name the same things differently
+# (Grok sends camelCase and snake_case, Antigravity camelCase).
+case $AGENT in
+  claude | opencode)
+    WANT='hook_event_name,notification_type,tool_name,tool_input.command,tool_input.file_path,tool_input.url,tool_input.description,tool_input.questions.0.question,session_id,cwd,message,last_assistant_message,error,transcript_path,context_tokens,model,to_model'
+    ;;
+  codex)
+    WANT='hook_event_name,tool_name,tool_input.command,tool_input.file_path,tool_input.description,session_id,cwd,last_assistant_message,transcript_path'
+    ;;
+  codex-notify) WANT='type,cwd,last-assistant-message,input-messages.0' ;;
+  gemini)
+    WANT='hook_event_name,notification_type,message,details.type,details.command,details.rootCommand,details.filePath,details.fileName,details.toolName,details.serverName,details.urls.0,details.prompt,prompt_response,session_id,cwd,transcript_path'
+    ;;
+  agy)
+    WANT='conversationId,workspacePaths.0,toolCall.name,toolCall.args.CommandLine,toolCall.args.Cwd,toolCall.args.questions.0.question,toolCall.args.Action,toolCall.args.Target,terminationReason,error,fullyIdle'
+    ;;
+  grok)
+    WANT='hook_event_name,hookEventName,notificationType,sessionId,cwd,message,lastAssistantMessage,error,reason,promptId,timestamp'
+    ;;
+esac
+
+EVENT='' NTYPE='' TOOL='' DETAIL='' DESC='' SID='' CWD='' LAST='' ERR='' QTEXT='' FIRSTIN='' NTYPE2=''
+TPATH='' CTXTOK='' MODEL='' GTYPE='' FULLYIDLE='' TERMREASON='' EXTRA='' GKEY='' REASON=''
+while IFS= read -r kv; do
+  case $kv in
+    # Grok sends both: hook_event_name has Claude's PascalCase names.
+    hook_event_name=*) EVENT=${kv#*=} ;;
+    hookEventName=*) [ -n "$EVENT" ] || EVENT=${kv#*=} ;;
+    notification_type=* | notificationType=*) [ -n "$NTYPE" ] || NTYPE=${kv#*=} ;;
+    type=*) NTYPE2=${kv#*=} ;;
+    tool_name=* | toolCall.name=*) TOOL=${kv#*=} ;;
+    tool_input.command=* | tool_input.file_path=* | tool_input.url=* | toolCall.args.CommandLine=* | toolCall.args.Target=*) [ -n "$DETAIL" ] || DETAIL=${kv#*=} ;;
+    toolCall.args.Action=*) DESC=${kv#*=} ;;
+    details.filePath=*) DETAIL=${kv#*=} ;;
+    details.command=* | details.fileName=* | details.serverName=* | details.urls.0=* | details.prompt=*) [ -n "$DETAIL" ] || DETAIL=${kv#*=} ;;
+    details.type=*) GTYPE=${kv#*=} ;;
+    details.rootCommand=* | details.toolName=*) [ -n "$TOOL" ] || TOOL=${kv#*=} ;;
+    tool_input.description=*) DESC=${kv#*=} ;;
+    tool_input.questions.0.question=* | toolCall.args.questions.0.question=*) QTEXT=${kv#*=} ;;
+    session_id=* | sessionId=* | conversationId=*) [ -n "$SID" ] || SID=${kv#*=} ;;
+    cwd=* | workspacePaths.0=*) [ -n "$CWD" ] || CWD=${kv#*=} ;;
+    toolCall.args.Cwd=*) EXTRA=${kv#*=} ;;
+    message=*) LAST=${kv#*=} ;;
+    last_assistant_message=* | lastAssistantMessage=* | prompt_response=*) LAST=${kv#*=} ;;
+    last-assistant-message=*) LAST=${kv#*=} ;;
+    input-messages.0=*) FIRSTIN=${kv#*=} ;;
+    error=*) ERR=${kv#*=} ;;
+    transcript_path=*) TPATH=${kv#*=} ;;
+    context_tokens=*) CTXTOK=${kv#*=} ;;
+    model=* | to_model=*) MODEL=${kv#*=} ;;
+    fullyIdle=*) FULLYIDLE=${kv#*=} ;;
+    terminationReason=*) TERMREASON=${kv#*=} ;;
+    reason=*) REASON=${kv#*=} ;;
+    promptId=* | timestamp=*) GKEY=$GKEY.${kv#*=} ;;
+  esac
+done <<EOF
+$(printf '%s' "$INPUT" | awk -v want="$WANT" "$JSON_GET" 2>/dev/null)
+EOF
+
+[ "$AGENT" = codex-notify ] && EVENT=notify
+# Antigravity hooks name their event on the command line.
+[ "$AGENT" = agy ] && EVENT=$MODE
+if [ "$AGENT" = grok ]; then
+  case $EVENT in
+    notification) EVENT=Notification ;;
+    stop) EVENT=Stop ;;
+    stop_failure) EVENT=StopFailure ;;
+  esac
+fi
+SID=$(printf '%s' "$SID" | tr -c 'A-Za-z0-9_-' '_' | cut -c1-80)
+[ -n "$SID" ] || SID=nosession
+
+CWD_BASE=$(json_trim "${CWD:-$EXTRA}" 64 256 base)
 FP=$(printf '%s\t%s' "$TOOL" "$(json_trim "$DETAIL" 200 800)" | cksum | awk '{ print $1 }')
 
 # Lets a waiting permission hook see that the agent moved on. A new turn
@@ -709,8 +1244,14 @@ note() { # turn | tool fingerprint
   fi
 }
 
+# A turn ended: housekeeping.
+turn_end() {
+  ensure_cli
+  find "$RUN_DIR" -type f -mtime +0 -exec rm -f {} + 2>/dev/null
+}
+
 case $AGENT:$EVENT in
-  claude:PermissionRequest | codex:PermissionRequest)
+  claude:PermissionRequest | codex:PermissionRequest | opencode:PermissionRequest)
     if [ "$MODE" = signal ]; then
       print_state waiting "approve $TOOL: $DETAIL"
     elif [ "$TOOL" = AskUserQuestion ]; then
@@ -748,19 +1289,32 @@ case $AGENT:$EVENT in
     ;;
   claude:UserPromptSubmit)
     note turn
+    usage_report update
     print_state running
     ;;
   claude:PostToolUse | claude:PostToolUseFailure)
     note tool "$FP"
+    # Context grows with each tool call; look again every 20 seconds at most.
+    t=$(cat "$RUN_DIR/$SID.ut" 2>/dev/null)
+    if ! is_uint "$t" || [ $((NOW - t)) -ge 20 ] || [ "$t" -gt "$NOW" ]; then
+      printf '%s\n' "$NOW" >"$RUN_DIR/$SID.ut" 2>/dev/null
+      usage_report update
+    fi
     print_state running
+    ;;
+  claude:SessionStart | claude:PostCompact | claude:PostModelSwitch)
+    usage_report update
+    print_usage
+    [ "$EVENT" = SessionStart ] && ensure_cli
     ;;
   claude:Stop | codex:Stop)
     note turn
     case $LAST in '{\"title\":'*) finish ;; esac
     MSG=$(json_trim "$LAST" 200 800)
     send_bg done
+    usage_report turn
     print_state done
-    find "$RUN_DIR" -type f -mtime +0 -exec rm -f {} + 2>/dev/null
+    turn_end
     ;;
   claude:StopFailure)
     note turn
@@ -768,13 +1322,107 @@ case $AGENT:$EVENT in
     case $ERR in authentication_failed | oauth_org_not_allowed | cloud_credential_error) ev=auth ;; esac
     MSG=$(json_trim "$ERR: $LAST" 200 800)
     send_bg "$ev"
+    usage_report turn
     print_state done
+    ;;
+  codex:UserPromptSubmit | codex:SessionStart | codex:PostCompact)
+    usage_report update
     ;;
   codex-notify:notify)
     [ "$NTYPE2" = agent-turn-complete ] || finish
     case $FIRSTIN in 'Generate a concise, single-line task title'*) finish ;; esac
     MSG=$(json_trim "$LAST" 200 800)
     send_bg done
+    ;;
+  gemini:Notification)
+    # Gemini CLI asks after this hook returns and takes no answer from it:
+    # an alert only (`question`, the event for "needs input").
+    [ "$NTYPE" = ToolPermission ] || finish
+    case $GTYPE in edit) TOOL=edit ;; info) TOOL=${TOOL:-fetch} ;; esac
+    MSG=$(json_trim "approve ${TOOL:-$GTYPE}: ${DETAIL:-$LAST}" 200 800)
+    send_bg question
+    ;;
+  gemini:AfterAgent)
+    MSG=$(json_trim "$LAST" 200 800)
+    send_bg done
+    usage_report turn
+    turn_end
+    ;;
+  agy:PreToolUse)
+    case $TOOL in
+      run_command)
+        # Opt-in (agy_wait): this hook runs before every command, before the
+        # permission policy, so waiting here delays commands the policy
+        # would allow, and the terminal shows no prompt meanwhile.
+        [ -n "$LINKS" ] && [ "$(conf_int agy_wait 0)" -gt 0 ] || finish
+        MSG=$(json_trim "approve $TOOL: $DETAIL" 200 800)
+        permission_flow
+        ;;
+      ask_question)
+        MSG=$(json_trim "$QTEXT" 200 800)
+        send_bg question
+        ;;
+      ask_permission)
+        MSG=$(json_trim "approve ${DESC:-$TOOL}: $DETAIL" 200 800)
+        send_bg question
+        ;;
+    esac
+    ;;
+  agy:Stop)
+    # Only a fully idle agent is done (background tasks may still run).
+    # Cancelling (Esc) sends no Stop at all.
+    if [ -n "$ERR" ] && [ "$ERR" != null ]; then
+      MSG=$(json_trim "${TERMREASON:-error}: $ERR" 200 800)
+      send_bg error
+    elif [ "$FULLYIDLE" = true ]; then
+      MSG=''
+      send_bg done
+    fi
+    turn_end
+    ;;
+  grok:Notification)
+    # Grok asks in its own prompt and takes no answer from a hook:
+    # permission_prompt (only while its permission UI waits) and idle_prompt
+    # are alerts. The key includes the event's timestamp, the same in every
+    # copy of one event.
+    case $NTYPE in
+      permission_prompt | idle_prompt) ;;
+      *) finish ;;
+    esac
+    once "$(printf '%s|%s|%s|%s|%s' "$EVENT" "$SID" "$NTYPE" "$GKEY" "$LAST" | cksum | awk '{ print $1 }')" || finish
+    MSG=$(json_trim "$LAST" 200 800)
+    send_bg question
+    ;;
+  grok:Stop | grok:StopFailure)
+    # A Stop also comes when the session closes (reason channel_closed or
+    # shutdown); only end_turn ends a turn.
+    [ "$EVENT" = Stop ] && [ -n "$REASON" ] && [ "$REASON" != end_turn ] && finish
+    once "$(printf '%s|%s|%s|%s|%s' "$EVENT" "$SID" "$GKEY" "$ERR" "$LAST" | cksum | awk '{ print $1 }')" || finish
+    if [ "$EVENT" = Stop ]; then
+      MSG=$(json_trim "$LAST" 200 800)
+      send_bg done
+    else
+      ev=error
+      case $ERR in authentication_failed | oauth_org_not_allowed | cloud_credential_error) ev=auth ;; esac
+      MSG=$(json_trim "$ERR: $LAST" 200 800)
+      send_bg "$ev"
+    fi
+    turn_end
+    ;;
+  opencode:Notification)
+    MSG=$(json_trim "$LAST" 200 800)
+    send_bg question
+    ;;
+  opencode:Stop)
+    MSG=$(json_trim "$LAST" 200 800)
+    send_bg done
+    turn_end
+    ;;
+  opencode:StopFailure)
+    ev=error
+    case $ERR in ProviderAuthError | *[Aa]uth*) ev=auth ;; esac
+    MSG=$(json_trim "$ERR: $LAST" 200 800)
+    send_bg "$ev"
     ;;
 esac
 finish

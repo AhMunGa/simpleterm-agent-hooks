@@ -1,0 +1,23 @@
+{
+  "simpleterm-agent-hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "run_command|ask_question|ask_permission",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh ./scripts/agent-hook.sh agy PreToolUse",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "sh ./scripts/agent-hook.sh agy Stop",
+        "timeout": 30
+      }
+    ]
+  }
+}

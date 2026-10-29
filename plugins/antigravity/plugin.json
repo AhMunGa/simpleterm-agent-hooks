@@ -1,0 +1,8 @@
+{
+  "name": "simpleterm-antigravity",
+  "displayName": "SimpleTerm agent hooks",
+  "description": "Alerts in the SimpleTerm app when Antigravity finishes, fails or asks you something; optional approvals of commands from your phone or tablet",
+  "version": "0.3.0",
+  "homepage": "https://github.com/AhMunGa/simpleterm-agent-hooks",
+  "license": "MIT"
+}

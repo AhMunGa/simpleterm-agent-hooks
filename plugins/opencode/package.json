@@ -1,0 +1,14 @@
+{
+  "name": "simpleterm-opencode",
+  "version": "0.3.0",
+  "description": "SimpleTerm agent hooks for OpenCode 2.x: permission approvals and alerts in the SimpleTerm app",
+  "type": "module",
+  "exports": "./index.js",
+  "license": "MIT",
+  "homepage": "https://github.com/AhMunGa/simpleterm-agent-hooks",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AhMunGa/simpleterm-agent-hooks.git",
+    "directory": "plugins/opencode"
+  }
+}

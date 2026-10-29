@@ -4,6 +4,7 @@
   python3 -I tests/run_tests.py                 # sh hook, every shell found
   python3 -I tests/run_tests.py --shell /bin/dash
   python3 -I tests/run_tests.py --pwsh /path/to/pwsh   # PowerShell hook
+  python3 -I tests/run_tests.py --hook old/agent-hook.sh # another sh hook (baseline)
 
 Each suite gets its own temporary HOME (with ~/.simpleterm/links/*.conf) and
 its own mock_relay.py process. The sh hook is run once per shell × openssl
@@ -18,6 +19,8 @@ import argparse
 import hashlib
 import json
 import os
+import pty
+import select
 import shutil
 import subprocess
 import sys
@@ -30,6 +33,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 HOOK_SH = ROOT / "plugins" / "simpleterm" / "scripts" / "agent-hook.sh"
+SCRIPTS = HOOK_SH.parent
 HOOK_PS1 = ROOT / "plugins" / "simpleterm" / "scripts" / "agent-hook.ps1"
 MOCK = HERE / "mock_relay.py"
 
@@ -101,8 +105,20 @@ class Suite:
                 os.symlink(src, self.bin / u)
         os.symlink("/usr/bin/curl", self.bin / "curl")
         os.symlink(openssl or "/usr/bin/openssl", self.bin / "openssl")
+        if kind == "sh":  # `sh` (the simpleterm command, a status line command) is the shell under test
+            os.symlink(argv[0], self.bin / "sh")
+            os.symlink(argv[0], self.bare / "sh")
+        self.relay = None
+        self.start_relay()
+
+    def start_relay(self):
+        """A fresh relay on a new port: a background send left over from the previous case
+        (late under load) then fails instead of landing in this case's records."""
+        if self.relay:
+            self.relay.terminate()
+            self.relay.wait(5)
         self.relay = subprocess.Popen(
-            [sys.executable, "-I", str(MOCK), "--openssl", openssl or "/usr/bin/openssl"],
+            [sys.executable, "-I", str(MOCK), "--openssl", self.openssl or "/usr/bin/openssl"],
             stdout=subprocess.PIPE, text=True,
         )
         self.port = int(self.relay.stdout.readline().split()[1])
@@ -129,6 +145,7 @@ class Suite:
         st = self.home / ".simpleterm"
         shutil.rmtree(st, ignore_errors=True)
         (st / "links").mkdir(parents=True)
+        self.start_relay()
         cfg = {}
         for link, opts in links:
             lines = [
@@ -392,7 +409,7 @@ def t_tunnel(s):
         s.check("tunnel first: background event reaches the tunnel before the relay answers",
                 got and el < 2.5, "%.2fs" % el)
         s.check("tunnel first: relay still gets it",
-                wait_for(lambda: s.records("/v1/ingest"), 10), str(s.records())[:200])
+                wait_for(lambda: s.records("/v1/ingest"), 20), str(s.records())[:200])
     finally:
         tun.terminate()
         tun.wait(5)
@@ -694,9 +711,642 @@ def t_external_printf(s):
     s.check("external printf: no background send either", not s.records("/v1/ingest"))
 
 
+# --- usage fixtures (keys and numbers only; no real conversation) -------------
+
+def claude_line(model="claude-opus-5-5", inp=10, cc=0, cr=5000, e5=100, e1=200, side=False, decoy=True):
+    text = 'decoy \\"usage\\":{\\"input_tokens\\":999999} \\"type\\":\\"assistant\\"' if decoy else "x"
+    return json.dumps({
+        "parentUuid": "p", "isSidechain": side,
+        "message": {"model": model, "id": "m", "type": "message", "role": "assistant",
+                    "content": [{"type": "text", "text": json.loads('"%s"' % text)}],
+                    "usage": {"input_tokens": inp, "cache_creation_input_tokens": cc, "cache_read_input_tokens": cr,
+                              "cache_creation": {"ephemeral_5m_input_tokens": e5, "ephemeral_1h_input_tokens": e1},
+                              "output_tokens": 50, "iterations": [{"input_tokens": 77}]}},
+        "requestId": "r", "type": "assistant", "uuid": "a", "timestamp": "t", "sessionId": "s",
+    }, separators=(",", ":"))
+
+
+def claude_user_line(size=40):
+    return json.dumps({"parentUuid": "p", "isSidechain": False, "type": "user",
+                       "message": {"role": "user", "content": "u" * size}, "uuid": "u"}, separators=(",", ":"))
+
+
+COMPACT_LINE = json.dumps({"parentUuid": None, "isSidechain": False, "type": "system", "subtype": "compact_boundary",
+                           "content": "Conversation compacted", "compactMetadata": {"trigger": "auto", "preTokens": 180000,
+                                                                                     "postTokens": 42000}}, separators=(",", ":"))
+
+
+def codex_token_line(total=15159, window=258400, rl=True, reached=None):
+    rate = None
+    if rl:
+        rate = {"limit_id": "codex", "limit_name": None,
+                "primary": {"used_percent": 4.0, "window_minutes": 300, "resets_at": 1795746291},
+                "secondary": {"used_percent": 12.5, "window_minutes": 10080, "resets_at": 1796000000},
+                "credits": None, "plan_type": "plus", "rate_limit_reached_type": reached}
+    info = None if total is None else {"total_token_usage": {"total_tokens": 99999},
+                                       "last_token_usage": {"input_tokens": total - 159, "cached_input_tokens": 0,
+                                                            "output_tokens": 159, "total_tokens": total},
+                                       "model_context_window": window}
+    return json.dumps({"timestamp": "t", "ordinal": 1, "type": "event_msg",
+                       "payload": {"type": "token_count", "info": info, "rate_limits": rate}}, separators=(",", ":"))
+
+
+GEMINI_JSONL = "\n".join([
+    json.dumps({"id": "1", "timestamp": "t", "type": "user", "content": [{"text": "q"}]}, separators=(",", ":")),
+    json.dumps({"id": "2", "timestamp": "t", "type": "gemini", "content": "a", "thoughts": [],
+                "tokens": {"input": 33435, "output": 185, "cached": 0, "thoughts": 0, "tool": 0, "total": 33620},
+                "model": "gemini-3.1-pro-preview"}, separators=(",", ":")),
+]) + "\n"
+
+GEMINI_PRETTY = json.dumps({"sessionId": "s", "messages": [
+    {"id": "1", "type": "user", "content": "q"},
+    {"id": "2", "type": "gemini", "content": "a", "thoughts": [],
+     "tokens": {"input": 7682, "output": 56, "cached": 3287, "thoughts": 163, "tool": 0, "total": 7901},
+     "model": "gemini-3.1-pro-preview"}]}, indent=2) + "\n"
+
+STATUSLINE = {
+    "session_id": "u-claude", "transcript_path": "/x/t.jsonl", "model": {"id": "claude-opus-5-5", "display_name": "Opus"},
+    "context_window": {"total_input_tokens": 15500, "total_output_tokens": 1200, "context_window_size": 200000,
+                       "used_percentage": 8, "current_usage": {"input_tokens": 8500, "output_tokens": 1200,
+                                                               "cache_creation_input_tokens": 5000,
+                                                               "cache_read_input_tokens": 2000}},
+    "rate_limits": {"five_hour": {"used_percentage": 23.5, "resets_at": 4102444800},
+                    "seven_day": {"used_percentage": 41.2, "resets_at": 4102444800},
+                    "spend_limit": {"used_percentage": 3, "resets_at": 1000}},
+}
+
+
+def write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def ingests(s, ev=None, ctl=None):
+    recs = [r for r in (ctl("/_ctl/records")["records"] if ctl else s.records()) if r["path"] == "/v1/ingest"]
+    return [r for r in recs if ev is None or (r.get("body") or {}).get("ev") == ev]
+
+
+def seqs(out):
+    j = decision_json(out) or {}
+    return j.get("terminalSequence", "")
+
+
+USAGE_OSC_CLAUDE = "\x1b]9;simpleterm:usage v=1 agent=claude-code ctx=5310 win=1000000 src=transcript est=1\x07"
+
+
+def t_usage_claude(s):
+    """Context from the transcript: OSC 9 on the terminal, `usage` to links (#342)."""
+    s.setup([(LINK_A, {"push": "disabled"})])
+    tr = write(s.tmp / "claude" / "t1.jsonl", "\n".join([
+        claude_user_line(), claude_line(inp=1, cr=1, model="claude-opus-5-5"), claude_line(),
+        claude_line(model="claude-opus-5-5", inp=3, side=True), claude_line(model="<synthetic>", inp=0, cr=0, e5=0, e1=0),
+        claude_user_line()]) + "\n")
+    stop = {"session_id": "u-claude", "transcript_path": str(tr), "cwd": "/w/app", "hook_event_name": "Stop",
+            "last_assistant_message": "Done."}
+    rc, out, err, el = s.run("claude", json.dumps(stop), {"SIMPLETERM": "1"})
+    s.check("usage claude: done + usage sequences in one terminalSequence",
+            seqs(out) == "\x1b]9;simpleterm:state=done\x07" + USAGE_OSC_CLAUDE, repr(out))
+    rec = wait_for(lambda: ingests(s, "usage"), 8)
+    p = rec[0].get("plain_json", {}) if rec else {}
+    s.check("usage claude: usage event to the link",
+            p.get("ctx") == {"used": 5310, "win": 1000000, "src": "transcript", "est": True} and p.get("lims") == []
+            and p.get("app") == "claude-code" and p.get("cwd") == "app" and "msg" not in p, str(p))
+    s.check("usage claude: plaintext field order", rec and rec[0]["plain"].startswith(
+        '{"v":1,"rid":"%s","ev":"usage","app":"claude-code","host":"dev-box","cwd":"app","ctx":{' % p.get("rid")),
+        rec[0]["plain"] if rec else "")
+    s.check("usage claude: own rid", rec and len({r["body"]["rid"] for r in ingests(s)}) == 2, str(ingests(s))[:300])
+    # Unchanged: nothing more (no sequence, no event).
+    s.ctl("/_ctl/reset", {})
+    rc, out, err, el = s.run("claude", json.dumps(stop), {"SIMPLETERM": "1"})
+    time.sleep(1.5)
+    s.check("usage claude: unchanged usage is not repeated",
+            seqs(out) == "\x1b]9;simpleterm:state=done\x07" and not ingests(s, "usage"), repr(out))
+    # A compaction after the last response: its postTokens.
+    with open(tr, "a") as f:
+        f.write(COMPACT_LINE + "\n")
+    s.ctl("/_ctl/reset", {})
+    rc, out, err, el = s.run("claude", json.dumps(dict(stop, hook_event_name="PostCompact", trigger="auto")), {"SIMPLETERM": "1"})
+    s.check("usage claude: PostCompact uses postTokens",
+            seqs(out) == "\x1b]9;simpleterm:usage v=1 agent=claude-code ctx=42000 win=1000000 src=transcript est=1\x07", repr(out))
+    # SessionStart (resume) and PostModelSwitch report context_tokens themselves.
+    rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-claude", "hook_event_name": "PostModelSwitch",
+                                                   "transcript_path": str(tr), "to_model": "claude-sonnet-4-6",
+                                                   "context_tokens": 51000, "source": "command"}), {"SIMPLETERM": "1"})
+    s.check("usage claude: PostModelSwitch context_tokens + new model window",
+            seqs(out) == "\x1b]9;simpleterm:usage v=1 agent=claude-code ctx=51000 win=200000 src=hook est=1\x07", repr(out))
+    rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-claude", "hook_event_name": "PostModelSwitch",
+                                                   "to_model": "claude-sonnet-4-6", "context_tokens": 52000}),
+                             {"SIMPLETERM": "1", "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"})
+    s.check("usage claude: CLAUDE_CODE_MAX_CONTEXT_TOKENS is exact",
+            seqs(out) == "\x1b]9;simpleterm:usage v=1 agent=claude-code ctx=52000 win=1000000 src=hook\x07", repr(out))
+    rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-claude", "hook_event_name": "SessionStart", "source": "resume",
+                                                   "model": "claude-opus-4-6[1m]", "context_tokens": 54000}), {"SIMPLETERM": "1"})
+    s.check("usage claude: a [1m] model is 1M, exact",
+            seqs(out) == "\x1b]9;simpleterm:usage v=1 agent=claude-code ctx=54000 win=1000000 src=hook\x07", repr(out))
+    rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-claude", "hook_event_name": "PostModelSwitch",
+                                                   "to_model": "claude-opus-5-5", "context_tokens": 53000}),
+                             {"SIMPLETERM": "1", "CLAUDE_CODE_DISABLE_1M_CONTEXT": "1"})
+    s.check("usage claude: CLAUDE_CODE_DISABLE_1M_CONTEXT=1 is 200K",
+            "ctx=53000 win=200000 src=hook\x07" in seqs(out), repr(out))
+    # Rate limit reached (StopFailure rate_limit).
+    s.ctl("/_ctl/reset", {})
+    rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-claude", "transcript_path": str(tr), "hook_event_name": "StopFailure",
+                                                   "error": "rate_limit", "last_assistant_message": "API Error"}), {"SIMPLETERM": "1"})
+    s.check("usage claude: StopFailure rate_limit -> lim=reached",
+            seqs(out) == "\x1b]9;simpleterm:state=done\x07\x1b]9;simpleterm:usage v=1 agent=claude-code ctx=42000 win=1000000"
+                          " src=transcript est=1 lim=reached\x07", repr(out))
+    rec = wait_for(lambda: ingests(s, "usage"), 8)
+    s.check("usage claude: reached in the event", rec and rec[0]["plain_json"].get("lims") == [{"id": "reached"}],
+            str(rec[0].get("plain_json") if rec else None))
+    # No SimpleTerm session: no sequence, the link still gets it.
+    s.ctl("/_ctl/reset", {})
+    rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-c2", "transcript_path": str(tr), "hook_event_name": "Stop",
+                                                   "last_assistant_message": "ok"}))
+    s.check("usage claude: no output without SIMPLETERM", out == "", out)
+    s.check("usage claude: link gets it without SIMPLETERM", wait_for(lambda: ingests(s, "usage"), 8))
+    # usage=0 turns it off.
+    s.setup([(LINK_A, {"push": "disabled"})], conf={"usage": 0})
+    rc, out, err, el = s.run("claude", json.dumps(dict(stop, session_id="u-off")), {"SIMPLETERM": "1"})
+    time.sleep(1.5)
+    s.check("usage claude: usage=0 sends nothing", seqs(out) == "\x1b]9;simpleterm:state=done\x07" and not ingests(s, "usage"), out)
+
+
+def t_usage_claude_big(s):
+    """Only the transcript's end is read; the record can be up to 2 MiB from the end."""
+    s.setup([], conf={})
+    near = write(s.tmp / "claude" / "near.jsonl", claude_user_line(3 << 20) + "\n" + claude_line(inp=7) + "\n" + claude_user_line() + "\n")
+    far = write(s.tmp / "claude" / "far.jsonl", claude_line(inp=8) + "\n" + claude_user_line(1 << 20) + "\n")
+    gone = write(s.tmp / "claude" / "gone.jsonl", claude_line(inp=9) + "\n" + claude_user_line(3 << 20) + "\n")
+    for name, path, want in (("near", near, "ctx=5307 "), ("1 MiB back", far, "ctx=5308 "), ("beyond 2 MiB", gone, None)):
+        rc, out, err, el = s.run("claude", json.dumps({"session_id": "big-" + name.split()[0], "transcript_path": str(path),
+                                                       "hook_event_name": "PostCompact"}), {"SIMPLETERM": "1"})
+        if want:
+            s.check("usage big: %s" % name, want in seqs(out), repr(out)[:200])
+        else:
+            s.check("usage big: %s gives nothing" % name, out == "", repr(out)[:200])
+        s.check("usage big: %s quick" % name, el < 3, "%.2fs" % el)
+
+
+def t_usage_statusline(s):
+    """The optional status line tap adds the window size and the 5-hour/7-day limits."""
+    s.setup([(LINK_A, {"push": "disabled"})])
+    tap = SCRIPTS / "statusline-tap.sh"
+    p = subprocess.run([s.argv[0], str(tap), "cat"], input=json.dumps(STATUSLINE).encode(), capture_output=True,
+                       env=s.env(), timeout=20)
+    s.check("statusline: passes the input to the user's command", p.stdout.decode() == json.dumps(STATUSLINE), p.stdout[:200])
+    saved = s.home / ".simpleterm" / "run" / "usage.u-claude.json"
+    s.check("statusline: saved for the hooks", saved.exists() and saved.read_text().split("\n", 1)[1].strip() == json.dumps(STATUSLINE))
+    p = subprocess.run([s.argv[0], str(tap)], input=b"{}", capture_output=True, env=s.env(), timeout=20)
+    s.check("statusline: no command prints nothing", p.stdout == b"" and p.returncode == 0, p.stdout)
+    tr = write(s.tmp / "claude" / "sl.jsonl", claude_line() + "\n")
+    rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-claude", "transcript_path": str(tr), "hook_event_name": "Stop",
+                                                   "last_assistant_message": "ok"}), {"SIMPLETERM": "1"})
+    s.check("statusline: exact window and limits (expired window dropped)",
+            seqs(out).endswith("\x1b]9;simpleterm:usage v=1 agent=claude-code ctx=5310 win=200000 src=transcript"
+                               " lim=five_hour:23.5:300:4102444800 lim=seven_day:41.2:10080:4102444800\x07"), repr(out))
+    rec = wait_for(lambda: ingests(s, "usage"), 8)
+    s.check("statusline: limits in the event", rec and rec[0]["plain_json"].get("lims") == [
+        {"id": "five_hour", "pct": 23.5, "win_min": 300, "resets_at": 4102444800},
+        {"id": "seven_day", "pct": 41.2, "win_min": 10080, "resets_at": 4102444800}], str(rec[0].get("plain_json") if rec else None))
+    old = "1000\n" + json.dumps(STATUSLINE) + "\n"
+    saved.write_text(old)
+    rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-claude", "transcript_path": str(tr), "hook_event_name": "PostCompact"}),
+                             {"SIMPLETERM": "1"})
+    s.check("statusline: stale file ignored", "lim=" not in seqs(out) and "est=1" in seqs(out), repr(out))
+
+
+def t_usage_relay_policy(s):
+    """Tunnels get every change; the relay only the turn's last value."""
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_A, {"push": "disabled"}), (LINK_T, {"kind": "tunnel", "relay_url": tctl.url})])
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T)}})
+        tr = write(s.tmp / "claude" / "pol.jsonl", claude_line() + "\n")
+        base = {"session_id": "pol", "transcript_path": str(tr), "cwd": "/w/x"}
+        s.run("claude", json.dumps(dict(base, hook_event_name="PostToolUse", tool_name="Bash", tool_input={"command": "ls"})))
+        time.sleep(1.5)
+        s.check("usage policy: mid-turn update reaches the tunnel", ingests(s, "usage", tctl))
+        s.check("usage policy: mid-turn update skips the relay", not ingests(s, "usage"))
+        with open(tr, "a") as f:
+            f.write(claude_line(inp=20) + "\n")
+        s.run("claude", json.dumps(dict(base, hook_event_name="PostToolUse", tool_name="Bash", tool_input={"command": "ls"})))
+        time.sleep(1.5)
+        s.check("usage policy: PostToolUse at most every 20 s", len(ingests(s, "usage", tctl)) == 1, str(len(ingests(s, "usage", tctl))))
+        s.run("claude", json.dumps(dict(base, hook_event_name="Stop", last_assistant_message="ok")))
+        s.check("usage policy: turn end reaches the relay", wait_for(lambda: ingests(s, "usage"), 8))
+        s.check("usage policy: turn end reaches the tunnel (changed)", wait_for(lambda: len(ingests(s, "usage", tctl)) == 2, 8))
+        got = (ingests(s, "usage")[0].get("plain_json") or {}).get("ctx", {}) if ingests(s, "usage") else {}
+        s.check("usage policy: relay value is the turn's last", got.get("used") == 5320, str(got))
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+
+def t_usage_codex(s):
+    s.setup([(LINK_A, {"push": "disabled"})])
+    ro = write(s.tmp / "codex" / "rollout.jsonl", "\n".join([
+        codex_token_line(total=9000), codex_token_line(total=15159), codex_token_line(total=None, rl=False)]) + "\n")
+    inp = {"session_id": "cx", "turn_id": "t", "transcript_path": str(ro), "cwd": "/w/repo", "hook_event_name": "Stop",
+           "model": "gpt-5.5", "permission_mode": "default", "stop_hook_active": False, "last_assistant_message": "Done."}
+    rc, out, err, el = s.run("codex", json.dumps(inp), {"SIMPLETERM": "1"})
+    s.check("usage codex: nothing on stdout (schema)", out == "", out)
+    rec = wait_for(lambda: ingests(s, "usage"), 8)
+    p = rec[0].get("plain_json", {}) if rec else {}
+    s.check("usage codex: rollout context, window, baseline",
+            p.get("ctx") == {"used": 15159, "win": 258400, "baseline": 12000, "src": "rollout"} and p.get("app") == "codex", str(p))
+    s.check("usage codex: limits and plan", p.get("lims") == [
+        {"id": "codex.primary", "pct": 4.0, "win_min": 300, "resets_at": 1795746291},
+        {"id": "codex.secondary", "pct": 12.5, "win_min": 10080, "resets_at": 1796000000}] and p.get("plan") == "plus", str(p))
+    s.check("usage codex: done still sent", wait_for(lambda: ingests(s, "done"), 8))
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_A, {"push": "disabled"}), (LINK_T, {"kind": "tunnel", "relay_url": tctl.url})])
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T)}})
+        write(ro, codex_token_line(total=16000, reached="primary") + "\n")
+        s.run("codex", json.dumps(dict(inp, hook_event_name="SessionStart", source="resume")))
+        rec = wait_for(lambda: ingests(s, "usage", tctl), 8)
+        p = rec[0].get("plain_json", {}) if rec else {}
+        s.check("usage codex: SessionStart to the tunnel, reached",
+                p.get("ctx", {}).get("used") == 16000 and {"id": "reached"} in p.get("lims", []), str(p))
+        s.check("usage codex: SessionStart not to the relay", not ingests(s, "usage"))
+    finally:
+        tun.terminate()
+        tun.wait(5)
+    s.ctl("/_ctl/reset", {})
+    s.run("codex", json.dumps(dict(inp, transcript_path=None, session_id="cx2")))
+    time.sleep(1.5)
+    s.check("usage codex: null transcript_path -> no usage", not ingests(s, "usage") and ingests(s, "done"))
+
+
+def t_gemini(s):
+    s.setup([(LINK_A, {"push": "disabled"})])
+    tr = write(s.tmp / "gemini" / "chats" / "session-1.jsonl", GEMINI_JSONL)
+    base = {"session_id": "gm", "transcript_path": str(tr), "cwd": "/w/site", "timestamp": "2026-10-29T00:00:00Z"}
+    note = dict(base, hook_event_name="Notification", notification_type="ToolPermission",
+                message="Tool Confirm Shell Command requires execution",
+                details={"type": "exec", "title": "Confirm Shell Command", "command": "rm -rf build", "rootCommand": "rm"})
+    rc, out, err, el = s.run("gemini", json.dumps(note), {"SIMPLETERM": "1"})
+    s.check("gemini: Notification prints nothing", out == "", out)
+    s.check("gemini: Notification returns at once", el < 2, "%.2fs" % el)
+    rec = wait_for(lambda: ingests(s), 8)
+    p = rec[0].get("plain_json", {}) if rec else {}
+    s.check("gemini: ToolPermission -> question (alert only)",
+            rec and rec[0]["body"]["ev"] == "question" and p.get("app") == "gemini-cli" and p.get("msg") == "approve rm: rm -rf build"
+            and "nonce" not in p and not s.records("/v1/decision"), str(p))
+    s.ctl("/_ctl/reset", {})
+    edit = dict(note, details={"type": "edit", "title": "Confirm Edit", "fileName": "a.txt", "filePath": "/w/site/a.txt",
+                               "fileDiff": "@@", "originalContent": "x" * 5000, "newContent": "y"})
+    s.run("gemini", json.dumps(edit))
+    rec = wait_for(lambda: ingests(s), 8)
+    s.check("gemini: edit permission names the file", rec and rec[0]["plain_json"].get("msg") == "approve edit: /w/site/a.txt",
+            str(rec[0].get("plain_json") if rec else None))
+    s.ctl("/_ctl/reset", {})
+    after = dict(base, hook_event_name="AfterAgent", prompt="p", prompt_response="All green.", stop_hook_active=False)
+    rc, out, err, el = s.run("gemini", json.dumps(after), {"SIMPLETERM": "1"})
+    s.check("gemini: AfterAgent prints nothing (no block)", out == "", out)
+    rec = wait_for(lambda: ingests(s, "done"), 8)
+    s.check("gemini: AfterAgent -> done", rec and rec[0]["plain_json"].get("msg") == "All green.", str(rec)[:200])
+    rec = wait_for(lambda: ingests(s, "usage"), 8)
+    s.check("gemini: usage from the chat record", rec and rec[0]["plain_json"].get("ctx") == {"used": 33435, "win": 1048576, "src": "transcript"},
+            str(rec[0].get("plain_json") if rec else None))
+    s.ctl("/_ctl/reset", {})
+    old = write(s.tmp / "gemini" / "chats" / "session-old.json", GEMINI_PRETTY)
+    s.run("gemini", json.dumps(dict(after, session_id="gm-old", transcript_path=str(old))))
+    rec = wait_for(lambda: ingests(s, "usage"), 8)
+    s.check("gemini: older pretty JSON record", rec and rec[0]["plain_json"].get("ctx", {}).get("used") == 7682,
+            str(rec[0].get("plain_json") if rec else None))
+    s.ctl("/_ctl/reset", {})
+    s.run("gemini", json.dumps(dict(base, hook_event_name="BeforeAgent", prompt="p")))
+    s.run("gemini", json.dumps(dict(note, notification_type="Other")))
+    time.sleep(1.5)
+    s.check("gemini: other events send nothing", not ingests(s))
+
+
+def notify_pty(s, args, extra=None):
+    """Runs `simpleterm-notify.sh` on a terminal; returns (exit code, terminal output)."""
+    env = s.env(extra)
+    pid, fd = pty.fork()
+    if pid == 0:
+        try:
+            os.chdir(str(s.tmp))
+            os.execve(s.argv[0], [s.argv[0], str(SCRIPTS / "simpleterm-notify.sh")] + list(args), env)
+        finally:
+            os._exit(127)
+    out = b""
+    end = time.time() + 15
+    while time.time() < end:
+        r, _, _ = select.select([fd], [], [], 0.2)
+        if r:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+        else:
+            done, status = os.waitpid(pid, os.WNOHANG)
+            if done:
+                break
+    try:
+        _, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        status = 0
+    os.close(fd)
+    return os.waitstatus_to_exitcode(status), out
+
+
+def t_notify(s):
+    """`simpleterm notify`: OSC 777 on a SimpleTerm terminal, `notify` to every link."""
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_A, {"push": "disabled"}), (LINK_T, {"kind": "tunnel", "relay_url": tctl.url})])
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T)}})
+        rc, tty = notify_pty(s, ["notify", "Build done", "exit 0; 한글 \x1b]0;x\x07"], {"SIMPLETERM": "1"})
+        s.check("notify: exit 0", rc == 0, str(rc))
+        s.check("notify: OSC 777 on the terminal, control characters removed",
+                b"\x1b]777;notify;Build done;exit 0; \xed\x95\x9c\xea\xb8\x80 ]0;x\x07" in tty, repr(tty))
+        rec = wait_for(lambda: ingests(s, "notify"), 8)
+        p = rec[0].get("plain_json", {}) if rec else {}
+        s.check("notify: relay event", p.get("app") == "script" and p.get("title") == "Build done"
+                and p.get("msg") == "exit 0; 한글 ]0;x" and p.get("host") == "dev-box", str(p))
+        s.check("notify: plaintext order", rec and rec[0]["plain"].startswith(
+            '{"v":1,"rid":"%s","ev":"notify","app":"script","host":"dev-box","cwd":"%s","title":"Build done","msg":"'
+            % (p.get("rid"), s.tmp.name)), rec[0]["plain"] if rec else "")
+        s.check("notify: tunnel event", wait_for(lambda: ingests(s, "notify", tctl), 8))
+        s.ctl("/_ctl/reset", {})
+        rc, tty = notify_pty(s, ["notify", "Only title"])
+        s.check("notify: no sequence outside SimpleTerm", b"\x1b]777" not in tty, repr(tty))
+        s.check("notify: still sent to links", wait_for(lambda: ingests(s, "notify"), 8))
+        rc, tty = notify_pty(s, ["notify"])
+        s.check("notify: usage error without a title", rc == 2 and b"usage: simpleterm notify" in tty, repr(tty))
+        rc, tty = notify_pty(s, ["bogus"])
+        s.check("notify: unknown command", rc == 2, str(rc))
+        shutil.rmtree(s.home / ".simpleterm" / "links")
+        rc, tty = notify_pty(s, ["notify", "x"])
+        s.check("notify: nothing to send says so", rc == 0 and b"nothing sent" in tty, repr(tty))
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+
+def t_cli_wrapper(s):
+    """The hooks keep ~/.simpleterm/bin/simpleterm pointing at the plugin."""
+    s.setup([(LINK_A, {"push": "disabled"})])
+    w = s.home / ".simpleterm" / "bin" / "simpleterm"
+    s.run("claude", json.dumps({"session_id": "w", "hook_event_name": "Stop", "last_assistant_message": "ok"}))
+    text = w.read_text() if w.exists() else ""
+    s.check("cli: written on Stop", "s='%s'" % (SCRIPTS / "simpleterm-notify.sh") in text and os.access(w, os.X_OK), text)
+    s.ctl("/_ctl/reset", {})
+    p = subprocess.run([str(w), "notify", "via wrapper"], capture_output=True, env=s.env(), timeout=20)
+    s.check("cli: wrapper runs notify", p.returncode == 0 and wait_for(lambda: ingests(s, "notify"), 8), p.stderr)
+    w.write_text(text.replace(str(SCRIPTS), "/nonexistent/old-version"))
+    p = subprocess.run([str(w), "notify", "x"], capture_output=True, env=s.env(), timeout=20)
+    s.check("cli: a moved plugin is reported", p.returncode == 1 and b"is gone" in p.stderr, p.stderr)
+    s.run("claude", json.dumps({"session_id": "w", "hook_event_name": "SessionStart", "source": "startup"}))
+    s.check("cli: rewritten when its script is gone", str(SCRIPTS) in w.read_text())
+    w.write_text(w.read_text().replace("# rev=1", "# rev=1\n# mine"))
+    s.run("claude", json.dumps({"session_id": "w", "hook_event_name": "SessionStart", "source": "startup"}))
+    s.check("cli: a current one is left alone", "# mine" in w.read_text())
+
+
+def agy_input(tool="run_command", args=None, extra=None):
+    j = {"conversationId": "conv-1", "workspacePaths": ["/w/agyproj"], "transcriptPath": "/x/transcript.jsonl",
+         "artifactDirectoryPath": "/x/art", "modelName": "gemini-3-pro", "stepIdx": 3,
+         "toolCall": {"name": tool, "args": args if args is not None else
+                      {"CommandLine": "npm test", "Cwd": "/w/agyproj", "WaitMsBeforeAsync": 5000}}}
+    j.update(extra or {})
+    return json.dumps(j)
+
+
+def agy_stop(**kw):
+    j = {"conversationId": "conv-1", "workspacePaths": ["/w/agyproj"], "transcriptPath": "/x/t.jsonl", "modelName": "m",
+         "executionNum": 2, "terminationReason": "NO_TOOL_CALL", "fullyIdle": True}
+    j.update(kw)
+    return json.dumps({k: v for k, v in j.items() if v is not None})
+
+
+def t_agy(s):
+    """Antigravity: PreToolUse always answers (`{}` would deny); device waits are opt-in."""
+    s.setup([(LINK_A, {"decision": "allow", "after": 1})])
+    rc, out, err, el = s.run("agy", agy_input(), args=("PreToolUse",))
+    s.check("agy: no wait by default -> allow (policy decides)", out.strip() == '{"decision":"allow"}', out + err)
+    s.check("agy: no wait by default -> nothing sent", not ingests(s) and el < 3, "%.2fs" % el)
+    for verdict, want in (("allow", '{"decision":"auto_approve"}'), ("deny", '{"decision":"deny","reason":"Denied from SimpleTerm"}')):
+        s.setup([(LINK_A, {"decision": verdict, "after": 1})], conf={"agy_wait": 30})
+        rc, out, err, el = s.run("agy", agy_input(), args=("PreToolUse",))
+        s.check("agy: device %s -> %s" % (verdict, want), out.strip() == want, out + err)
+        rec = ingests(s, "permission")
+        p = rec[0].get("plain_json", {}) if rec else {}
+        s.check("agy: %s request" % verdict, p.get("app") == "antigravity" and p.get("msg") == "approve run_command: npm test"
+                and p.get("cwd") == "agyproj" and rec[0].get("nh_ok") is True, str(p))
+    s.setup([(LINK_A, {})], conf={"agy_wait": 3})
+    rc, out, err, el = s.run("agy", agy_input(), args=("PreToolUse",))
+    s.check("agy: no answer in agy_wait -> allow", out.strip() == '{"decision":"allow"}' and 1.5 < el < 15, "%s %.2fs" % (out, el))
+    s.setup([(LINK_A, {"push": "disabled"})])
+    q = agy_input("ask_question", {"questions": [{"question": "Which port?", "options": ["80", "8080"], "is_multi_select": False}]})
+    rc, out, err, el = s.run("agy", q, args=("PreToolUse",))
+    rec = wait_for(lambda: ingests(s, "question"), 8)
+    s.check("agy: ask_question -> question alert, allow", out.strip() == '{"decision":"allow"}' and rec
+            and rec[0]["plain_json"].get("msg") == "Which port?", out + str(rec)[:200])
+    s.ctl("/_ctl/reset", {})
+    rc, out, err, el = s.run("agy", agy_stop(fullyIdle=False), args=("Stop",))
+    time.sleep(1.5)
+    s.check("agy: Stop not fully idle -> nothing", out.strip() == "{}" and not ingests(s), out)
+    rc, out, err, el = s.run("agy", agy_stop(), args=("Stop",))
+    rec = wait_for(lambda: ingests(s, "done"), 8)
+    s.check("agy: Stop fully idle -> done, {}", out.strip() == "{}" and rec and rec[0]["plain_json"].get("app") == "antigravity", out)
+    s.ctl("/_ctl/reset", {})
+    s.run("agy", agy_stop(error="quota exceeded", terminationReason="ERROR"), args=("Stop",))
+    rec = wait_for(lambda: ingests(s), 8)
+    s.check("agy: Stop with error -> error", rec and rec[0]["body"]["ev"] == "error"
+            and rec[0]["plain_json"].get("msg") == "ERROR: quota exceeded", str(rec)[:200])
+    shutil.rmtree(s.home / ".simpleterm" / "links")
+    rc, out, err, el = s.run("agy", agy_input(), args=("PreToolUse",))
+    s.check("agy: nothing set up still answers allow", out.strip() == '{"decision":"allow"}' and rc == 0, out)
+    rc, out, err, el = s.run("agy", "garbage {{", args=("PreToolUse",), extra={"SIMPLETERM": "1"})
+    s.check("agy: garbage input still answers allow", out.strip() == '{"decision":"allow"}', out)
+
+
+def grok_input(event, **kw):
+    snake = {"Notification": "notification", "Stop": "stop", "StopFailure": "stop_failure"}[event]
+    j = {"hookEventName": snake, "sessionId": "gk-1", "cwd": "/w/grokproj", "workspaceRoot": "/w/grokproj",
+         "timestamp": kw.pop("timestamp", "2026-10-29T10:00:00.000Z"), "hook_event_name": event, "session_id": "gk-1"}
+    j.update(kw)
+    return json.dumps(j), {"GROK_HOOK_EVENT": snake, "SIMPLETERM": "1"}
+
+
+def t_grok(s):
+    """Grok Build runs the Claude Code hooks (`claude`) with GROK_HOOK_EVENT set."""
+    s.setup([(LINK_A, {"push": "disabled"})])
+    inp, env = grok_input("Stop", reason="end_turn", promptId="p1", stopHookActive=False, lastAssistantMessage="Grok done.")
+    rc, out, err, el = s.run("claude", inp, env)
+    rec = wait_for(lambda: ingests(s, "done"), 8)
+    p = rec[0].get("plain_json", {}) if rec else {}
+    s.check("grok: claude mode switches to grok-build", p.get("app") == "grok-build" and p.get("msg") == "Grok done."
+            and p.get("cwd") == "grokproj", str(p))
+    s.check("grok: no terminal output (Grok has no terminalSequence)", out == "", out)
+    s.ctl("/_ctl/reset", {})
+    rc, out, err, el = s.run("claude", inp, env)
+    time.sleep(1.5)
+    s.check("grok: the same event twice (two copies of the hook) -> one alert", not ingests(s), str(ingests(s))[:200])
+    s.check("grok: duplicate logged", "duplicate Stop" in s.log_text(), s.log_text()[-300:])
+    inp2, _ = grok_input("Stop", reason="end_turn", promptId="p2", timestamp="2026-10-29T10:05:00.000Z", lastAssistantMessage="Grok done.")
+    s.run("claude", inp2, env)
+    s.check("grok: a later turn with the same text is sent", wait_for(lambda: ingests(s, "done"), 8))
+    s.ctl("/_ctl/reset", {})
+    for reason in ("channel_closed", "shutdown"):
+        inp3, _ = grok_input("Stop", reason=reason, timestamp="2026-10-29T10:09:%02d.000Z" % len(reason), lastAssistantMessage="x")
+        s.run("claude", inp3, env)
+    time.sleep(1.5)
+    s.check("grok: session-end Stop is not a turn end", not ingests(s), str(ingests(s))[:200])
+    note, nenv = grok_input("Notification", notificationType="permission_prompt", message="Tool permission requested", level="info")
+    s.run("claude", note, dict(nenv, GROK_HOOK_EVENT="notification"))
+    rec = wait_for(lambda: ingests(s, "question"), 8)
+    s.check("grok: permission_prompt -> question (alert only)", rec and rec[0]["plain_json"].get("msg") == "Tool permission requested"
+            and not s.records("/v1/decision"), str(rec)[:200])
+    s.ctl("/_ctl/reset", {})
+    note2, _ = grok_input("Notification", notificationType="task_complete", message="Background task completed: t1",
+                          timestamp="2026-10-29T10:10:00.000Z")
+    s.run("claude", note2, dict(nenv, GROK_HOOK_EVENT="notification"))
+    time.sleep(1.5)
+    s.check("grok: other notifications ignored", not ingests(s))
+    fail, fenv = grok_input("StopFailure", error="rate_limit", errorDetails="429", lastAssistantMessage="Rate limited",
+                            timestamp="2026-10-29T10:11:00.000Z")
+    s.run("claude", fail, dict(fenv, GROK_HOOK_EVENT="stop_failure"))
+    rec = wait_for(lambda: ingests(s), 8)
+    s.check("grok: StopFailure -> error", rec and rec[0]["body"]["ev"] == "error"
+            and rec[0]["plain_json"].get("msg") == "rate_limit: Rate limited", str(rec)[:200])
+    s.ctl("/_ctl/reset", {})
+    only_camel = json.dumps({"hookEventName": "stop", "sessionId": "gk-2", "cwd": "/w/g", "timestamp": "t9", "reason": "end_turn",
+                             "lastAssistantMessage": "camel only"})
+    s.run("grok", only_camel)
+    rec = wait_for(lambda: ingests(s, "done"), 8)
+    s.check("grok: grok mode, camelCase-only input", rec and rec[0]["plain_json"].get("msg") == "camel only", str(rec)[:200])
+
+
+def t_opencode_sh(s):
+    """OpenCode's bridge runs `opencode` with Claude-shaped JSON and maps the answer to once/reject."""
+    for verdict in ("allow", "deny"):
+        s.setup([(LINK_A, {"decision": verdict, "after": 1})])
+        rc, out, err, el = s.run("opencode", perm_input(tool="bash", command="rm -rf dist", cwd="/w/ocproj", session="oc-1"),
+                                 {"SIMPLETERM": "1"})
+        s.check("opencode sh: %s" % verdict, out.strip() == '{"decision":"%s"}' % verdict, out + err)
+        rec = ingests(s, "permission")
+        s.check("opencode sh: %s request" % verdict, rec and rec[0]["plain_json"].get("app") == "opencode"
+                and rec[0]["plain_json"].get("msg") == "approve bash: rm -rf dist", str(rec)[:200])
+    s.setup([(LINK_A, {"push": "disabled"})])
+    s.run("opencode", json.dumps({"hook_event_name": "StopFailure", "session_id": "oc-1", "cwd": "/w/ocproj",
+                                  "error": "ProviderAuthError", "last_assistant_message": "API key invalid"}))
+    rec = wait_for(lambda: ingests(s), 8)
+    s.check("opencode sh: ProviderAuthError -> auth", rec and rec[0]["body"]["ev"] == "auth", str(rec)[:200])
+
+
+NODE = shutil.which("node")
+
+
+def node_plugin(s, kind, scenario, timeout=60):
+    plugin = {"v1": ROOT / "plugins" / "opencode-v1" / "simpleterm.js", "v2": ROOT / "plugins" / "opencode" / "index.js"}[kind]
+    p = subprocess.run([NODE, str(HERE / "opencode_harness.mjs"), kind, str(plugin), json.dumps(scenario)],
+                       capture_output=True, text=True, env=s.env(), timeout=timeout, cwd=str(s.tmp))
+    try:
+        return json.loads(p.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return [{"error": p.stdout[-300:] + p.stderr[-500:]}]
+
+
+def replies(calls):
+    return [c["reply"] for c in calls if "reply" in c]
+
+
+def t_opencode_js(s):
+    """The OpenCode plugins themselves (node with fake OpenCode objects; skipped without node)."""
+    if not NODE or s.kind != "sh":
+        return
+    d = str(s.tmp)
+    # --- 1.x ---
+    s.setup([(LINK_A, {"decision": "allow", "after": 1})])
+    ask19 = {"type": "permission.asked", "properties": {"id": "per_1", "sessionID": "ses_1", "permission": "bash",
+                                                       "patterns": ["npm test"], "metadata": {"command": "npm test"}, "always": []}}
+    calls = node_plugin(s, "v1", {"directory": d, "steps": [{"event": ask19}], "wait": 8000})
+    s.check("opencode 1.x: only function exports", calls and calls[0].get("exports") == [["SimpleTermAgentHooks", "function"]], str(calls)[:300])
+    s.check("opencode 1.x: device allow -> once", replies(calls) == [{"path": {"id": "ses_1", "permissionID": "per_1"},
+                                                                       "body": {"response": "once"}}], str(calls)[:300])
+    rec = ingests(s, "permission")
+    s.check("opencode 1.x: request text", rec and rec[0]["plain_json"].get("msg") == "approve bash: npm test", str(rec)[:200])
+    s.setup([(LINK_A, {"decision": "deny", "after": 1})])
+    ask10 = {"type": "permission.updated", "properties": {"id": "per_2", "sessionID": "ses_1", "type": "bash", "pattern": "make",
+                                                         "title": "make deploy", "metadata": {"command": "make deploy"}}}
+    calls = node_plugin(s, "v1", {"directory": d, "steps": [{"event": ask10}], "wait": 8000})
+    s.check("opencode 1.0 permission.updated: device deny -> reject",
+            [r["body"]["response"] for r in replies(calls)] == ["reject"], str(calls)[:300])
+    s.setup([(LINK_A, {})], conf={"opencode_wait": 60})
+    calls = node_plugin(s, "v1", {"directory": d, "steps": [
+        {"event": ask19}, {"sleep": 3000},
+        {"event": {"type": "permission.replied", "properties": {"sessionID": "ses_1", "requestID": "per_1", "reply": "once"}}}],
+        "wait": 3000})
+    s.check("opencode 1.x: answered in the terminal -> no reply, wait ends", not replies(calls)
+            and wait_for(lambda: "permission signal" in s.log_text(), 5), str(calls)[:200] + s.log_text()[-200:])
+    s.setup([(LINK_A, {"push": "disabled"})])
+    calls = node_plugin(s, "v1", {"directory": d, "sessions": {"ses_1": {"title": "Fix the tests"}, "ses_sub": {"parentID": "ses_1"}},
+                                  "steps": [{"event": {"type": "session.idle", "properties": {"sessionID": "ses_1"}}},
+                                            {"event": {"type": "session.idle", "properties": {"sessionID": "ses_sub"}}}], "wait": 3000})
+    rec = wait_for(lambda: ingests(s, "done"), 8)
+    time.sleep(1)
+    s.check("opencode 1.x: session.idle -> done with the session title, subagents skipped",
+            len(ingests(s, "done")) == 1 and rec[0]["plain_json"].get("msg") == "Fix the tests", str(ingests(s))[:300])
+    # --- 2.x ---
+    s.setup([(LINK_A, {"decision": "allow", "after": 1})])
+    ask2 = {"id": "evt_1", "type": "permission.asked", "created": 1, "location": {"directory": d},
+            "data": {"id": "per_9", "sessionID": "ses_9", "action": "shell", "resources": ["npm run build"]}}
+    other = dict(ask2, id="evt_2", location={"directory": "/somewhere/else"}, data=dict(ask2["data"], id="per_x"))
+    calls = node_plugin(s, "v2", {"directory": d, "steps": [{"event": ask2}, {"event": ask2}, {"event": other}], "wait": 8000})
+    s.check("opencode 2.x: plugin shape and events", calls and calls[0] == {"id": "simpleterm", "setup": "function"}
+            and "permission.asked" in (calls[1].get("subscribed") or []), str(calls)[:300])
+    s.check("opencode 2.x: device allow -> once (once per event, own directory only)",
+            replies(calls) == [{"sessionID": "ses_9", "requestID": "per_9", "decision": "once"}], str(calls)[:400])
+    rec = ingests(s, "permission")
+    s.check("opencode 2.x: one request", len(rec) == 1 and rec[0]["plain_json"].get("msg") == "approve shell: npm run build", str(rec)[:200])
+    s.setup([(LINK_A, {"push": "disabled"})])
+    calls = node_plugin(s, "v2", {"directory": d, "sessions": {"ses_9": {"title": "Ship it"}}, "steps": [
+        {"event": {"id": "evt_3", "type": "session.execution.succeeded", "location": {"directory": d}, "data": {"sessionID": "ses_9"}}},
+        {"event": {"id": "evt_4", "type": "session.execution.failed", "location": {"directory": d},
+                   "data": {"sessionID": "ses_9", "error": {"type": "provider", "message": "overloaded"}}}}], "wait": 3000})
+    s.check("opencode 2.x: succeeded -> done, failed -> error",
+            wait_for(lambda: ingests(s, "done") and ingests(s, "error"), 8)
+            and ingests(s, "done")[0]["plain_json"].get("msg") == "Ship it"
+            and ingests(s, "error")[0]["plain_json"].get("msg") == "provider: overloaded", str(ingests(s))[:300])
+
+
+COPIES = [
+    ("plugins/opencode/agent-hook.sh", "plugins/simpleterm/scripts/agent-hook.sh"),
+    ("plugins/opencode-v1/simpleterm-agent-hook.sh", "plugins/simpleterm/scripts/agent-hook.sh"),
+    ("plugins/antigravity/scripts/agent-hook.sh", "plugins/simpleterm/scripts/agent-hook.sh"),
+    ("plugins/antigravity/scripts/simpleterm-notify.sh", "plugins/simpleterm/scripts/simpleterm-notify.sh"),
+    ("plugins/antigravity/scripts/statusline-tap.sh", "plugins/simpleterm/scripts/statusline-tap.sh"),
+]
+
+
+def copies_check():
+    """Plugins that are installed on their own carry copies of the scripts; they must not drift."""
+    bad = []
+    for copy, master in COPIES:
+        a, b = ROOT / copy, ROOT / master
+        if not a.exists() or a.read_bytes() != b.read_bytes():
+            bad.append("%s differs from %s (cp %s %s)" % (copy, master, master, copy))
+    return bad
+
+
 TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t_timeout, t_multi_link,
          t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_agent_gone, t_events,
-         t_hostile_input, t_log, t_argv, t_external_printf]
+         t_hostile_input, t_log, t_argv, t_external_printf,
+         t_usage_claude, t_usage_claude_big, t_usage_statusline, t_usage_relay_policy, t_usage_codex, t_gemini, t_notify,
+         t_cli_wrapper, t_agy, t_grok, t_opencode_sh, t_opencode_js]
+
+# Tests of the sh hook only (scripts and behaviour the PowerShell hook does not have).
+SH_ONLY = {"t_usage_claude_big", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_cli_wrapper",
+           "t_agy", "t_opencode_sh", "t_opencode_js"}
 
 
 # PowerShell 7-only syntax and APIs that Windows PowerShell 5.1 (.NET Framework 4.5+) lacks.
@@ -740,7 +1390,7 @@ def run_suite(suite, only):
     for t in TESTS:
         if only and t.__name__ not in only:
             continue
-        if suite.kind == "ps1" and t is t_missing_deps:
+        if suite.kind == "ps1" and (t is t_missing_deps or t.__name__ in SH_ONLY):
             continue
         try:
             t(suite)
@@ -754,7 +1404,12 @@ def main():
     ap.add_argument("--pwsh", help="pwsh executable to run agent-hook.ps1 with")
     ap.add_argument("--only", action="append", help="test function name (repeatable)")
     ap.add_argument("--no-sh", action="store_true")
+    ap.add_argument("--hook", help="sh hook to test instead of the plugin's (e.g. an older release)")
     args = ap.parse_args()
+    global HOOK_SH, SCRIPTS
+    if args.hook:
+        HOOK_SH = Path(args.hook).resolve()
+        SCRIPTS = HOOK_SH.parent
 
     suites = []
     if not args.no_sh:
@@ -771,6 +1426,11 @@ def main():
         suites.append(Suite("pwsh", [args.pwsh, "-NoProfile", "-NonInteractive", "-File", str(HOOK_PS1)], None, "ps1"))
 
     failed = 0
+    copies = copies_check()
+    print("== script copies: %s" % ("ok" if not copies else "%d differ" % len(copies)))
+    for p in copies:
+        print("   FAIL " + p)
+    failed += len(copies)
     static = ps51_static_check()
     print("== PowerShell 5.1 static check: %s" % ("ok" if not static else "%d problem(s)" % len(static)))
     for p in static:

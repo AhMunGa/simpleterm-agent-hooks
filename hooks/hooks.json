@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "simpleterm",
+            "command": "sh \"${extensionPath}/plugins/simpleterm/scripts/agent-hook.sh\" gemini",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "AfterAgent": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "name": "simpleterm",
+            "command": "sh \"${extensionPath}/plugins/simpleterm/scripts/agent-hook.sh\" gemini",
+            "timeout": 10000
+          }
+        ]
+      }
+    ]
+  }
+}
