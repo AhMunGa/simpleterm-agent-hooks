@@ -48,8 +48,9 @@ after every update, because trust is tied to the plugin's contents.
 
 ## Pair with the SimpleTerm app
 
-The plugin sends nothing until the app links this server. Turn on agent alerts for the host in
-SimpleTerm. Over SFTP the app writes one link file per device to
+The plugin sends no alerts until the app links this server. In SimpleTerm, connect a tab to the
+server, open the **Agents** panel and choose **Set up agent alerts**, then **Link this device**
+(relay push must be on in Settings > Notifications). Over SFTP the app writes one link file per device to
 `~/.simpleterm/links/<linkId>.conf`, holding the relay address and the keys for that device.
 The app only writes its own files under `~/.simpleterm`; it does not run commands on the server
 or edit your Claude Code and Codex settings. Revoking the link in the app stops delivery at the
@@ -94,6 +95,25 @@ poll_wait=25      # one long-poll, 1-25
 - A permission answer is signed by the device; the hook ignores an answer whose signature does not match.
 - The hook keeps a 200-line log in `~/.simpleterm/agent-hook.log` with event types, the first
   8 characters of link IDs and HTTP results, never message text or host names.
+
+## Security notes
+
+- The link token (`secret`) goes to curl on standard input (`-K -`), and the HMAC key (`mac`) is
+  used inside the shell and passed to `openssl dgst` on standard input. Neither appears on a
+  command line. Both pass through `printf`, which is why the hook sends nothing when `printf` is
+  not a shell builtin.
+- The request body (the envelope's `iv` and `ct`) is passed to curl as a file in
+  `~/.simpleterm/run/` (mode 600, directory 700) with `--data-binary @file`, and deleted right after.
+- **The AES key (`enc`) is on the command line of `openssl enc -K` for a few milliseconds.**
+  `openssl enc` takes a raw key no other way. Another user on the same host who reads the process
+  list at that moment can see it (Linux `hidepid=2` prevents this). The key alone cannot forge an
+  answer (answers are signed with `mac`), and the ciphertext never appears on a command line.
+- The PowerShell hook encrypts and sends from .NET, so nothing appears on a command line. Its
+  background sender receives the event (message text, no keys) in environment variables, which
+  only the same user and administrators can read.
+- Answer signatures: the sh hook compares them as plain strings, the PowerShell hook in constant
+  time. The hook accepts one answer per request and gives up on a mismatch, so a signature cannot
+  be guessed byte by byte.
 
 ## Update
 
@@ -154,7 +174,23 @@ plugins/simpleterm/
   hooks/codex-hooks.json               Codex hooks
   scripts/agent-hook.sh                POSIX sh hook (macOS, Linux, BSD, Git Bash)
   scripts/agent-hook.ps1               PowerShell hook (Windows)
+tests/                                 hook tests and mock relay (not part of the plugin)
 ```
+
+## Development
+
+`tests/` runs the hooks against a mock relay (`tests/mock_relay.py`), which also plays the device:
+it decrypts the envelope, checks the MAC and signs answers. Python 3 standard library only.
+
+```sh
+python3 -I tests/run_tests.py                          # sh hook, every shell found × LibreSSL and OpenSSL 3
+python3 -I tests/run_tests.py --shell /bin/dash
+python3 -I tests/run_tests.py --no-sh --pwsh <path>    # PowerShell hook, plus a Windows PowerShell 5.1 static check
+```
+
+Test-only variables: with `SIMPLETERM_HOOK_TEST=1`, `SIMPLETERM_HOOK_TEST_IV`, `_NONCE`, `_RID` and
+`_TS` replace the random values so the envelope can be compared with the protocol test vectors.
+They are ignored otherwise.
 
 When releasing, bump `version` in both `plugin.json` files; installed copies update only when it changes.
 
