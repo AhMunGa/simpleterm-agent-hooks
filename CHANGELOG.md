@@ -24,7 +24,8 @@
   event to every link. The background sender now ignores SIGHUP before it starts, so it outlives
   a terminal that closes right after the command.
 - Context and rate limits (#342): Claude Code (transcript; window from the environment or the
-  model, `est` when guessed; 5-hour/7-day limits through the optional `scripts/statusline-tap.sh`;
+  model, `est` when guessed; 5-hour/7-day limits through the optional `scripts/statusline-tap.sh`,
+  which prints a short line of its own when you have no status line command;
   `reached` on a rate-limit failure), Codex (rollout: context, window, limits, plan) and Gemini CLI
   (chat record). An OSC 9 `simpleterm:usage` on Claude Code's terminal and a `usage` event to the
   links; only changes are sent, and the relay gets only a turn's last value. New Claude Code hooks

@@ -898,7 +898,10 @@ def t_usage_statusline(s):
     saved = s.home / ".simpleterm" / "run" / "usage.u-claude.json"
     s.check("statusline: saved for the hooks", saved.exists() and saved.read_text().split("\n", 1)[1].strip() == json.dumps(STATUSLINE))
     p = subprocess.run([s.argv[0], str(tap)], input=b"{}", capture_output=True, env=s.env(), timeout=20)
-    s.check("statusline: no command prints nothing", p.stdout == b"" and p.returncode == 0, p.stdout)
+    s.check("statusline: no command and no data prints nothing", p.stdout == b"" and p.returncode == 0, p.stdout)
+    p = subprocess.run([s.argv[0], str(tap)], input=json.dumps(STATUSLINE).encode(), capture_output=True, env=s.env(), timeout=20)
+    s.check("statusline: no command prints a short line of its own",
+            p.stdout.decode() == "Opus · context 8% · 5h 23% · 7d 41%\n", p.stdout)
     tr = write(s.tmp / "claude" / "sl.jsonl", claude_line() + "\n")
     rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-claude", "transcript_path": str(tr), "hook_event_name": "Stop",
                                                    "last_assistant_message": "ok"}), {"SIMPLETERM": "1"})
