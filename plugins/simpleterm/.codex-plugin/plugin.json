@@ -1,6 +1,6 @@
 {
   "name": "simpleterm",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Permission approvals and turn-done alerts for Codex in the SimpleTerm app",
   "keywords": ["simpleterm", "ssh", "notifications", "approvals", "hooks"],
   "hooks": "./hooks/codex-hooks.json",

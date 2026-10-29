@@ -282,7 +282,7 @@ function Read-Link([string]$file) {
     try {
         $info = New-Object IO.FileInfo($file)
         if (-not $info.Exists -or $info.Length -gt 4096) { Write-Log 'link-skip too-large'; return $null }
-        $link = @{ v = ''; relay = ''; link = ''; secret = ''; enc = ''; mac = ''; label = '' }
+        $link = @{ v = ''; relay = ''; link = ''; secret = ''; enc = ''; mac = ''; label = ''; kind = '' }
         foreach ($line in [IO.File]::ReadAllLines($file, $Utf8)) {
             if ($line.Length -gt 512) { continue }
             $idx = $line.IndexOf('=')
@@ -291,6 +291,8 @@ function Read-Link([string]$file) {
             if ($link.ContainsKey($k)) { $link[$k] = $line.Substring($idx + 1).TrimEnd("`r") }
         }
         if ($link.v -ne '1') { Write-Log 'link-skip version'; return $null }
+        # kind=tunnel: the app's end of its SSH connection on a loopback port.
+        if ($link.kind -cne 'tunnel') { $link.kind = '' }
         if (-not ((Test-Hex $link.link 32) -and (Test-Hex $link.secret 64) -and (Test-Hex $link.enc 64) -and (Test-Hex $link.mac 64))) {
             Write-Log 'link-skip fields'; return $null
         }
@@ -410,7 +412,10 @@ function Start-Ingest($link, [string]$rid, [string]$ev, [string]$nonce) {
     $body = '{"v":1,"rid":"' + $rid + '","ev":"' + $ev + '"'
     if ($nonce) { $body += ',"nh":"' + (Get-Sha256Hex $nonce) + '"' }
     $body += ',"env":' + $envJson + '}'
-    return (Start-Relay $link 'POST' '/v1/ingest' $body 20)
+    # A tunnel answers at once or not at all; the relay may hold the request.
+    $timeout = 20
+    if ($link.kind -eq 'tunnel') { $timeout = 5 }
+    return (Start-Relay $link 'POST' '/v1/ingest' $body $timeout)
 }
 
 # Finishes an ingest; returns the push result or httpNNN.
@@ -604,6 +609,10 @@ function Invoke-PermissionFlow {
                     if ($r.code -eq 410 -and (Get-Field (Get-JsonFields $r.body @('error')) 'error') -eq 'revoked') {
                         try { [IO.File]::WriteAllText((Join-Path $RunDir ($p.link.link + '.revoked')), '', $Utf8) } catch { }
                     }
+                    $p.done = $true
+                } elseif ($r.code -eq 0 -and $p.link.kind -eq 'tunnel') {
+                    # The app's connection ended: nothing will answer there.
+                    Write-Log ('decision link=' + (Short $p.link.link) + ' tunnel-gone')
                     $p.done = $true
                 } else {
                     Start-Sleep -Seconds 2

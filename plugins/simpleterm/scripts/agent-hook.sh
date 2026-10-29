@@ -251,7 +251,7 @@ seal() {
 
 # Loads one link file into L_*; returns 1 if it is unusable.
 load_link() { # file
-  L_FILE=$1 L_RELAY='' L_LINK='' L_SECRET='' L_ENC='' L_MAC='' L_LABEL='' L_V=''
+  L_FILE=$1 L_RELAY='' L_LINK='' L_SECRET='' L_ENC='' L_MAC='' L_LABEL='' L_V='' L_KIND=''
   [ -f "$1" ] || return 1
   size=$(wc -c <"$1" 2>/dev/null) || return 1
   [ "${size:-99999}" -le 4096 ] 2>/dev/null || { log "link-skip too-large"; return 1; }
@@ -266,9 +266,13 @@ load_link() { # file
       enc=*) L_ENC=${line#enc=} ;;
       mac=*) L_MAC=${line#mac=} ;;
       label=*) L_LABEL=${line#label=} ;;
+      kind=*) L_KIND=${line#kind=} ;;
     esac
   done <"$1"
   [ "$L_V" = 1 ] || { log "link-skip version"; return 1; }
+  # kind=tunnel: the app's end of its SSH connection, forwarded to a loopback
+  # port for as long as that connection lives (TDS section 6.5).
+  [ "$L_KIND" = tunnel ] || L_KIND=''
   is_hex "$L_LINK" 32 && is_hex "$L_SECRET" 64 && is_hex "$L_ENC" 64 && is_hex "$L_MAC" 64 ||
     { log "link-skip fields"; return 1; }
   L_RELAY=${L_RELAY%/}
@@ -345,7 +349,11 @@ ingest_one() { # rid ev nonce outfile
   body='{"v":1,"rid":"'$1'","ev":"'$2'"'
   [ -n "$nh" ] && body=$body',"nh":"'$nh'"'
   body=$body',"env":'$ENV_JSON'}'
-  code=$(http POST /v1/ingest "$body" 20 "$4")
+  # A tunnel answers at once or not at all (a dead port may belong to
+  # something else by now); the relay may hold the request a few seconds.
+  mt=20
+  [ "$L_KIND" = tunnel ] && mt=5
+  code=$(http POST /v1/ingest "$body" "$mt" "$4")
   push=''
   case $code in
     200)
@@ -358,14 +366,20 @@ ingest_one() { # rid ev nonce outfile
   printf '%s' "${push:-http$code}"
 }
 
-# Sends $1 to every link in the background and returns at once.
+# Sends $1 to every link in the background and returns at once. Tunnels go
+# first: the app reports a shown event to the relay ("seen"), which holds a
+# push for a few seconds to hear that, so a device that is connected gets
+# no second alert.
 send_bg() { # ev
   [ -n "$LINKS" ] || return 0
   (
     trap '' HUP
-    printf '%s\n' "$LINKS" | while IFS= read -r f; do
-      load_link "$f" || continue
-      ingest_one "$RID" "$1" '' "$RUN_DIR/ing.$$.$RID.$(printf %.8s "$L_LINK")" >/dev/null
+    for pass in tunnel relay; do
+      printf '%s\n' "$LINKS" | while IFS= read -r f; do
+        load_link "$f" || continue
+        if [ "$L_KIND" = tunnel ]; then [ "$pass" = tunnel ] || continue; else [ "$pass" = relay ] || continue; fi
+        ingest_one "$RID" "$1" '' "$RUN_DIR/ing.$$.$RID.$(printf %.8s "$L_LINK")" >/dev/null
+      done
     done
     trim_log
   ) </dev/null >/dev/null 2>&1 &
@@ -446,6 +460,15 @@ EOF
         [ "$code" = 410 ] && [ "$(resp_get "$resp" error)" = 'error=revoked' ] &&
           : >"$RUN_DIR/$L_LINK.revoked"
         break
+        ;;
+      000)
+        # The app's connection ended (or the port is gone): nothing will
+        # answer there, so stop instead of waiting out the deadline.
+        if [ "$L_KIND" = tunnel ]; then
+          log "decision link=$(printf %.8s "$L_LINK") tunnel-gone"
+          break
+        fi
+        sleep 2
         ;;
       *) sleep 2 ;;
     esac

@@ -59,6 +59,22 @@ relay. Deleting the file stops the hook from sending.
 Status badges need no link: in a SimpleTerm session (`SIMPLETERM=1`) Claude Code shows them as
 soon as the plugin is installed.
 
+### Through the SSH connection (inside tmux too)
+
+While SimpleTerm is connected to a server set up for alerts, it also opens an SSH tunnel: the
+server forwards a loopback port (`127.0.0.1`) to the app over that SSH connection, and the app
+writes a link file with `kind=tunnel` and that port. The hook talks to it exactly as to the relay
+(same encryption and signed answers), so:
+
+- alerts and approvals reach the app inside tmux, screen or zellij, where terminal notifications
+  are dropped, and without the relay, an account or a push service;
+- a permission answered in the app goes to that exact agent; no keys are typed into the terminal.
+
+The tunnel lives as long as the connection. The app removes its file when the connection ends;
+a file left by a dropped connection is removed the next time that device connects. When the
+tunnel is gone the hook stops waiting there at once. The server must allow TCP forwarding
+(OpenSSH's default `AllowTcpForwarding yes`); otherwise only the relay works.
+
 ## What it sends
 
 | Agent event | Alert | Badge (Claude Code, SimpleTerm sessions only) |

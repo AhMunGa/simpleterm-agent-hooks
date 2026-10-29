@@ -55,6 +55,8 @@ V_NH = "5d0b193317e951a7444b9bd4c632e0f1793fcbdfad115ae4caeba4f7ae39cca5"
 
 LINK_A = {"id": "a1" * 16, "secret": "b2" * 32, "enc": V_ENC, "mac": V_MAC, "label": "dev-box"}
 LINK_B = {"id": "c3" * 16, "secret": "d4" * 32, "enc": "e5" * 32, "mac": "f6" * 32, "label": "box-b"}
+# The app's end of an SSH tunnel (kind=tunnel); its file sorts after LINK_A.
+LINK_T = {"id": "e7" * 16, "secret": "f8" * 32, "enc": "a9" * 32, "mac": "ba" * 32, "label": "dev-box"}
 
 # Utilities the sh hook needs apart from curl and openssl. printf is there
 # as on any real system; the hook must still use the shell's builtin.
@@ -129,10 +131,13 @@ class Suite:
         (st / "links").mkdir(parents=True)
         cfg = {}
         for link, opts in links:
-            text = "\n".join([
-                "v=1", "relay=" + self.url, "link=" + link["id"], "secret=" + link["secret"],
-                "enc=" + link["enc"], "mac=" + link["mac"], "label=" + link["label"], "device=Test iPad", "",
-            ])
+            lines = [
+                "v=1", "relay=" + opts.get("relay_url", self.url), "link=" + link["id"], "secret=" + link["secret"],
+                "enc=" + link["enc"], "mac=" + link["mac"], "label=" + link["label"], "device=Test iPad",
+            ]
+            if opts.get("kind"):
+                lines.append("kind=" + opts["kind"])
+            text = "\n".join(lines + [""])
             p = st / "links" / (link["id"] + ".conf")
             p.write_text(text)
             p.chmod(0o600)
@@ -141,6 +146,23 @@ class Suite:
         (st / "agent-hook.conf").write_text("\n".join(conf_lines) + "\n")
         self.ctl("/_ctl/reset", {})
         self.ctl("/_ctl/config", {"links": cfg})
+
+    def spawn_mock(self):
+        """Another mock relay (the app's end of a tunnel); returns (process, ctl)."""
+        proc = subprocess.Popen(
+            [sys.executable, "-I", str(MOCK), "--openssl", self.openssl or "/usr/bin/openssl"],
+            stdout=subprocess.PIPE, text=True,
+        )
+        url = "http://127.0.0.1:%d" % int(proc.stdout.readline().split()[1])
+
+        def ctl(path, obj=None):
+            data = None if obj is None else json.dumps(obj).encode()
+            req = urllib.request.Request(url + path, data=data, method="POST" if data is not None else "GET")
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return json.loads(r.read())
+
+        ctl.url = url
+        return proc, ctl
 
     def log_text(self):
         p = self.home / ".simpleterm" / "agent-hook.log"
@@ -310,6 +332,70 @@ def t_multi_link(s):
     s.check("multi-link: per-link labels", hosts == ["box-b", "dev-box"], str(hosts))
     s.check("multi-link: distinct nonces", len({(r.get("plain_json") or {}).get("nonce") for r in recs}) == 2)
     s.check("multi-link: same rid", len({r["body"]["rid"] for r in recs}) == 1)
+
+
+def t_tunnel(s):
+    tun, tctl = s.spawn_mock()
+    try:
+        def tunnel(opts, conf=None, more=()):
+            s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url})] + list(more), conf)
+            tctl("/_ctl/reset", {})
+            tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, **opts)}})
+
+        def tunnel_ingests():
+            return [r for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest"]
+
+        tunnel({"decision": "allow", "after": 1})
+        rc, out, err, el = s.run("claude", perm_input())
+        d = decision_json(out) or {}
+        s.check("tunnel: the app's decision is printed",
+                d.get("hookSpecificOutput", {}).get("decision", {}).get("behavior") == "allow", out + err)
+
+        # The app's connection ends while the hook waits: stop, don't wait out claude_wait.
+        tunnel({}, conf={"claude_wait": 40})
+        p = s.start("claude", perm_input())
+        s.check("tunnel gone: request reached the tunnel", wait_for(tunnel_ingests, 10))
+        tun.terminate()
+        tun.wait(5)
+        rc, out, err, el = s.finish(p, 60)
+        s.check("tunnel gone: no decision", out.strip() == "", out)
+        s.check("tunnel gone: stops waiting soon", el < 15, "%.2fs" % el)
+        s.check("tunnel gone: logged", "tunnel-gone" in s.log_text(), s.log_text())
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+    # A dead tunnel (nothing on the port) does not hold up the relay's device.
+    probe = __import__("socket").socket()
+    probe.bind(("127.0.0.1", 0))
+    closed = probe.getsockname()[1]
+    probe.close()
+    s.setup([(LINK_T, {"kind": "tunnel", "relay_url": "http://127.0.0.1:%d" % closed}),
+             (LINK_A, {"decision": "allow", "after": 1})])
+    rc, out, err, el = s.run("claude", perm_input())
+    d = decision_json(out) or {}
+    s.check("dead tunnel: relay decision still arrives",
+            d.get("hookSpecificOutput", {}).get("decision", {}).get("behavior") == "allow", out + err)
+    s.check("dead tunnel: within time", el < 10, "%.2fs" % el)
+
+    # Background events reach a tunnel before the relay, which holds its answer.
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_A, {"ingest_delay": 3}), (LINK_T, {"kind": "tunnel", "relay_url": tctl.url})])
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T)}})
+        stop = json.dumps({"session_id": "s3", "cwd": "/w/proj", "hook_event_name": "Stop",
+                           "stop_hook_active": False, "last_assistant_message": "done"})
+        t0 = time.time()
+        s.run("claude", stop)
+        got = wait_for(lambda: [r for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest"], 10, 0.05)
+        el = time.time() - t0
+        s.check("tunnel first: background event reaches the tunnel before the relay answers",
+                got and el < 2.5, "%.2fs" % el)
+        s.check("tunnel first: relay still gets it",
+                wait_for(lambda: s.records("/v1/ingest"), 10), str(s.records())[:200])
+    finally:
+        tun.terminate()
+        tun.wait(5)
 
 
 def t_revoked(s):
@@ -609,7 +695,7 @@ def t_external_printf(s):
 
 
 TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t_timeout, t_multi_link,
-         t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_agent_gone, t_events,
+         t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_agent_gone, t_events,
          t_hostile_input, t_log, t_argv, t_external_printf]
 
 
