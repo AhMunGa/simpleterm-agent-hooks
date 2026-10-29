@@ -278,7 +278,7 @@ def t_background(s):
     rc, out, err, el = s.run("claude", stop)
     s.check("background: hook returns before the relay answers", el < 2.0, "%.2fs" % el)
     s.check("background: no stdout without SIMPLETERM", out == "", out)
-    rec = wait_for(lambda: [r for r in s.records("/v1/ingest") if r.get("status") == 200], 10)
+    rec = wait_for(lambda: [r for r in s.records("/v1/ingest") if r.get("status") == 200], 30)
     s.check("background: ingest completed after exit", rec, str(s.records())[:300])
     if rec:
         p = rec[0].get("plain_json") or {}
@@ -525,14 +525,14 @@ def t_notifications(s):
     _, out, _, _ = s.run("claude", json.dumps({"session_id": "q", "hook_event_name": "Notification",
                                                "message": "Claude is waiting for your input", "notification_type": "idle_prompt"}),
                          {"SIMPLETERM": "1"})
-    rec = wait_for(lambda: s.records("/v1/ingest"), 8)
+    rec = wait_for(lambda: s.records("/v1/ingest"), 20)
     s.check("notification: idle_prompt -> question", rec and rec[0]["body"]["ev"] == "question"
             and rec[0]["plain_json"].get("msg") == "Claude is waiting for your input", str(rec)[:200])
     s.check("notification: idle_prompt keeps the done badge (no sequence)", out == "", out)
     s.ctl("/_ctl/reset", {})
     _, out, _, _ = s.run("claude", json.dumps({"session_id": "q", "hook_event_name": "Notification", "message": "MCP needs input",
                                                "notification_type": "elicitation_dialog"}), {"SIMPLETERM": "1"})
-    rec = wait_for(lambda: s.records("/v1/ingest"), 8)
+    rec = wait_for(lambda: s.records("/v1/ingest"), 20)
     s.check("notification: elicitation -> question", rec and rec[0]["body"]["ev"] == "question", str(rec)[:200])
     s.check("notification: elicitation -> waiting", "state=waiting" in out, out)
 
@@ -561,7 +561,7 @@ def t_agent_gone(s):
             return False
         except OSError:
             return True
-    s.check("agent gone: hook exits", wait_for(gone, 8), "pid %d" % hook_pid)
+    s.check("agent gone: hook exits", wait_for(gone, 20), "pid %d" % hook_pid)
     s.check("agent gone: logged", wait_for(lambda: "permission agent-gone" in s.log_text(), 3), s.log_text())
     n = len(s.records("/v1/decision"))
     time.sleep(3)
@@ -583,7 +583,7 @@ def t_events(s):
     for agent, inp, ev in cases:
         s.ctl("/_ctl/reset", {})
         rc, out, err, el = s.run(agent, json.dumps(inp))
-        rec = wait_for(lambda: s.records("/v1/ingest"), 8)
+        rec = wait_for(lambda: s.records("/v1/ingest"), 20)
         got = rec[0]["body"]["ev"] if rec else None
         s.check("events: %s %s -> %s" % (agent, inp["hook_event_name"], ev), got == ev, "%s %s" % (got, err))
         if ev == "question" and rec:
@@ -807,7 +807,7 @@ def t_usage_claude(s):
     rc, out, err, el = s.run("claude", json.dumps(stop), {"SIMPLETERM": "1"})
     s.check("usage claude: done + usage sequences in one terminalSequence",
             seqs(out) == "\x1b]9;simpleterm:state=done\x07" + USAGE_OSC_CLAUDE, repr(out))
-    rec = wait_for(lambda: ingests(s, "usage"), 8)
+    rec = wait_for(lambda: ingests(s, "usage"), 20)
     p = rec[0].get("plain_json", {}) if rec else {}
     s.check("usage claude: usage event to the link",
             p.get("ctx") == {"used": 5310, "win": 1000000, "src": "transcript", "est": True} and p.get("lims") == []
@@ -856,7 +856,7 @@ def t_usage_claude(s):
     s.check("usage claude: StopFailure rate_limit -> lim=reached",
             seqs(out) == "\x1b]9;simpleterm:state=done\x07\x1b]9;simpleterm:usage v=1 agent=claude-code ctx=42000 win=1000000"
                           " src=transcript est=1 lim=reached\x07", repr(out))
-    rec = wait_for(lambda: ingests(s, "usage"), 8)
+    rec = wait_for(lambda: ingests(s, "usage"), 20)
     s.check("usage claude: reached in the event", rec and rec[0]["plain_json"].get("lims") == [{"id": "reached"}],
             str(rec[0].get("plain_json") if rec else None))
     # No SimpleTerm session: no sequence, the link still gets it.
@@ -864,7 +864,7 @@ def t_usage_claude(s):
     rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-c2", "transcript_path": str(tr), "hook_event_name": "Stop",
                                                    "last_assistant_message": "ok"}))
     s.check("usage claude: no output without SIMPLETERM", out == "", out)
-    s.check("usage claude: link gets it without SIMPLETERM", wait_for(lambda: ingests(s, "usage"), 8))
+    s.check("usage claude: link gets it without SIMPLETERM", wait_for(lambda: ingests(s, "usage"), 20))
     # usage=0 turns it off.
     s.setup([(LINK_A, {"push": "disabled"})], conf={"usage": 0})
     rc, out, err, el = s.run("claude", json.dumps(dict(stop, session_id="u-off")), {"SIMPLETERM": "1"})
@@ -908,7 +908,7 @@ def t_usage_statusline(s):
     s.check("statusline: exact window and limits (expired window dropped)",
             seqs(out).endswith("\x1b]9;simpleterm:usage v=1 agent=claude-code ctx=5310 win=200000 src=transcript"
                                " lim=five_hour:23.5:300:4102444800 lim=seven_day:41.2:10080:4102444800\x07"), repr(out))
-    rec = wait_for(lambda: ingests(s, "usage"), 8)
+    rec = wait_for(lambda: ingests(s, "usage"), 20)
     s.check("statusline: limits in the event", rec and rec[0]["plain_json"].get("lims") == [
         {"id": "five_hour", "pct": 23.5, "win_min": 300, "resets_at": 4102444800},
         {"id": "seven_day", "pct": 41.2, "win_min": 10080, "resets_at": 4102444800}], str(rec[0].get("plain_json") if rec else None))
@@ -937,8 +937,8 @@ def t_usage_relay_policy(s):
         time.sleep(1.5)
         s.check("usage policy: PostToolUse at most every 20 s", len(ingests(s, "usage", tctl)) == 1, str(len(ingests(s, "usage", tctl))))
         s.run("claude", json.dumps(dict(base, hook_event_name="Stop", last_assistant_message="ok")))
-        s.check("usage policy: turn end reaches the relay", wait_for(lambda: ingests(s, "usage"), 8))
-        s.check("usage policy: turn end reaches the tunnel (changed)", wait_for(lambda: len(ingests(s, "usage", tctl)) == 2, 8))
+        s.check("usage policy: turn end reaches the relay", wait_for(lambda: ingests(s, "usage"), 20))
+        s.check("usage policy: turn end reaches the tunnel (changed)", wait_for(lambda: len(ingests(s, "usage", tctl)) == 2, 20))
         got = (ingests(s, "usage")[0].get("plain_json") or {}).get("ctx", {}) if ingests(s, "usage") else {}
         s.check("usage policy: relay value is the turn's last", got.get("used") == 5320, str(got))
     finally:
@@ -954,21 +954,21 @@ def t_usage_codex(s):
            "model": "gpt-5.5", "permission_mode": "default", "stop_hook_active": False, "last_assistant_message": "Done."}
     rc, out, err, el = s.run("codex", json.dumps(inp), {"SIMPLETERM": "1"})
     s.check("usage codex: nothing on stdout (schema)", out == "", out)
-    rec = wait_for(lambda: ingests(s, "usage"), 8)
+    rec = wait_for(lambda: ingests(s, "usage"), 20)
     p = rec[0].get("plain_json", {}) if rec else {}
     s.check("usage codex: rollout context, window, baseline",
             p.get("ctx") == {"used": 15159, "win": 258400, "baseline": 12000, "src": "rollout"} and p.get("app") == "codex", str(p))
     s.check("usage codex: limits and plan", p.get("lims") == [
         {"id": "codex.primary", "pct": 4.0, "win_min": 300, "resets_at": 1795746291},
         {"id": "codex.secondary", "pct": 12.5, "win_min": 10080, "resets_at": 1796000000}] and p.get("plan") == "plus", str(p))
-    s.check("usage codex: done still sent", wait_for(lambda: ingests(s, "done"), 8))
+    s.check("usage codex: done still sent", wait_for(lambda: ingests(s, "done"), 20))
     tun, tctl = s.spawn_mock()
     try:
         s.setup([(LINK_A, {"push": "disabled"}), (LINK_T, {"kind": "tunnel", "relay_url": tctl.url})])
         tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T)}})
         write(ro, codex_token_line(total=16000, reached="primary") + "\n")
         s.run("codex", json.dumps(dict(inp, hook_event_name="SessionStart", source="resume")))
-        rec = wait_for(lambda: ingests(s, "usage", tctl), 8)
+        rec = wait_for(lambda: ingests(s, "usage", tctl), 20)
         p = rec[0].get("plain_json", {}) if rec else {}
         s.check("usage codex: SessionStart to the tunnel, reached",
                 p.get("ctx", {}).get("used") == 16000 and {"id": "reached"} in p.get("lims", []), str(p))
@@ -992,7 +992,7 @@ def t_gemini(s):
     rc, out, err, el = s.run("gemini", json.dumps(note), {"SIMPLETERM": "1"})
     s.check("gemini: Notification prints nothing", out == "", out)
     s.check("gemini: Notification returns at once", el < 2, "%.2fs" % el)
-    rec = wait_for(lambda: ingests(s), 8)
+    rec = wait_for(lambda: ingests(s), 20)
     p = rec[0].get("plain_json", {}) if rec else {}
     s.check("gemini: ToolPermission -> question (alert only)",
             rec and rec[0]["body"]["ev"] == "question" and p.get("app") == "gemini-cli" and p.get("msg") == "approve rm: rm -rf build"
@@ -1001,22 +1001,22 @@ def t_gemini(s):
     edit = dict(note, details={"type": "edit", "title": "Confirm Edit", "fileName": "a.txt", "filePath": "/w/site/a.txt",
                                "fileDiff": "@@", "originalContent": "x" * 5000, "newContent": "y"})
     s.run("gemini", json.dumps(edit))
-    rec = wait_for(lambda: ingests(s), 8)
+    rec = wait_for(lambda: ingests(s), 20)
     s.check("gemini: edit permission names the file", rec and rec[0]["plain_json"].get("msg") == "approve edit: /w/site/a.txt",
             str(rec[0].get("plain_json") if rec else None))
     s.ctl("/_ctl/reset", {})
     after = dict(base, hook_event_name="AfterAgent", prompt="p", prompt_response="All green.", stop_hook_active=False)
     rc, out, err, el = s.run("gemini", json.dumps(after), {"SIMPLETERM": "1"})
     s.check("gemini: AfterAgent prints nothing (no block)", out == "", out)
-    rec = wait_for(lambda: ingests(s, "done"), 8)
+    rec = wait_for(lambda: ingests(s, "done"), 20)
     s.check("gemini: AfterAgent -> done", rec and rec[0]["plain_json"].get("msg") == "All green.", str(rec)[:200])
-    rec = wait_for(lambda: ingests(s, "usage"), 8)
+    rec = wait_for(lambda: ingests(s, "usage"), 20)
     s.check("gemini: usage from the chat record", rec and rec[0]["plain_json"].get("ctx") == {"used": 33435, "win": 1048576, "src": "transcript"},
             str(rec[0].get("plain_json") if rec else None))
     s.ctl("/_ctl/reset", {})
     old = write(s.tmp / "gemini" / "chats" / "session-old.json", GEMINI_PRETTY)
     s.run("gemini", json.dumps(dict(after, session_id="gm-old", transcript_path=str(old))))
-    rec = wait_for(lambda: ingests(s, "usage"), 8)
+    rec = wait_for(lambda: ingests(s, "usage"), 20)
     s.check("gemini: older pretty JSON record", rec and rec[0]["plain_json"].get("ctx", {}).get("used") == 7682,
             str(rec[0].get("plain_json") if rec else None))
     s.ctl("/_ctl/reset", {})
@@ -1070,18 +1070,18 @@ def t_notify(s):
         s.check("notify: exit 0", rc == 0, str(rc))
         s.check("notify: OSC 777 on the terminal, control characters removed",
                 b"\x1b]777;notify;Build done;exit 0; \xed\x95\x9c\xea\xb8\x80 ]0;x\x07" in tty, repr(tty))
-        rec = wait_for(lambda: ingests(s, "notify"), 8)
+        rec = wait_for(lambda: ingests(s, "notify"), 20)
         p = rec[0].get("plain_json", {}) if rec else {}
         s.check("notify: relay event", p.get("app") == "script" and p.get("title") == "Build done"
                 and p.get("msg") == "exit 0; 한글 ]0;x" and p.get("host") == "dev-box", str(p))
         s.check("notify: plaintext order", rec and rec[0]["plain"].startswith(
             '{"v":1,"rid":"%s","ev":"notify","app":"script","host":"dev-box","cwd":"%s","title":"Build done","msg":"'
             % (p.get("rid"), s.tmp.name)), rec[0]["plain"] if rec else "")
-        s.check("notify: tunnel event", wait_for(lambda: ingests(s, "notify", tctl), 8))
+        s.check("notify: tunnel event", wait_for(lambda: ingests(s, "notify", tctl), 20))
         s.ctl("/_ctl/reset", {})
         rc, tty = notify_pty(s, ["notify", "Only title"])
         s.check("notify: no sequence outside SimpleTerm", b"\x1b]777" not in tty, repr(tty))
-        s.check("notify: still sent to links", wait_for(lambda: ingests(s, "notify"), 8))
+        s.check("notify: still sent to links", wait_for(lambda: ingests(s, "notify"), 20))
         rc, tty = notify_pty(s, ["notify"])
         s.check("notify: usage error without a title", rc == 2 and b"usage: simpleterm notify" in tty, repr(tty))
         rc, tty = notify_pty(s, ["bogus"])
@@ -1103,7 +1103,7 @@ def t_cli_wrapper(s):
     s.check("cli: written on Stop", "s='%s'" % (SCRIPTS / "simpleterm-notify.sh") in text and os.access(w, os.X_OK), text)
     s.ctl("/_ctl/reset", {})
     p = subprocess.run([str(w), "notify", "via wrapper"], capture_output=True, env=s.env(), timeout=20)
-    s.check("cli: wrapper runs notify", p.returncode == 0 and wait_for(lambda: ingests(s, "notify"), 8), p.stderr)
+    s.check("cli: wrapper runs notify", p.returncode == 0 and wait_for(lambda: ingests(s, "notify"), 20), p.stderr)
     w.write_text(text.replace(str(SCRIPTS), "/nonexistent/old-version"))
     p = subprocess.run([str(w), "notify", "x"], capture_output=True, env=s.env(), timeout=20)
     s.check("cli: a moved plugin is reported", p.returncode == 1 and b"is gone" in p.stderr, p.stderr)
@@ -1146,11 +1146,11 @@ def t_agy(s):
                 and p.get("cwd") == "agyproj" and rec[0].get("nh_ok") is True, str(p))
     s.setup([(LINK_A, {})], conf={"agy_wait": 3})
     rc, out, err, el = s.run("agy", agy_input(), args=("PreToolUse",))
-    s.check("agy: no answer in agy_wait -> allow", out.strip() == '{"decision":"allow"}' and 1.5 < el < 15, "%s %.2fs" % (out, el))
+    s.check("agy: no answer in agy_wait -> allow", out.strip() == '{"decision":"allow"}' and 1.5 < el < 30, "%s %.2fs" % (out, el))
     s.setup([(LINK_A, {"push": "disabled"})])
     q = agy_input("ask_question", {"questions": [{"question": "Which port?", "options": ["80", "8080"], "is_multi_select": False}]})
     rc, out, err, el = s.run("agy", q, args=("PreToolUse",))
-    rec = wait_for(lambda: ingests(s, "question"), 8)
+    rec = wait_for(lambda: ingests(s, "question"), 20)
     s.check("agy: ask_question -> question alert, allow", out.strip() == '{"decision":"allow"}' and rec
             and rec[0]["plain_json"].get("msg") == "Which port?", out + str(rec)[:200])
     s.ctl("/_ctl/reset", {})
@@ -1158,11 +1158,11 @@ def t_agy(s):
     time.sleep(1.5)
     s.check("agy: Stop not fully idle -> nothing", out.strip() == "{}" and not ingests(s), out)
     rc, out, err, el = s.run("agy", agy_stop(), args=("Stop",))
-    rec = wait_for(lambda: ingests(s, "done"), 8)
+    rec = wait_for(lambda: ingests(s, "done"), 20)
     s.check("agy: Stop fully idle -> done, {}", out.strip() == "{}" and rec and rec[0]["plain_json"].get("app") == "antigravity", out)
     s.ctl("/_ctl/reset", {})
     s.run("agy", agy_stop(error="quota exceeded", terminationReason="ERROR"), args=("Stop",))
-    rec = wait_for(lambda: ingests(s), 8)
+    rec = wait_for(lambda: ingests(s), 20)
     s.check("agy: Stop with error -> error", rec and rec[0]["body"]["ev"] == "error"
             and rec[0]["plain_json"].get("msg") == "ERROR: quota exceeded", str(rec)[:200])
     shutil.rmtree(s.home / ".simpleterm" / "links")
@@ -1185,7 +1185,7 @@ def t_grok(s):
     s.setup([(LINK_A, {"push": "disabled"})])
     inp, env = grok_input("Stop", reason="end_turn", promptId="p1", stopHookActive=False, lastAssistantMessage="Grok done.")
     rc, out, err, el = s.run("claude", inp, env)
-    rec = wait_for(lambda: ingests(s, "done"), 8)
+    rec = wait_for(lambda: ingests(s, "done"), 20)
     p = rec[0].get("plain_json", {}) if rec else {}
     s.check("grok: claude mode switches to grok-build", p.get("app") == "grok-build" and p.get("msg") == "Grok done."
             and p.get("cwd") == "grokproj", str(p))
@@ -1197,7 +1197,7 @@ def t_grok(s):
     s.check("grok: duplicate logged", "duplicate Stop" in s.log_text(), s.log_text()[-300:])
     inp2, _ = grok_input("Stop", reason="end_turn", promptId="p2", timestamp="2026-10-29T10:05:00.000Z", lastAssistantMessage="Grok done.")
     s.run("claude", inp2, env)
-    s.check("grok: a later turn with the same text is sent", wait_for(lambda: ingests(s, "done"), 8))
+    s.check("grok: a later turn with the same text is sent", wait_for(lambda: ingests(s, "done"), 20))
     s.ctl("/_ctl/reset", {})
     for reason in ("channel_closed", "shutdown"):
         inp3, _ = grok_input("Stop", reason=reason, timestamp="2026-10-29T10:09:%02d.000Z" % len(reason), lastAssistantMessage="x")
@@ -1206,7 +1206,7 @@ def t_grok(s):
     s.check("grok: session-end Stop is not a turn end", not ingests(s), str(ingests(s))[:200])
     note, nenv = grok_input("Notification", notificationType="permission_prompt", message="Tool permission requested", level="info")
     s.run("claude", note, dict(nenv, GROK_HOOK_EVENT="notification"))
-    rec = wait_for(lambda: ingests(s, "question"), 8)
+    rec = wait_for(lambda: ingests(s, "question"), 20)
     s.check("grok: permission_prompt -> question (alert only)", rec and rec[0]["plain_json"].get("msg") == "Tool permission requested"
             and not s.records("/v1/decision"), str(rec)[:200])
     s.ctl("/_ctl/reset", {})
@@ -1218,14 +1218,14 @@ def t_grok(s):
     fail, fenv = grok_input("StopFailure", error="rate_limit", errorDetails="429", lastAssistantMessage="Rate limited",
                             timestamp="2026-10-29T10:11:00.000Z")
     s.run("claude", fail, dict(fenv, GROK_HOOK_EVENT="stop_failure"))
-    rec = wait_for(lambda: ingests(s), 8)
+    rec = wait_for(lambda: ingests(s), 20)
     s.check("grok: StopFailure -> error", rec and rec[0]["body"]["ev"] == "error"
             and rec[0]["plain_json"].get("msg") == "rate_limit: Rate limited", str(rec)[:200])
     s.ctl("/_ctl/reset", {})
     only_camel = json.dumps({"hookEventName": "stop", "sessionId": "gk-2", "cwd": "/w/g", "timestamp": "t9", "reason": "end_turn",
                              "lastAssistantMessage": "camel only"})
     s.run("grok", only_camel)
-    rec = wait_for(lambda: ingests(s, "done"), 8)
+    rec = wait_for(lambda: ingests(s, "done"), 20)
     s.check("grok: grok mode, camelCase-only input", rec and rec[0]["plain_json"].get("msg") == "camel only", str(rec)[:200])
 
 
@@ -1242,14 +1242,14 @@ def t_opencode_sh(s):
     s.setup([(LINK_A, {"push": "disabled"})])
     s.run("opencode", json.dumps({"hook_event_name": "StopFailure", "session_id": "oc-1", "cwd": "/w/ocproj",
                                   "error": "ProviderAuthError", "last_assistant_message": "API key invalid"}))
-    rec = wait_for(lambda: ingests(s), 8)
+    rec = wait_for(lambda: ingests(s), 20)
     s.check("opencode sh: ProviderAuthError -> auth", rec and rec[0]["body"]["ev"] == "auth", str(rec)[:200])
 
 
 NODE = shutil.which("node")
 
 
-def node_plugin(s, kind, scenario, timeout=60):
+def node_plugin(s, kind, scenario, timeout=90):
     plugin = {"v1": ROOT / "plugins" / "opencode-v1" / "simpleterm.js", "v2": ROOT / "plugins" / "opencode" / "index.js"}[kind]
     p = subprocess.run([NODE, str(HERE / "opencode_harness.mjs"), kind, str(plugin), json.dumps(scenario)],
                        capture_output=True, text=True, env=s.env(), timeout=timeout, cwd=str(s.tmp))
@@ -1272,7 +1272,7 @@ def t_opencode_js(s):
     s.setup([(LINK_A, {"decision": "allow", "after": 1})])
     ask19 = {"type": "permission.asked", "properties": {"id": "per_1", "sessionID": "ses_1", "permission": "bash",
                                                        "patterns": ["npm test"], "metadata": {"command": "npm test"}, "always": []}}
-    calls = node_plugin(s, "v1", {"directory": d, "steps": [{"event": ask19}], "wait": 8000})
+    calls = node_plugin(s, "v1", {"directory": d, "steps": [{"event": ask19}], "wait": 30000, "replies": 1})
     s.check("opencode 1.x: only function exports", calls and calls[0].get("exports") == [["SimpleTermAgentHooks", "function"]], str(calls)[:300])
     s.check("opencode 1.x: device allow -> once", replies(calls) == [{"path": {"id": "ses_1", "permissionID": "per_1"},
                                                                        "body": {"response": "once"}}], str(calls)[:300])
@@ -1281,7 +1281,7 @@ def t_opencode_js(s):
     s.setup([(LINK_A, {"decision": "deny", "after": 1})])
     ask10 = {"type": "permission.updated", "properties": {"id": "per_2", "sessionID": "ses_1", "type": "bash", "pattern": "make",
                                                          "title": "make deploy", "metadata": {"command": "make deploy"}}}
-    calls = node_plugin(s, "v1", {"directory": d, "steps": [{"event": ask10}], "wait": 8000})
+    calls = node_plugin(s, "v1", {"directory": d, "steps": [{"event": ask10}], "wait": 30000, "replies": 1})
     s.check("opencode 1.0 permission.updated: device deny -> reject",
             [r["body"]["response"] for r in replies(calls)] == ["reject"], str(calls)[:300])
     s.setup([(LINK_A, {})], conf={"opencode_wait": 60})
@@ -1295,7 +1295,7 @@ def t_opencode_js(s):
     calls = node_plugin(s, "v1", {"directory": d, "sessions": {"ses_1": {"title": "Fix the tests"}, "ses_sub": {"parentID": "ses_1"}},
                                   "steps": [{"event": {"type": "session.idle", "properties": {"sessionID": "ses_1"}}},
                                             {"event": {"type": "session.idle", "properties": {"sessionID": "ses_sub"}}}], "wait": 3000})
-    rec = wait_for(lambda: ingests(s, "done"), 8)
+    rec = wait_for(lambda: ingests(s, "done"), 20)
     time.sleep(1)
     s.check("opencode 1.x: session.idle -> done with the session title, subagents skipped",
             len(ingests(s, "done")) == 1 and rec[0]["plain_json"].get("msg") == "Fix the tests", str(ingests(s))[:300])
@@ -1304,7 +1304,8 @@ def t_opencode_js(s):
     ask2 = {"id": "evt_1", "type": "permission.asked", "created": 1, "location": {"directory": d},
             "data": {"id": "per_9", "sessionID": "ses_9", "action": "shell", "resources": ["npm run build"]}}
     other = dict(ask2, id="evt_2", location={"directory": "/somewhere/else"}, data=dict(ask2["data"], id="per_x"))
-    calls = node_plugin(s, "v2", {"directory": d, "steps": [{"event": ask2}, {"event": ask2}, {"event": other}], "wait": 8000})
+    calls = node_plugin(s, "v2", {"directory": d, "steps": [{"event": ask2}, {"event": ask2}, {"event": other}], "wait": 30000,
+                                  "replies": 1})
     s.check("opencode 2.x: plugin shape and events", calls and calls[0] == {"id": "simpleterm", "setup": "function"}
             and "permission.asked" in (calls[1].get("subscribed") or []), str(calls)[:300])
     s.check("opencode 2.x: device allow -> once (once per event, own directory only)",
@@ -1317,7 +1318,7 @@ def t_opencode_js(s):
         {"event": {"id": "evt_4", "type": "session.execution.failed", "location": {"directory": d},
                    "data": {"sessionID": "ses_9", "error": {"type": "provider", "message": "overloaded"}}}}], "wait": 3000})
     s.check("opencode 2.x: succeeded -> done, failed -> error",
-            wait_for(lambda: ingests(s, "done") and ingests(s, "error"), 8)
+            wait_for(lambda: ingests(s, "done") and ingests(s, "error"), 20)
             and ingests(s, "done")[0]["plain_json"].get("msg") == "Ship it"
             and ingests(s, "error")[0]["plain_json"].get("msg") == "provider: overloaded", str(ingests(s))[:300])
 

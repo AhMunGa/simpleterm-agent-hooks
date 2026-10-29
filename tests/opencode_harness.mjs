@@ -8,6 +8,15 @@ const [kind, file, scenarioJson] = process.argv.slice(2);
 const scenario = JSON.parse(scenarioJson);
 const calls = [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Waits up to `ms`, or less once `scenario.replies` permission replies arrived.
+async function settle(ms) {
+  const want = scenario.replies || 0;
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (want && calls.filter((c) => c.reply).length >= want) return;
+    await sleep(100);
+  }
+}
 const mod = await import(pathToFileURL(file).href);
 
 if (kind === "v1") {
@@ -26,7 +35,7 @@ if (kind === "v1") {
     if (step.sleep) await sleep(step.sleep);
     else for (const h of hooks) h.event && h.event({ event: step.event });
   }
-  await sleep(scenario.wait || 1000);
+  await settle(scenario.wait || 1000);
 } else {
   const def = mod.default;
   calls.push({ id: def.id, setup: typeof def.setup });
@@ -62,7 +71,7 @@ if (kind === "v1") {
     if (step.sleep) await sleep(step.sleep);
     else { queue.push(step.event); if (wake) wake(); }
   }
-  await sleep(scenario.wait || 1000);
+  await settle(scenario.wait || 1000);
   if (typeof cleanup === "function") cleanup();
   if (wake) wake();
 }
