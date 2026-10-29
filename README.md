@@ -72,10 +72,13 @@ after every update, because trust is tied to the plugin's contents.
 ### Gemini CLI
 
 ```sh
-gemini extensions install https://github.com/AhMunGa/simpleterm-agent-hooks --consent
+mkdir -p ~/.simpleterm
+cd ~/.simpleterm && gemini extensions install https://github.com/AhMunGa/simpleterm-agent-hooks --consent
 ```
 
-Gemini installs the whole repository as the extension `simpleterm` (it reads
+With `--consent`, Gemini CLI also trusts the folder the command runs in if it is not trusted yet
+(folder trust is on by default), so run it from `~/.simpleterm` rather than from your home or a
+project. Gemini installs the whole repository as the extension `simpleterm` (it reads
 `gemini-extension.json` and `hooks/hooks.json` at the top). It needs `git`, and it cannot be run
 from inside a Gemini session.
 
