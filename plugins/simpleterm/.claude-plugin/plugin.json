@@ -1,7 +1,7 @@
 {
   "name": "simpleterm",
   "displayName": "SimpleTerm agent hooks",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Status badges, end-to-end encrypted alerts and permission approvals for Claude Code in the SimpleTerm app",
   "author": {
     "name": "AhMunGa",

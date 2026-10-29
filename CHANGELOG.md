@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1 - 2026-10-29
+
+- Fix: when a prompt and the permission request of the same session arrived within the same
+  second, the hook treated the prompt as an answer typed in the terminal and stopped waiting,
+  so approving from the device did nothing. Notes written before the wait began no longer count
+  (`agent-hook.sh` and `agent-hook.ps1`).
+
 ## 0.1.0 - 2026-10-29
 
 First release.

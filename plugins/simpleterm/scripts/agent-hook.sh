@@ -471,14 +471,21 @@ agent_pid() {
 }
 
 # True if the agent moved on from request $1 (answered at the terminal).
+# Notes already in the file when the wait began (RES_BASE) do not count: the
+# prompt that started this turn, or an earlier identical tool call, can carry
+# the same second as the request.
 answered_locally() { # since fingerprint
   [ -f "$RUN_DIR/$SID.res" ] || return 1
+  res=$(cat "$RUN_DIR/$SID.res" 2>/dev/null)
+  case $res in "$RES_BASE"*) res=${res#"$RES_BASE"} ;; esac
   while IFS=' ' read -r t kind fp; do
     is_uint "$t" || continue
     [ "$t" -ge "$1" ] || continue
     [ "$kind" = turn ] && return 0
     [ "$kind" = tool ] && [ "$fp" = "$2" ] && return 0
-  done <"$RUN_DIR/$SID.res"
+  done <<EOF
+$res
+EOF
   return 1
 }
 
@@ -492,6 +499,7 @@ permission_flow() {
   POLL_WAIT=$(conf_int poll_wait 25)
   [ "$POLL_WAIT" -ge 1 ] && [ "$POLL_WAIT" -le 25 ] || POLL_WAIT=25
   start=$(date +%s)
+  RES_BASE=$(cat "$RUN_DIR/$SID.res" 2>/dev/null)
   deadline=$((start + cap))
   PIDS='' JOBS='' POLLERS=0
   AGENT_PID=$(agent_pid)

@@ -510,10 +510,23 @@ function Get-AgentPid {
     return 0
 }
 
+# Notes already in the file when the wait began ($script:ResBase lines) do not
+# count: the prompt that started this turn, or an earlier identical tool call,
+# can carry the same second as the request.
+function Get-ResLineCount {
+    $path = Join-Path $RunDir ($Sid + '.res')
+    if (-not [IO.File]::Exists($path)) { return 0 }
+    return [IO.File]::ReadAllLines($path, $Utf8).Count
+}
+
 function Test-AnsweredLocally([int64]$since, [string]$fp) {
     $path = Join-Path $RunDir ($Sid + '.res')
     if (-not [IO.File]::Exists($path)) { return $false }
-    foreach ($line in [IO.File]::ReadAllLines($path, $Utf8)) {
+    $lines = [IO.File]::ReadAllLines($path, $Utf8)
+    $first = 0
+    if ($lines.Count -ge $script:ResBase) { $first = $script:ResBase }
+    for ($i = $first; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
         $parts = $line.Split(' ')
         if ($parts.Count -lt 3 -or -not (Test-UInt $parts[0])) { continue }
         if ([int64]$parts[0] -lt $since) { continue }
@@ -529,6 +542,7 @@ function Invoke-PermissionFlow {
     $pollWait = Get-ConfInt 'poll_wait' 25
     if ($pollWait -lt 1 -or $pollWait -gt 25) { $pollWait = 25 }
     $start = Now-Epoch
+    $script:ResBase = Get-ResLineCount
     $deadline = $start + $cap
     $agentPid = Get-AgentPid
     $decision = ''
