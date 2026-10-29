@@ -6,11 +6,14 @@
 #   ... agent-hook.ps1 claude signal     Claude Code PermissionRequest status only
 #   ... agent-hook.ps1 codex             Codex hook (event JSON on stdin)
 #   ... agent-hook.ps1 codex-notify J    Codex `notify` program (JSON is last arg)
+#   ... agent-hook.ps1 notify T [B]      `simpleterm notify` (simpleterm.cmd)
 #
-# Same behavior as agent-hook.sh, using only .NET (Aes CBC/PKCS7,
-# HMACSHA256, HttpWebRequest). It never evaluates its input, prints only
-# agent-defined JSON on stdout, and always exits 0. Keep this file ASCII:
-# Windows PowerShell 5.1 reads BOM-less scripts in the ANSI code page.
+# Same behavior as agent-hook.sh for Claude Code, Codex and Grok Build (run
+# with `claude` and GROK_HOOK_EVENT set), using only .NET (Aes CBC/PKCS7,
+# HMACSHA256, HttpWebRequest). Gemini CLI, Antigravity and OpenCode are
+# sh-only. It never evaluates its input, prints only agent-defined JSON on
+# stdout, and always exits 0. Keep this file ASCII: Windows PowerShell 5.1
+# reads BOM-less scripts in the ANSI code page.
 
 $ErrorActionPreference = 'Stop'
 $ScriptArgs = @($args)
@@ -21,6 +24,9 @@ if ($ScriptArgs.Count -gt 1) { $Mode = [string]$ScriptArgs[1] }
 
 $MaxInput = 262144
 $MaxLinks = 16
+# Bumped when the ~/.simpleterm/bin/simpleterm.cmd wrapper must be rewritten.
+$CliRev = 1
+$Inv = [Globalization.CultureInfo]::InvariantCulture
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
 $IsWin = ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
 
@@ -398,10 +404,14 @@ function Short([string]$id) { return $id.Substring(0, 8) }
 
 # --- event payload ---------------------------------------------------------
 
+# `usage` carries $Script:UsageJson instead of a message; `notify` a title.
 function New-Plaintext($link, [string]$rid, [string]$ev, [string]$nonce) {
     $hostText = ConvertTo-JsonText $link.label 64 256
     $p = '{"v":1,"rid":"' + $rid + '","ev":"' + $ev + '","app":"' + $App + '","host":"' + $hostText +
-        '","cwd":"' + $CwdBase + '","msg":"' + $Script:Msg + '"'
+        '","cwd":"' + $CwdBase + '"'
+    if ($ev -eq 'usage') { $p += $Script:UsageJson }
+    elseif ($ev -eq 'notify') { $p += ',"title":"' + $Script:Title + '","msg":"' + $Script:Msg + '"' }
+    else { $p += ',"msg":"' + $Script:Msg + '"' }
     if ($nonce) { $p += ',"nonce":"' + $nonce + '"' }
     return $p + ',"ts":' + $Ts + '}'
 }
@@ -434,11 +444,16 @@ function Complete-Ingest($op, [string]$ev) {
 }
 
 # Sends the event to every link from a detached child process and returns.
-function Send-Background([string]$ev) {
+# $scope limits it to `tunnel` or `relay` links.
+# (PowerShell names are case-insensitive: a parameter `$rid` would hide `$Rid`.)
+function Send-Background([string]$ev, [string]$eventRid, [string]$scope) {
     if ($LinkFiles.Count -eq 0) { return }
+    if (-not $eventRid) { $eventRid = $Rid }
+    if (-not $scope) { $scope = 'all' }
     # The child gets the event through its environment, not its command line.
-    $payload = '{"ev":"' + $ev + '","rid":"' + $Rid + '","ts":"' + $Ts + '","cwd":"' + $CwdBase +
-        '","msg":"' + $Script:Msg + '"}'
+    $usage = [Convert]::ToBase64String($Utf8.GetBytes([string]$Script:UsageJson))
+    $payload = '{"ev":"' + $ev + '","rid":"' + $eventRid + '","ts":"' + $Ts + '","cwd":"' + $CwdBase +
+        '","msg":"' + $Script:Msg + '","title":"' + $Script:Title + '","usage":"' + $usage + '","scope":"' + $scope + '"}'
     $env:SIMPLETERM_HOOK_PAYLOAD = [Convert]::ToBase64String($Utf8.GetBytes($payload))
     $exe = (Get-Process -Id $PID).Path
     $argList = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'), $Agent, '__send')
@@ -460,17 +475,23 @@ function Invoke-SendChild {
     $raw = $env:SIMPLETERM_HOOK_PAYLOAD
     if (-not $raw) { return }
     $json = $Utf8.GetString([Convert]::FromBase64String($raw))
-    $f = Get-JsonFields $json @('ev', 'rid', 'ts', 'msg', 'cwd')
+    $f = Get-JsonFields $json @('ev', 'rid', 'ts', 'msg', 'cwd', 'title', 'usage', 'scope')
     $ev = Get-Field $f 'ev'
     $Script:Rid = Get-Field $f 'rid'
     $Script:Ts = Get-Field $f 'ts'
     $Script:Msg = Get-Field $f 'msg'
+    $Script:Title = Get-Field $f 'title'
     $Script:CwdBase = Get-Field $f 'cwd'
+    $scope = Get-Field $f 'scope'
+    try { $Script:UsageJson = $Utf8.GetString([Convert]::FromBase64String((Get-Field $f 'usage'))) } catch { $Script:UsageJson = '' }
     if (-not ($ev -cmatch '^[a-z]{1,16}$') -or -not (Test-Hex $Script:Rid 16) -or -not (Test-UInt $Script:Ts)) { return }
+    if ($ev -eq 'usage' -and -not $Script:UsageJson) { return }
     $ops = @()
     foreach ($file in (Get-LinkFiles)) {
         $link = Read-Link $file
         if ($null -eq $link) { continue }
+        if ($scope -eq 'tunnel' -and $link.kind -ne 'tunnel') { continue }
+        if ($scope -eq 'relay' -and $link.kind -eq 'tunnel') { continue }
         try { $op = Start-Ingest $link $Script:Rid $ev ''; if ($op) { $ops += $op } } catch { Write-Log 'ingest-failed' }
     }
     foreach ($op in $ops) { try { [void](Complete-Ingest $op $ev) } catch { Write-Log 'ingest-failed' } }
@@ -478,11 +499,17 @@ function Invoke-SendChild {
 
 # --- terminal sequence (Claude Code only, SimpleTerm sessions only) -------
 
+# $Script:UsageSeq is the JSON-escaped usage OSC to append, if any.
 function Write-State([string]$state, [string]$message) {
     if ($Agent -ne 'claude' -or $env:SIMPLETERM -ne '1') { return }
     $m = ''
     if ($message) { $m = ' ' + (Limit-JsonText $message 80 320) }
-    Write-Out ('{"terminalSequence":"\u001b]9;simpleterm:state=' + $state + $m + '\u0007"}')
+    Write-Out ('{"terminalSequence":"\u001b]9;simpleterm:state=' + $state + $m + '\u0007' + $Script:UsageSeq + '"}')
+}
+
+function Write-UsageOnly {
+    if ($Agent -ne 'claude' -or $env:SIMPLETERM -ne '1' -or -not $Script:UsageSeq) { return }
+    Write-Out ('{"terminalSequence":"' + $Script:UsageSeq + '"}')
 }
 
 function Get-StateJson([string]$state) {
@@ -642,6 +669,317 @@ function Invoke-PermissionFlow {
     }
 }
 
+# --- usage (#342) ------------------------------------------------------------
+
+function Format-Num($v) {
+    if ($v -is [double] -or $v -is [decimal] -or $v -is [single]) { return $v.ToString('0.##########', $Inv) }
+    return [string]$v
+}
+
+function Test-Num($v) { return ($null -ne $v -and (Format-Num $v) -match '^[0-9]{1,15}$') }
+function Test-Dec($v) { return ($null -ne $v -and (Format-Num $v) -match '^[0-9]{1,15}(\.[0-9]+)?$') }
+
+# The lines in the last $bytes of $path; a cut first line is blanked.
+function Read-TailLines([string]$path, [int]$bytes) {
+    $fs = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    try {
+        $len = $fs.Length
+        $n = [int][Math]::Min([int64]$bytes, $len)
+        [void]$fs.Seek($len - $n, [IO.SeekOrigin]::Begin)
+        $buf = New-Object byte[] $n
+        $read = 0
+        while ($read -lt $n) {
+            $r = $fs.Read($buf, $read, $n - $read)
+            if ($r -le 0) { break }
+            $read += $r
+        }
+    } finally { $fs.Dispose() }
+    $lines = $Utf8.GetString($buf, 0, $read).Split([char]10)
+    if ($len -gt $n -and $lines.Length -gt 0) { $lines[0] = '' }
+    return , $lines
+}
+
+function ConvertFrom-JsonLine([string]$line) {
+    try { return ($line | ConvertFrom-Json) } catch { return $null }
+}
+
+# A readable file named by a JSON-escaped path from the hook input, or ''.
+function Get-InputFile([string]$raw) {
+    if (-not $raw -or $raw -eq 'null') { return '' }
+    $sb = New-Object System.Text.StringBuilder
+    for ($i = 0; $i -lt $raw.Length; $i++) {
+        $c = $raw[$i]
+        if ($c -eq '\') {
+            if ($i + 1 -ge $raw.Length) { return '' }
+            $e = $raw[$i + 1]
+            if ($e -ne '\' -and $e -ne '/' -and $e -ne '"') { return '' }
+            $c = $e
+            $i++
+        }
+        [void]$sb.Append($c)
+    }
+    $path = $sb.ToString()
+    try { if ([IO.File]::Exists($path)) { return $path } } catch { }
+    return ''
+}
+
+# Claude Code transcript: the newest main-thread assistant usage (input +
+# cache creation + cache read) or a later compaction's postTokens. Only these
+# keys are read. @{ ctx; model } or $null.
+function Get-ClaudeUsage([string]$path) {
+    $ctx = $null
+    $model = ''
+    $len = (New-Object IO.FileInfo($path)).Length
+    foreach ($limit in @(262144, 2097152)) {
+        $lines = Read-TailLines $path $limit
+        $ctx = $null
+        $model = ''
+        $seen = 0
+        for ($i = $lines.Length - 1; $i -ge 0 -and $seen -lt 8; $i--) {
+            $line = $lines[$i]
+            if (-not ($line.Contains('"compact_boundary"') -or ($line.Contains('"usage":{') -and $line.Contains('"type":"assistant"')))) { continue }
+            $seen++
+            $o = ConvertFrom-JsonLine $line
+            if ($null -eq $o) { continue }
+            if ($o.type -eq 'system') {
+                if ($o.subtype -eq 'compact_boundary' -and $null -eq $ctx -and $null -ne $o.compactMetadata -and (Test-Num $o.compactMetadata.postTokens)) {
+                    $ctx = [int64]$o.compactMetadata.postTokens
+                }
+                continue
+            }
+            if ($o.type -ne 'assistant' -or $o.isSidechain -eq $true -or $null -eq $o.message -or $o.message.model -eq '<synthetic>') { continue }
+            if ($null -eq $ctx) {
+                $u = $o.message.usage
+                if ($null -eq $u -or -not (Test-Num $u.input_tokens)) { continue }
+                $cc = [int64]0
+                if (Test-Num $u.cache_creation_input_tokens) { $cc = [int64]$u.cache_creation_input_tokens }
+                if ($cc -eq 0 -and $null -ne $u.cache_creation) {
+                    if (Test-Num $u.cache_creation.ephemeral_5m_input_tokens) { $cc += [int64]$u.cache_creation.ephemeral_5m_input_tokens }
+                    if (Test-Num $u.cache_creation.ephemeral_1h_input_tokens) { $cc += [int64]$u.cache_creation.ephemeral_1h_input_tokens }
+                }
+                $cr = [int64]0
+                if (Test-Num $u.cache_read_input_tokens) { $cr = [int64]$u.cache_read_input_tokens }
+                $ctx = [int64]$u.input_tokens + $cc + $cr
+            }
+            if ($o.message.model) { $model = [string]$o.message.model; break }
+        }
+        if ($null -ne $ctx -and $model) { break }
+        if ($len -le $limit) { break }
+    }
+    if ($null -eq $ctx) { return $null }
+    return @{ ctx = $ctx; model = $model }
+}
+
+# Codex rollout: the newest token_count with info and the newest with rate
+# limits. A usage table (see Format-Usage) or $null.
+function Get-CodexUsage([string]$path) {
+    $len = (New-Object IO.FileInfo($path)).Length
+    $ctx = $null; $win = $null; $rl = $null
+    foreach ($limit in @(262144, 2097152)) {
+        $lines = Read-TailLines $path $limit
+        $ctx = $null; $win = $null; $rl = $null
+        $seen = 0
+        for ($i = $lines.Length - 1; $i -ge 0 -and $seen -lt 8; $i--) {
+            if (-not $lines[$i].Contains('"token_count"')) { continue }
+            $seen++
+            $o = ConvertFrom-JsonLine $lines[$i]
+            if ($null -eq $o -or $null -eq $o.payload -or $o.payload.type -ne 'token_count') { continue }
+            $info = $o.payload.info
+            if ($null -eq $ctx -and $null -ne $info -and $null -ne $info.last_token_usage -and (Test-Num $info.last_token_usage.total_tokens)) {
+                $ctx = [int64]$info.last_token_usage.total_tokens
+                if (Test-Num $info.model_context_window) { $win = [int64]$info.model_context_window }
+            }
+            if ($null -eq $rl -and $null -ne $o.payload.rate_limits) { $rl = $o.payload.rate_limits }
+            if ($null -ne $ctx -and $null -ne $rl) { break }
+        }
+        if ($null -ne $ctx) { break }
+        if ($len -le $limit) { break }
+    }
+    if ($null -eq $ctx) { return $null }
+    $u = @{ ctx = $ctx; win = $win; src = 'rollout'; est = $false; base = 12000; plan = ''; reached = $false; lims = @() }
+    if ($null -ne $rl) {
+        $id = ([string]$rl.limit_id) -replace '[^A-Za-z0-9_.-]', ''
+        if (-not $id) { $id = 'codex' }
+        foreach ($k in @('primary', 'secondary')) {
+            $w = $rl.$k
+            if ($null -ne $w -and (Test-Dec $w.used_percent) -and (Test-Num $w.window_minutes) -and (Test-Num $w.resets_at)) {
+                $u.lims += , @(($id + '.' + $k), (Format-Num $w.used_percent), (Format-Num $w.window_minutes), (Format-Num $w.resets_at))
+            }
+        }
+        if (([string]$rl.plan_type) -match '^[A-Za-z0-9_-]+$') { $u.plan = [string]$rl.plan_type }
+        if ($rl.rate_limit_reached_type) { $u.reached = $true }
+    }
+    return $u
+}
+
+# Context window Claude Code would use: from its environment, or a guess
+# from the model name (est).
+function Get-ClaudeWindow([string]$model) {
+    $v = [string]$env:CLAUDE_CODE_MAX_CONTEXT_TOKENS
+    if ($v -match '^[0-9]{4,12}$') { return @{ win = [int64]$v; est = $false } }
+    if (@('1', 'true', 'TRUE', 'True') -contains [string]$env:CLAUDE_CODE_DISABLE_1M_CONTEXT) { return @{ win = 200000; est = $false } }
+    $m = $model.ToLowerInvariant()
+    $big = ($m -match 'claude-fable-') -or ($m -match 'claude-sonnet-([5-9]|[1-9][0-9])') -or
+        ($m -match 'claude-opus-(4-[7-9]|[5-9]|[1-9][0-9])') -or ($m -match 'claude-haiku-(5-[5-9]|[6-9]|[1-9][0-9])')
+    if ($big) { return @{ win = 1000000; est = $true } }
+    return @{ win = 200000; est = $true }
+}
+
+function Get-UsageNow {
+    $tpath = Get-InputFile (Get-Field $f 'transcript_path')
+    if ($Agent -eq 'codex') {
+        if (-not $tpath) { return $null }
+        return (Get-CodexUsage $tpath)
+    }
+    if ($Agent -ne 'claude') { return $null }
+    $ctx = $null; $src = 'transcript'
+    $model = (Get-Field $f 'to_model')
+    if (-not $model) { $model = Get-Field $f 'model' }
+    $tok = Get-Field $f 'context_tokens'
+    if ((Test-UInt $tok) -and [int64]$tok -gt 0) {
+        $ctx = [int64]$tok; $src = 'hook'
+    } elseif ($tpath) {
+        $c = Get-ClaudeUsage $tpath
+        if ($null -ne $c) { $ctx = $c.ctx; if (-not $model) { $model = $c.model } }
+    }
+    if ($null -eq $ctx) { return $null }
+    $model = $model -replace '[^A-Za-z0-9._:@/\[\]-]', ''
+    $w = Get-ClaudeWindow $model
+    $u = @{ ctx = $ctx; win = $w.win; src = $src; est = $w.est; base = $null; plan = ''; reached = $false; lims = @() }
+    if ($HookEvent -eq 'StopFailure' -and (Get-Field $f 'error') -eq 'rate_limit') { $u.reached = $true }
+    # Optional status line tap (scripts/statusline-tap.sh): exact window, limits.
+    $sl = Join-Path $RunDir ('usage.' + $Sid + '.json')
+    try {
+        if ([IO.File]::Exists($sl) -and (New-Object IO.FileInfo($sl)).Length -le 65536) {
+            $text = [IO.File]::ReadAllText($sl, $Utf8)
+            $nl = $text.IndexOf([char]10)
+            $t = ''
+            if ($nl -gt 0) { $t = $text.Substring(0, $nl).Trim() }
+            $now = Now-Epoch
+            if ((Test-UInt $t) -and ($now - [int64]$t) -le 600 -and ([int64]$t - $now) -le 60) {
+                $o = ConvertFrom-JsonLine $text.Substring($nl + 1)
+                if ($null -ne $o) {
+                    if ($null -ne $o.context_window -and (Test-Num $o.context_window.context_window_size)) {
+                        $u.win = [int64]$o.context_window.context_window_size; $u.est = $false
+                    }
+                    if ($null -ne $o.rate_limits) {
+                        $period = [string]$o.rate_limits.spend_limit.period
+                        $pw = 0
+                        if ($period -eq 'daily') { $pw = 1440 } elseif ($period -eq 'weekly') { $pw = 10080 } elseif ($period -eq 'monthly') { $pw = 43200 }
+                        foreach ($row in @(@('five_hour', 300), @('seven_day', 10080), @('spend_limit', $pw))) {
+                            $lw = $o.rate_limits.($row[0])
+                            if ($null -ne $lw -and (Test-Dec $lw.used_percentage) -and (Test-Num $lw.resets_at) -and [int64]$lw.resets_at -gt $now) {
+                                $u.lims += , @($row[0], (Format-Num $lw.used_percentage), [string]$row[1], (Format-Num $lw.resets_at))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } catch { }
+    return $u
+}
+
+# A usage table -> @{ osc (OSC 9 body); json (plaintext fields) }.
+function Format-Usage($u) {
+    $osc = 'simpleterm:usage v=1 agent=' + $App + ' ctx=' + $u.ctx
+    $js = ',"ctx":{"used":' + $u.ctx
+    if ($null -ne $u.win) { $osc += ' win=' + $u.win; $js += ',"win":' + $u.win }
+    if ($null -ne $u.base) { $js += ',"baseline":' + $u.base }
+    $osc += ' src=' + $u.src
+    $js += ',"src":"' + $u.src + '"'
+    if ($u.est) { $osc += ' est=1'; $js += ',"est":true' }
+    $js += '}'
+    $la = @()
+    foreach ($l in $u.lims) {
+        $osc += ' lim=' + $l[0] + ':' + $l[1] + ':' + $l[2] + ':' + $l[3]
+        $la += ('{"id":"' + $l[0] + '","pct":' + $l[1] + ',"win_min":' + $l[2] + ',"resets_at":' + $l[3] + '}')
+    }
+    if ($u.reached) { $osc += ' lim=reached'; $la += '{"id":"reached"}' }
+    $js += ',"lims":[' + ($la -join ',') + ']'
+    if ($u.plan) { $js += ',"plan":"' + $u.plan + '"' }
+    return @{ osc = $osc; json = $js }
+}
+
+# Reports changed context/limits: the OSC for the terminal (Claude Code in
+# SimpleTerm) and a `usage` event; the relay gets only a turn's last value.
+function Invoke-UsageReport([bool]$turn) {
+    $Script:UsageSeq = ''
+    if ((Get-ConfInt 'usage' 1) -eq 0) { return }
+    $u = $null
+    try { $u = Get-UsageNow } catch { Write-Log ('usage-failed ' + $_.Exception.GetType().Name) }
+    if ($null -eq $u) { return }
+    $fmt = Format-Usage $u
+    $Script:UsageJson = $fmt.json
+    $scope = ''
+    $last = Join-Path $RunDir ($Sid + '.usage')
+    $lastRelay = Join-Path $RunDir ($Sid + '.usage-relay')
+    $prev = ''
+    try { if ([IO.File]::Exists($last)) { $prev = [IO.File]::ReadAllText($last, $Utf8).Trim() } } catch { }
+    if ($prev -ne $fmt.osc) {
+        try { [IO.File]::WriteAllText($last, $fmt.osc + "`n", $Utf8) } catch { }
+        $Script:UsageSeq = '\u001b]9;' + $fmt.osc + '\u0007'
+        $scope = 'tunnel'
+    }
+    if ($turn) {
+        $prevRelay = ''
+        try { if ([IO.File]::Exists($lastRelay)) { $prevRelay = [IO.File]::ReadAllText($lastRelay, $Utf8).Trim() } } catch { }
+        if ($prevRelay -ne $fmt.osc) {
+            try { [IO.File]::WriteAllText($lastRelay, $fmt.osc + "`n", $Utf8) } catch { }
+            if ($scope) { $scope = 'all' } else { $scope = 'relay' }
+        }
+    }
+    if ($scope) { Send-Background 'usage' (New-RandomHex 8) $scope }
+}
+
+# --- the `simpleterm` command (Windows) ---------------------------------------
+
+# Keeps ~/.simpleterm/bin/simpleterm.cmd pointing at this script, so that
+# `simpleterm notify "title" "body"` works in cmd and PowerShell.
+function Update-Cli {
+    try {
+        if (-not $IsWin -or -not [IO.Directory]::Exists($StDir)) { return }
+        $self = $PSCommandPath
+        if (-not $self -or $self.Contains('"') -or $self.Contains('%')) { return }
+        $bin = Join-Path $StDir 'bin'
+        $w = Join-Path $bin 'simpleterm.cmd'
+        if ([IO.File]::Exists($w)) {
+            $text = [IO.File]::ReadAllText($w)
+            $m = [regex]::Match($text, '-File "([^"]+)"')
+            $r = [regex]::Match($text, 'rev=([0-9]+)')
+            if ($m.Success -and [IO.File]::Exists($m.Groups[1].Value) -and $r.Success -and [int]$r.Groups[1].Value -ge $CliRev) { return }
+        }
+        if (-not [IO.Directory]::Exists($bin)) { [void][IO.Directory]::CreateDirectory($bin) }
+        $body = "@echo off`r`nrem simpleterm: written by the SimpleTerm agent hooks plugin (rev=" + $CliRev + "); edits are overwritten.`r`n" +
+            'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $self + '" %*' + "`r`n"
+        [IO.File]::WriteAllText($w, $body, (New-Object System.Text.ASCIIEncoding))
+        Write-Log 'cli installed'
+    } catch { }
+}
+
+# True for the first delivery of an event (key) within 30 seconds: Grok Build
+# runs this plugin's hooks twice when Claude Code and Grok both have it.
+function Test-Once([string]$key) {
+    $path = Join-Path $RunDir ('dd.' + $key)
+    $now = Now-Epoch
+    for ($try = 0; $try -lt 2; $try++) {
+        try {
+            $fs = New-Object IO.FileStream($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
+            $b = $Utf8.GetBytes([string]$now)
+            $fs.Write($b, 0, $b.Length)
+            $fs.Dispose()
+            return $true
+        } catch {
+            $t = ''
+            try { $t = [IO.File]::ReadAllText($path).Trim() } catch { }
+            if (-not ((Test-UInt $t) -and ($now - [int64]$t) -gt 30)) { break }
+            try { [IO.File]::Delete($path) } catch { }
+        }
+    }
+    Write-Log ('duplicate ' + $HookEvent)
+    return $false
+}
+
 # --- main ------------------------------------------------------------------
 
 function Read-Input {
@@ -672,11 +1010,20 @@ function Add-Note([string]$kind, [string]$fp) {
 
 try {
     switch ($Agent) {
-        'claude' { $App = 'claude-code' }
+        'claude' {
+            $App = 'claude-code'
+            # Grok Build runs Claude Code plugins' hooks; it sets GROK_HOOK_EVENT.
+            if ($env:GROK_HOOK_EVENT -and $Mode -ne '__send') { $Agent = 'grok'; $App = 'grok-build' }
+        }
+        'grok' { $App = 'grok-build' }
         'codex' { $App = 'codex' }
         'codex-notify' { $App = 'codex' }
+        'notify' { $App = 'script' }
         default { exit 0 }
     }
+    $Script:UsageSeq = ''
+    $Script:UsageJson = ''
+    $Script:Title = ''
 
     if ($Mode -eq '__send') {
         Invoke-SendChild
@@ -684,15 +1031,19 @@ try {
         exit 0
     }
 
-    $InputText = Read-Input
+    $InputText = ''
+    if ($Agent -ne 'notify') { $InputText = Read-Input }
     $LinkFiles = @(Get-LinkFiles)
     if ($LinkFiles.Count -eq 0 -and $env:SIMPLETERM -ne '1') { exit 0 }
     if (-not [IO.Directory]::Exists($RunDir)) { [void][IO.Directory]::CreateDirectory($RunDir) }
 
-    $f = Get-JsonFields $InputText @('hook_event_name', 'notification_type', 'type', 'tool_name', 'tool_input.command',
-        'tool_input.file_path', 'tool_input.url', 'tool_input.description', 'tool_input.questions.0.question',
-        'session_id', 'cwd', 'message', 'last_assistant_message', 'last-assistant-message', 'input-messages.0', 'error')
+    $f = Get-JsonFields $InputText @('hook_event_name', 'hookEventName', 'notification_type', 'notificationType', 'type',
+        'tool_name', 'tool_input.command', 'tool_input.file_path', 'tool_input.url', 'tool_input.description',
+        'tool_input.questions.0.question', 'session_id', 'sessionId', 'cwd', 'message', 'last_assistant_message',
+        'lastAssistantMessage', 'last-assistant-message', 'input-messages.0', 'error', 'transcript_path', 'context_tokens',
+        'model', 'to_model', 'promptId', 'toolUseId')
     $HookEvent = Get-Field $f 'hook_event_name'
+    if (-not $HookEvent) { $HookEvent = Get-Field $f 'hookEventName' }
     if ($Agent -eq 'codex-notify') { $HookEvent = 'notify' }
     $Tool = Get-Field $f 'tool_name'
     $Detail = ''
@@ -701,9 +1052,12 @@ try {
     }
     $Desc = Get-Field $f 'tool_input.description'
     $Last = Get-Field $f 'last_assistant_message'
+    if (-not $Last) { $Last = Get-Field $f 'lastAssistantMessage' }
     if (-not $Last) { $Last = Get-Field $f 'last-assistant-message' }
     if (-not $Last) { $Last = Get-Field $f 'message' }
-    $Sid = (Get-Field $f 'session_id') -replace '[^A-Za-z0-9_-]', '_'
+    $sidRaw = Get-Field $f 'session_id'
+    if (-not $sidRaw) { $sidRaw = Get-Field $f 'sessionId' }
+    $Sid = $sidRaw -replace '[^A-Za-z0-9_-]', '_'
     if ($Sid.Length -gt 80) { $Sid = $Sid.Substring(0, 80) }
     if (-not $Sid) { $Sid = 'nosession' }
 
@@ -718,6 +1072,30 @@ try {
     $CwdBase = Limit-JsonText (Get-Field $f 'cwd') 64 256 -Base
     $Fp = (Get-Sha256Hex ($Tool + "`t" + (Limit-JsonText $Detail 200 800))).Substring(0, 16)
     $Script:Msg = ''
+
+    # `simpleterm notify "title" ["body"]`: an OSC 777 notification on this
+    # console (in a SimpleTerm session) and a `notify` event to every link.
+    if ($Agent -eq 'notify') {
+        $t = ''
+        $b = ''
+        if ($ScriptArgs.Count -gt 1) { $t = [string]$ScriptArgs[1] }
+        if ($ScriptArgs.Count -gt 2) { $b = [string]$ScriptArgs[2] }
+        $t = ($t -replace '[\x00-\x1f\x7f]', ' ')
+        $b = ($b -replace '[\x00-\x1f\x7f]', ' ')
+        if ($t.Length -gt 120) { $t = $t.Substring(0, 120) }
+        if ($b.Length -gt 400) { $b = $b.Substring(0, 400) }
+        if (-not ($t + $b)) { exit 0 }
+        if ($env:SIMPLETERM -eq '1' -and -not [Console]::IsOutputRedirected) {
+            try { [Console]::Out.Write([string][char]27 + ']777;notify;' + $t + ';' + $b + [string][char]7); [Console]::Out.Flush() } catch { }
+        }
+        $Script:Title = ConvertTo-JsonText $t 64 256
+        $Script:Msg = ConvertTo-JsonText $b 200 800
+        $cwd = (Get-Location).Path
+        $CwdBase = Limit-JsonText (ConvertTo-JsonText $cwd 4096 16384) 64 256 -Base
+        Send-Background 'notify'
+        Trim-Log
+        exit 0
+    }
 
     switch ($Agent + ':' + $HookEvent) {
         { $_ -eq 'claude:PermissionRequest' -or $_ -eq 'codex:PermissionRequest' } {
@@ -761,12 +1139,29 @@ try {
         }
         'claude:UserPromptSubmit' {
             Add-Note 'turn' ''
+            Invoke-UsageReport $false
             Write-State 'running' ''
             break
         }
         { $_ -eq 'claude:PostToolUse' -or $_ -eq 'claude:PostToolUseFailure' } {
             Add-Note 'tool' $Fp
+            # Context grows with each tool call; look again every 20 seconds at most.
+            $utPath = Join-Path $RunDir ($Sid + '.ut')
+            $ut = ''
+            try { if ([IO.File]::Exists($utPath)) { $ut = [IO.File]::ReadAllText($utPath).Trim() } } catch { }
+            $now = Now-Epoch
+            if (-not (Test-UInt $ut) -or ($now - [int64]$ut) -ge 20 -or [int64]$ut -gt $now) {
+                try { [IO.File]::WriteAllText($utPath, [string]$now, $Utf8) } catch { }
+                Invoke-UsageReport $false
+            }
             Write-State 'running' ''
+            break
+        }
+        { $_ -eq 'claude:SessionStart' -or $_ -eq 'claude:PostCompact' -or $_ -eq 'claude:PostModelSwitch' -or
+          $_ -eq 'codex:SessionStart' -or $_ -eq 'codex:PostCompact' -or $_ -eq 'codex:UserPromptSubmit' } {
+            Invoke-UsageReport $false
+            Write-UsageOnly
+            if ($HookEvent -eq 'SessionStart') { Update-Cli }
             break
         }
         { $_ -eq 'claude:Stop' -or $_ -eq 'codex:Stop' } {
@@ -774,7 +1169,9 @@ try {
             if ($Last.StartsWith('{\"title\":')) { break }
             $Script:Msg = Limit-JsonText $Last 200 800
             Send-Background 'done'
+            Invoke-UsageReport $true
             Write-State 'done' ''
+            Update-Cli
             break
         }
         'claude:StopFailure' {
@@ -784,7 +1181,34 @@ try {
             if ($err -eq 'authentication_failed' -or $err -eq 'oauth_org_not_allowed' -or $err -eq 'cloud_credential_error') { $ev = 'auth' }
             $Script:Msg = Limit-JsonText ($err + ': ' + (Get-Field $f 'last_assistant_message')) 200 800
             Send-Background $ev
+            Invoke-UsageReport $true
             Write-State 'done' ''
+            break
+        }
+        'grok:Notification' {
+            # Grok asks in its own prompt and takes no answer from a hook.
+            $nt = Get-Field $f 'notificationType'
+            if (-not $nt) { $nt = Get-Field $f 'notification_type' }
+            if (@('permission_prompt', 'idle_prompt', 'elicitation_dialog') -notcontains $nt) { break }
+            $key = (Get-Sha256Hex ($HookEvent + '|' + $Sid + '|' + $nt + '|' + (Get-Field $f 'promptId') + '|' + $Last)).Substring(0, 16)
+            if (-not (Test-Once $key)) { break }
+            $Script:Msg = Limit-JsonText $Last 200 800
+            Send-Background 'question'
+            break
+        }
+        { $_ -eq 'grok:Stop' -or $_ -eq 'grok:StopFailure' } {
+            $err = Get-Field $f 'error'
+            $key = (Get-Sha256Hex ($HookEvent + '|' + $Sid + '|' + (Get-Field $f 'promptId') + '|' + $err + '|' + $Last)).Substring(0, 16)
+            if (-not (Test-Once $key)) { break }
+            if ($HookEvent -eq 'Stop') {
+                $Script:Msg = Limit-JsonText $Last 200 800
+                Send-Background 'done'
+            } else {
+                $ev = 'error'
+                if ($err -eq 'authentication_failed' -or $err -eq 'oauth_org_not_allowed' -or $err -eq 'cloud_credential_error') { $ev = 'auth' }
+                $Script:Msg = Limit-JsonText ($err + ': ' + $Last) 200 800
+                Send-Background $ev
+            }
             break
         }
         'codex-notify:notify' {
