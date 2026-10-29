@@ -1,6 +1,6 @@
 {
   "name": "simpleterm-agent-hooks",
-  "description": "SimpleTerm agent hooks for Claude Code and Codex: badges, alerts and approvals on your phone or tablet",
+  "description": "SimpleTerm agent hooks for Claude Code and Codex: badges, alerts, approvals and usage on your phone or tablet",
   "owner": {
     "name": "AhMunGa",
     "url": "https://github.com/AhMunGa/simpleterm-agent-hooks"
@@ -9,7 +9,7 @@
     {
       "name": "simpleterm",
       "source": "./plugins/simpleterm",
-      "description": "Status badges, end-to-end encrypted alerts and permission approvals in the SimpleTerm app"
+      "description": "Status badges, end-to-end encrypted alerts, permission approvals and context/rate-limit reports in the SimpleTerm app"
     }
   ]
 }

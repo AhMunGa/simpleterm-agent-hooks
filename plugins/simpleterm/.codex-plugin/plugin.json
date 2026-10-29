@@ -1,12 +1,12 @@
 {
   "name": "simpleterm",
-  "version": "0.2.0",
-  "description": "Permission approvals and turn-done alerts for Codex in the SimpleTerm app",
-  "keywords": ["simpleterm", "ssh", "notifications", "approvals", "hooks"],
+  "version": "0.3.0",
+  "description": "Permission approvals, turn-done alerts and context/rate-limit reports for Codex in the SimpleTerm app",
+  "keywords": ["simpleterm", "ssh", "notifications", "approvals", "hooks", "usage"],
   "hooks": "./hooks/codex-hooks.json",
   "interface": {
     "displayName": "SimpleTerm agent hooks",
-    "shortDescription": "Approve Codex permission requests and get turn-done alerts on your phone or tablet",
+    "shortDescription": "Approve Codex permission requests, get turn-done alerts and see context and rate limits on your phone or tablet",
     "developerName": "AhMunGa",
     "websiteURL": "https://github.com/AhMunGa/simpleterm-agent-hooks"
   }
