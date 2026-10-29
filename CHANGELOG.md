@@ -28,7 +28,7 @@
   which prints a short line of its own when you have no status line command;
   `reached` on a rate-limit failure), Codex (rollout: context, window, limits, plan) and Gemini CLI
   (chat record). An OSC 9 `simpleterm:usage` on Claude Code's terminal and a `usage` event to the
-  links; only changes are sent, and the relay gets only a turn's last value. New Claude Code hooks
+  SSH tunnel links (not the relay: it would not push them); only changes are sent. New Claude Code hooks
   `SessionStart`, `PostCompact`, `PostModelSwitch`; new Codex hooks `SessionStart`, `PostCompact`.
   `usage=0` in `agent-hook.conf` turns it off.
 - PowerShell hook: `notify` (`simpleterm.cmd`), Grok's `GROK_HOOK_EVENT`, and context/limits for

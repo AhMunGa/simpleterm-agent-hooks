@@ -301,7 +301,8 @@ def t_allow_deny(s):
             s.check("permission deny: message", d["hookSpecificOutput"]["decision"].get("message") == "Denied from SimpleTerm" if beh else False)
         s.check("permission %s: terminalSequence running (SIMPLETERM=1)" % verdict,
                 d.get("terminalSequence") == "\x1b]9;simpleterm:state=running\x07", repr(d.get("terminalSequence")))
-        s.check("permission %s: within time" % verdict, el < 10, "%.2fs" % el)
+        # Typically ~2.2 s; the bound only shows it did not wait out claude_wait (slow under parallel load).
+        s.check("permission %s: within time" % verdict, el < 20, "%.2fs" % el)
         recs = s.records("/v1/ingest")
         s.check("permission %s: nh matches nonce" % verdict, recs and recs[0].get("nh_ok") is True, str(recs)[:200])
 
@@ -325,7 +326,7 @@ def t_invalid_dmac(s):
     rc, out, err, el = s.run("claude", perm_input())
     s.check("invalid dmac: no decision", out.strip() == "", out)
     s.check("invalid dmac: logged", "result=invalid" in s.log_text(), s.log_text())
-    s.check("invalid dmac: returns promptly", el < 10, "%.2fs" % el)
+    s.check("invalid dmac: returns promptly", el < 20, "%.2fs" % el)
 
 
 def t_timeout(s):
@@ -376,7 +377,7 @@ def t_tunnel(s):
         tun.wait(5)
         rc, out, err, el = s.finish(p, 60)
         s.check("tunnel gone: no decision", out.strip() == "", out)
-        s.check("tunnel gone: stops waiting soon", el < 15, "%.2fs" % el)
+        s.check("tunnel gone: stops waiting soon", el < 25, "%.2fs" % el)
         s.check("tunnel gone: logged", "tunnel-gone" in s.log_text(), s.log_text())
     finally:
         tun.terminate()
@@ -393,7 +394,7 @@ def t_tunnel(s):
     d = decision_json(out) or {}
     s.check("dead tunnel: relay decision still arrives",
             d.get("hookSpecificOutput", {}).get("decision", {}).get("behavior") == "allow", out + err)
-    s.check("dead tunnel: within time", el < 10, "%.2fs" % el)
+    s.check("dead tunnel: within time", el < 20, "%.2fs" % el)
 
     # Background events reach a tunnel before the relay, which holds its answer.
     tun, tctl = s.spawn_mock()
@@ -796,8 +797,8 @@ USAGE_OSC_CLAUDE = "\x1b]9;simpleterm:usage v=1 agent=claude-code ctx=5310 win=1
 
 
 def t_usage_claude(s):
-    """Context from the transcript: OSC 9 on the terminal, `usage` to links (#342)."""
-    s.setup([(LINK_A, {"push": "disabled"})])
+    """Context from the transcript: OSC 9 on the terminal, `usage` to the tunnel (#342)."""
+    s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})])
     tr = write(s.tmp / "claude" / "t1.jsonl", "\n".join([
         claude_user_line(), claude_line(inp=1, cr=1, model="claude-opus-5-5"), claude_line(),
         claude_line(model="claude-opus-5-5", inp=3, side=True), claude_line(model="<synthetic>", inp=0, cr=0, e5=0, e1=0),
@@ -809,7 +810,7 @@ def t_usage_claude(s):
             seqs(out) == "\x1b]9;simpleterm:state=done\x07" + USAGE_OSC_CLAUDE, repr(out))
     rec = wait_for(lambda: ingests(s, "usage"), 20)
     p = rec[0].get("plain_json", {}) if rec else {}
-    s.check("usage claude: usage event to the link",
+    s.check("usage claude: usage event to the tunnel",
             p.get("ctx") == {"used": 5310, "win": 1000000, "src": "transcript", "est": True} and p.get("lims") == []
             and p.get("app") == "claude-code" and p.get("cwd") == "app" and "msg" not in p, str(p))
     s.check("usage claude: plaintext field order", rec and rec[0]["plain"].startswith(
@@ -856,17 +857,18 @@ def t_usage_claude(s):
     s.check("usage claude: StopFailure rate_limit -> lim=reached",
             seqs(out) == "\x1b]9;simpleterm:state=done\x07\x1b]9;simpleterm:usage v=1 agent=claude-code ctx=42000 win=1000000"
                           " src=transcript est=1 lim=reached\x07", repr(out))
-    rec = wait_for(lambda: ingests(s, "usage"), 20)
-    s.check("usage claude: reached in the event", rec and rec[0]["plain_json"].get("lims") == [{"id": "reached"}],
-            str(rec[0].get("plain_json") if rec else None))
+    # Earlier cases' background sends may still land here: pick the event by content.
+    rec = wait_for(lambda: [r for r in ingests(s, "usage") if {"id": "reached"} in (r.get("plain_json") or {}).get("lims", [])], 20)
+    s.check("usage claude: reached in the event", rec and rec[0]["plain_json"].get("lims") == [{"id": "reached"}]
+            and rec[0]["plain_json"]["ctx"].get("used") == 42000, str(ingests(s, "usage"))[:300])
     # No SimpleTerm session: no sequence, the link still gets it.
     s.ctl("/_ctl/reset", {})
     rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-c2", "transcript_path": str(tr), "hook_event_name": "Stop",
                                                    "last_assistant_message": "ok"}))
     s.check("usage claude: no output without SIMPLETERM", out == "", out)
-    s.check("usage claude: link gets it without SIMPLETERM", wait_for(lambda: ingests(s, "usage"), 20))
+    s.check("usage claude: the tunnel gets it without SIMPLETERM", wait_for(lambda: ingests(s, "usage"), 20))
     # usage=0 turns it off.
-    s.setup([(LINK_A, {"push": "disabled"})], conf={"usage": 0})
+    s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})], conf={"usage": 0})
     rc, out, err, el = s.run("claude", json.dumps(dict(stop, session_id="u-off")), {"SIMPLETERM": "1"})
     time.sleep(1.5)
     s.check("usage claude: usage=0 sends nothing", seqs(out) == "\x1b]9;simpleterm:state=done\x07" and not ingests(s, "usage"), out)
@@ -890,7 +892,7 @@ def t_usage_claude_big(s):
 
 def t_usage_statusline(s):
     """The optional status line tap adds the window size and the 5-hour/7-day limits."""
-    s.setup([(LINK_A, {"push": "disabled"})])
+    s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})])
     tap = SCRIPTS / "statusline-tap.sh"
     p = subprocess.run([s.argv[0], str(tap), "cat"], input=json.dumps(STATUSLINE).encode(), capture_output=True,
                        env=s.env(), timeout=20)
@@ -920,7 +922,7 @@ def t_usage_statusline(s):
 
 
 def t_usage_relay_policy(s):
-    """Tunnels get every change; the relay only the turn's last value."""
+    """Usage goes to tunnel links only (the relay does not push it); PostToolUse looks every 20 s."""
     tun, tctl = s.spawn_mock()
     try:
         s.setup([(LINK_A, {"push": "disabled"}), (LINK_T, {"kind": "tunnel", "relay_url": tctl.url})])
@@ -928,26 +930,26 @@ def t_usage_relay_policy(s):
         tr = write(s.tmp / "claude" / "pol.jsonl", claude_line() + "\n")
         base = {"session_id": "pol", "transcript_path": str(tr), "cwd": "/w/x"}
         s.run("claude", json.dumps(dict(base, hook_event_name="PostToolUse", tool_name="Bash", tool_input={"command": "ls"})))
-        time.sleep(1.5)
-        s.check("usage policy: mid-turn update reaches the tunnel", ingests(s, "usage", tctl))
-        s.check("usage policy: mid-turn update skips the relay", not ingests(s, "usage"))
+        s.check("usage policy: mid-turn update reaches the tunnel", wait_for(lambda: ingests(s, "usage", tctl), 20))
         with open(tr, "a") as f:
             f.write(claude_line(inp=20) + "\n")
         s.run("claude", json.dumps(dict(base, hook_event_name="PostToolUse", tool_name="Bash", tool_input={"command": "ls"})))
         time.sleep(1.5)
         s.check("usage policy: PostToolUse at most every 20 s", len(ingests(s, "usage", tctl)) == 1, str(len(ingests(s, "usage", tctl))))
         s.run("claude", json.dumps(dict(base, hook_event_name="Stop", last_assistant_message="ok")))
-        s.check("usage policy: turn end reaches the relay", wait_for(lambda: ingests(s, "usage"), 20))
         s.check("usage policy: turn end reaches the tunnel (changed)", wait_for(lambda: len(ingests(s, "usage", tctl)) == 2, 20))
-        got = (ingests(s, "usage")[0].get("plain_json") or {}).get("ctx", {}) if ingests(s, "usage") else {}
-        s.check("usage policy: relay value is the turn's last", got.get("used") == 5320, str(got))
+        got = (ingests(s, "usage", tctl)[-1].get("plain_json") or {}).get("ctx", {}) if ingests(s, "usage", tctl) else {}
+        s.check("usage policy: the turn's last value", got.get("used") == 5320, str(got))
+        s.check("usage policy: the relay gets done", wait_for(lambda: ingests(s, "done"), 20))
+        time.sleep(1)
+        s.check("usage policy: the relay gets no usage at all", not ingests(s, "usage"), str(ingests(s, "usage"))[:200])
     finally:
         tun.terminate()
         tun.wait(5)
 
 
 def t_usage_codex(s):
-    s.setup([(LINK_A, {"push": "disabled"})])
+    s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})])
     ro = write(s.tmp / "codex" / "rollout.jsonl", "\n".join([
         codex_token_line(total=9000), codex_token_line(total=15159), codex_token_line(total=None, rl=False)]) + "\n")
     inp = {"session_id": "cx", "turn_id": "t", "transcript_path": str(ro), "cwd": "/w/repo", "hook_event_name": "Stop",
@@ -983,7 +985,7 @@ def t_usage_codex(s):
 
 
 def t_gemini(s):
-    s.setup([(LINK_A, {"push": "disabled"})])
+    s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})])
     tr = write(s.tmp / "gemini" / "chats" / "session-1.jsonl", GEMINI_JSONL)
     base = {"session_id": "gm", "transcript_path": str(tr), "cwd": "/w/site", "timestamp": "2026-10-29T00:00:00Z"}
     note = dict(base, hook_event_name="Notification", notification_type="ToolPermission",

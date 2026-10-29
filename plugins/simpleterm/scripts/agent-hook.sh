@@ -985,11 +985,11 @@ usage_compute() {
   esac
 }
 
-# Reports context and rate limits: an OSC 9 for the terminal (Claude Code in
-# SimpleTerm, USAGE_SEQ) and a `usage` event for the links. Only changes go
-# out. Tunnels get every change; the relay only the turn's last one ($1 =
-# turn), since it costs a push service round trip and the app is away then.
-usage_report() { # turn|update
+# Reports context and rate limits when they changed: an OSC 9 for the
+# terminal (Claude Code in SimpleTerm, USAGE_SEQ) and a `usage` event for the
+# SSH tunnel links. The relay gets none: it does not push them (an iOS push
+# is always an alert) and every request costs a function call.
+usage_report() {
   USAGE_SEQ=''
   [ "$(conf_int usage 1)" = 0 ] && return 0
   usage_compute
@@ -998,19 +998,11 @@ usage_report() { # turn|update
   osc=$(printf '%s\n' "$out" | sed -n 1p)
   USAGE_JSON=$(printf '%s\n' "$out" | sed -n 2p)
   [ -n "$osc" ] && [ -n "$USAGE_JSON" ] || return 0
-  scope=''
-  if [ "$(cat "$RUN_DIR/$SID.usage" 2>/dev/null)" != "$osc" ]; then
-    printf '%s\n' "$osc" >"$RUN_DIR/$SID.usage" 2>/dev/null
-    USAGE_SEQ='\u001b]9;'$osc'\u0007'
-    scope=tunnel
-  fi
-  if [ "$1" = turn ] && [ "$(cat "$RUN_DIR/$SID.usage-relay" 2>/dev/null)" != "$osc" ]; then
-    printf '%s\n' "$osc" >"$RUN_DIR/$SID.usage-relay" 2>/dev/null
-    if [ -n "$scope" ]; then scope=all; else scope=relay; fi
-  fi
-  [ -n "$scope" ] || return 0
+  [ "$(cat "$RUN_DIR/$SID.usage" 2>/dev/null)" != "$osc" ] || return 0
+  printf '%s\n' "$osc" >"$RUN_DIR/$SID.usage" 2>/dev/null
+  USAGE_SEQ='\u001b]9;'$osc'\u0007'
   urid=$(rand_hex 8)
-  is_hex "$urid" 16 && send_bg usage "$urid" "$scope"
+  is_hex "$urid" 16 && send_bg usage "$urid" tunnel
 }
 
 # --- the `simpleterm` command --------------------------------------------------
@@ -1289,7 +1281,7 @@ case $AGENT:$EVENT in
     ;;
   claude:UserPromptSubmit)
     note turn
-    usage_report update
+    usage_report
     print_state running
     ;;
   claude:PostToolUse | claude:PostToolUseFailure)
@@ -1298,12 +1290,12 @@ case $AGENT:$EVENT in
     t=$(cat "$RUN_DIR/$SID.ut" 2>/dev/null)
     if ! is_uint "$t" || [ $((NOW - t)) -ge 20 ] || [ "$t" -gt "$NOW" ]; then
       printf '%s\n' "$NOW" >"$RUN_DIR/$SID.ut" 2>/dev/null
-      usage_report update
+      usage_report
     fi
     print_state running
     ;;
   claude:SessionStart | claude:PostCompact | claude:PostModelSwitch)
-    usage_report update
+    usage_report
     print_usage
     [ "$EVENT" = SessionStart ] && ensure_cli
     ;;
@@ -1312,7 +1304,7 @@ case $AGENT:$EVENT in
     case $LAST in '{\"title\":'*) finish ;; esac
     MSG=$(json_trim "$LAST" 200 800)
     send_bg done
-    usage_report turn
+    usage_report
     print_state done
     turn_end
     ;;
@@ -1322,11 +1314,11 @@ case $AGENT:$EVENT in
     case $ERR in authentication_failed | oauth_org_not_allowed | cloud_credential_error) ev=auth ;; esac
     MSG=$(json_trim "$ERR: $LAST" 200 800)
     send_bg "$ev"
-    usage_report turn
+    usage_report
     print_state done
     ;;
   codex:UserPromptSubmit | codex:SessionStart | codex:PostCompact)
-    usage_report update
+    usage_report
     ;;
   codex-notify:notify)
     [ "$NTYPE2" = agent-turn-complete ] || finish
@@ -1345,7 +1337,7 @@ case $AGENT:$EVENT in
   gemini:AfterAgent)
     MSG=$(json_trim "$LAST" 200 800)
     send_bg done
-    usage_report turn
+    usage_report
     turn_end
     ;;
   agy:PreToolUse)

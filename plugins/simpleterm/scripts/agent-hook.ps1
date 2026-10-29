@@ -902,8 +902,9 @@ function Format-Usage($u) {
 }
 
 # Reports changed context/limits: the OSC for the terminal (Claude Code in
-# SimpleTerm) and a `usage` event; the relay gets only a turn's last value.
-function Invoke-UsageReport([bool]$turn) {
+# SimpleTerm) and a `usage` event for the SSH tunnel links (the relay does
+# not push them, so it gets none).
+function Invoke-UsageReport {
     $Script:UsageSeq = ''
     if ((Get-ConfInt 'usage' 1) -eq 0) { return }
     $u = $null
@@ -911,25 +912,13 @@ function Invoke-UsageReport([bool]$turn) {
     if ($null -eq $u) { return }
     $fmt = Format-Usage $u
     $Script:UsageJson = $fmt.json
-    $scope = ''
     $last = Join-Path $RunDir ($Sid + '.usage')
-    $lastRelay = Join-Path $RunDir ($Sid + '.usage-relay')
     $prev = ''
     try { if ([IO.File]::Exists($last)) { $prev = [IO.File]::ReadAllText($last, $Utf8).Trim() } } catch { }
-    if ($prev -ne $fmt.osc) {
-        try { [IO.File]::WriteAllText($last, $fmt.osc + "`n", $Utf8) } catch { }
-        $Script:UsageSeq = '\u001b]9;' + $fmt.osc + '\u0007'
-        $scope = 'tunnel'
-    }
-    if ($turn) {
-        $prevRelay = ''
-        try { if ([IO.File]::Exists($lastRelay)) { $prevRelay = [IO.File]::ReadAllText($lastRelay, $Utf8).Trim() } } catch { }
-        if ($prevRelay -ne $fmt.osc) {
-            try { [IO.File]::WriteAllText($lastRelay, $fmt.osc + "`n", $Utf8) } catch { }
-            if ($scope) { $scope = 'all' } else { $scope = 'relay' }
-        }
-    }
-    if ($scope) { Send-Background 'usage' (New-RandomHex 8) $scope }
+    if ($prev -eq $fmt.osc) { return }
+    try { [IO.File]::WriteAllText($last, $fmt.osc + "`n", $Utf8) } catch { }
+    $Script:UsageSeq = '\u001b]9;' + $fmt.osc + '\u0007'
+    Send-Background 'usage' (New-RandomHex 8) 'tunnel'
 }
 
 # --- the `simpleterm` command (Windows) ---------------------------------------
@@ -1139,7 +1128,7 @@ try {
         }
         'claude:UserPromptSubmit' {
             Add-Note 'turn' ''
-            Invoke-UsageReport $false
+            Invoke-UsageReport
             Write-State 'running' ''
             break
         }
@@ -1152,14 +1141,14 @@ try {
             $now = Now-Epoch
             if (-not (Test-UInt $ut) -or ($now - [int64]$ut) -ge 20 -or [int64]$ut -gt $now) {
                 try { [IO.File]::WriteAllText($utPath, [string]$now, $Utf8) } catch { }
-                Invoke-UsageReport $false
+                Invoke-UsageReport
             }
             Write-State 'running' ''
             break
         }
         { $_ -eq 'claude:SessionStart' -or $_ -eq 'claude:PostCompact' -or $_ -eq 'claude:PostModelSwitch' -or
           $_ -eq 'codex:SessionStart' -or $_ -eq 'codex:PostCompact' -or $_ -eq 'codex:UserPromptSubmit' } {
-            Invoke-UsageReport $false
+            Invoke-UsageReport
             Write-UsageOnly
             if ($HookEvent -eq 'SessionStart') { Update-Cli }
             break
@@ -1169,7 +1158,7 @@ try {
             if ($Last.StartsWith('{\"title\":')) { break }
             $Script:Msg = Limit-JsonText $Last 200 800
             Send-Background 'done'
-            Invoke-UsageReport $true
+            Invoke-UsageReport
             Write-State 'done' ''
             Update-Cli
             break
@@ -1181,7 +1170,7 @@ try {
             if ($err -eq 'authentication_failed' -or $err -eq 'oauth_org_not_allowed' -or $err -eq 'cloud_credential_error') { $ev = 'auth' }
             $Script:Msg = Limit-JsonText ($err + ': ' + (Get-Field $f 'last_assistant_message')) 200 800
             Send-Background $ev
-            Invoke-UsageReport $true
+            Invoke-UsageReport
             Write-State 'done' ''
             break
         }

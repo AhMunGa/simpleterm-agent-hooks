@@ -227,8 +227,9 @@ cmd and PowerShell.
 ## Context and rate limits
 
 The hooks report how much of the context window is used and, where the agent gives it, the
-rate limits. Only changes are sent. The SSH tunnel gets every change; the relay only the last one
-of a turn.
+rate limits. Only changes are sent, and only while SimpleTerm is connected: on Claude Code's
+terminal and through the SSH tunnel. The relay gets none, because it would show every update as a
+notification.
 
 | Agent | Context | Window | Limits | From |
 |---|---|---|---|---|
