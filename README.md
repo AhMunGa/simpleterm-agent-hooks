@@ -208,8 +208,15 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 
 Codex runs a `PermissionRequest` hook before it shows its own approval prompt, so while the hook
 waits the terminal shows only `Waiting for approval in SimpleTerm`. The wait is 60 seconds by
-default and is skipped when no device was notified. Codex runs hooks through your login shell
-(`$SHELL -lc`); a login profile that prints to standard output breaks the approval answer.
+default and is skipped when no device was notified.
+
+Codex runs hooks with your shell: `$SHELL -c` (Codex 0.165; `$SHELL -lc`, which also reads your
+login profile, only when it has no single local environment). Whatever your shell's startup files
+print to standard output (zsh always reads `~/.zshenv`) becomes the hook's output: it breaks the
+approval answer, and on `SessionStart` Codex adds it to the session as developer context. The
+plugin's `SessionStart` hook runs only for resumed and forked sessions (a new one has no usage
+yet), and the commands that need no answer send the script's own output to `/dev/null`. Print
+from those files only in an interactive shell (zsh: `[[ -o interactive ]] && …`).
 
 ## `simpleterm notify`
 

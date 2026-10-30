@@ -1092,6 +1092,37 @@ def t_usage_codex(s):
     s.check("usage codex: null transcript_path -> no usage", not ingests(s, "usage") and ingests(s, "done"))
 
 
+CODEX_HOOKS = ROOT / "plugins" / "simpleterm" / "hooks" / "codex-hooks.json"
+
+
+def t_codex_hooks(s):
+    """Codex 0.165 adds a SessionStart hook's plain standard output to the session as developer
+    context: the plugin's runs only for resumed or forked sessions and its commands print nothing."""
+    import re
+    hooks = json.loads(CODEX_HOOKS.read_text())["hooks"]
+    m = hooks["SessionStart"][0].get("matcher") or ""
+    runs = {src: bool(m) and re.search(m, src) is not None for src in ("startup", "resume", "clear", "compact", "fork")}
+    s.check("codex hooks: SessionStart only for resumed and forked sessions",
+            runs == {"startup": False, "resume": True, "clear": False, "compact": False, "fork": True}, str(runs))
+    # Codex runs `$SHELL -c '<command>'` with ${PLUGIN_ROOT} replaced (the shell under test here).
+    noisy = s.tmp / "noisy-plugin"
+    write(noisy / "scripts" / "agent-hook.sh", "echo noise\n")
+    for ev in ("SessionStart", "PostCompact", "Stop"):
+        cmd = hooks[ev][0]["hooks"][0]["command"].replace("${PLUGIN_ROOT}", str(noisy))
+        p = subprocess.run([s.argv[0], "-c", cmd], input=b"{}", capture_output=True, env=s.env(), timeout=20)
+        s.check("codex hooks: %s command prints nothing, whatever the script writes" % ev,
+                p.returncode == 0 and p.stdout == b"", p.stdout)
+    s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})])
+    ro = write(s.tmp / "codex" / "rollout-ss.jsonl", codex_token_line(total=15159) + "\n")
+    cmd = hooks["SessionStart"][0]["hooks"][0]["command"].replace("${PLUGIN_ROOT}", str(SCRIPTS.parent))
+    inp = json.dumps({"session_id": "cx-ss", "transcript_path": str(ro), "cwd": "/w/repo", "hook_event_name": "SessionStart",
+                      "source": "resume", "model": "gpt-5.5"})
+    p = subprocess.run([s.argv[0], "-c", cmd], input=inp.encode(), capture_output=True, env=s.env({"SIMPLETERM": "1"}), timeout=30)
+    rec = wait_for(lambda: ingests(s, "usage"), 20)
+    s.check("codex hooks: SessionStart through its command still reports usage",
+            p.stdout == b"" and rec and rec[0]["plain_json"]["ctx"].get("used") == 15159, "%r %s" % (p.stdout, str(rec)[:200]))
+
+
 def t_gemini(s):
     # Gemini CLI waits for the Notification hook before it shows its prompt: the hook must not
     # wait for the network. The link answers after 4 s, so a send in the foreground shows.
@@ -1567,11 +1598,11 @@ def copies_check():
 TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t_timeout, t_multi_link,
          t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_agent_gone, t_events,
          t_hostile_input, t_log, t_argv, t_external_printf,
-         t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_codex, t_gemini, t_notify,
+         t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js]
 
 # Tests of the sh hook only (scripts and behaviour the PowerShell hook does not have).
-SH_ONLY = {"t_usage_claude_big", "t_usage_claude_huge", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_cli_wrapper",
+SH_ONLY = {"t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_cli_wrapper",
            "t_agy", "t_agy_paths", "t_opencode_sh", "t_opencode_js"}
 
 

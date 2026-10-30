@@ -558,7 +558,8 @@ EOF
 }
 
 # Prints the agent's PID: the nearest ancestor that is not a shell (hooks
-# run under `sh -c`, Codex under `$SHELL -lc`). Empty if ps is unavailable.
+# run under `sh -c`, Codex under `$SHELL -c` or `-lc`). Empty if ps is
+# unavailable.
 agent_pid() {
   ap=$PPID n=0
   while [ "$n" -lt 4 ] && is_uint "$ap" && [ "$ap" -gt 1 ]; do

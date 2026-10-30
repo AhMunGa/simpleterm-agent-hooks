@@ -2,10 +2,11 @@
   "hooks": {
     "SessionStart": [
       {
+        "matcher": "resume|fork",
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${PLUGIN_ROOT}/scripts/agent-hook.sh\" codex",
+            "command": "sh \"${PLUGIN_ROOT}/scripts/agent-hook.sh\" codex >/dev/null",
             "commandWindows": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${PLUGIN_ROOT}\\scripts\\agent-hook.ps1\" codex",
             "timeout": 30
           }
@@ -30,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${PLUGIN_ROOT}/scripts/agent-hook.sh\" codex",
+            "command": "sh \"${PLUGIN_ROOT}/scripts/agent-hook.sh\" codex >/dev/null",
             "commandWindows": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${PLUGIN_ROOT}\\scripts\\agent-hook.ps1\" codex",
             "timeout": 30
           }
@@ -42,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${PLUGIN_ROOT}/scripts/agent-hook.sh\" codex",
+            "command": "sh \"${PLUGIN_ROOT}/scripts/agent-hook.sh\" codex >/dev/null",
             "commandWindows": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${PLUGIN_ROOT}\\scripts\\agent-hook.ps1\" codex",
             "timeout": 30
           }
