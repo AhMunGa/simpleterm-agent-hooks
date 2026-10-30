@@ -102,11 +102,12 @@ Claude Code plugin. Check that the hooks loaded with `agy -p "/hooks" --output-f
 **Not tested with a real `agy` yet**: this plugin is built from agy's documentation and change
 log. They do not say in which folder a hook command runs, so each command finds the script
 itself, in this order: `${PLUGIN_ROOT}` and `${CLAUDE_PLUGIN_ROOT}` (if agy fills them in), the
-install folder `~/.gemini/config/plugins/simpleterm-antigravity`, the app's copy
-`~/.simpleterm/src/plugins/simpleterm`, then `./scripts`. If none is there, the hook prints
-nothing and exits 0. What agy does with an empty answer from `PreToolUse` is not documented
-either (a guess, not measured: its permission policy decides, as for `allow`); the script itself
-always answers with a decision.
+install folder `~/.gemini/config/plugins/simpleterm-antigravity`, the older install folder from
+agy's documentation `~/.gemini/antigravity-cli/plugins/simpleterm-antigravity`, then the app's
+copy `~/.simpleterm/src/plugins/simpleterm`. It never looks in the folder the hook runs in: that
+can be a workspace, and a repository's own `scripts/agent-hook.sh` must not run. If none is
+there, `PreToolUse` answers `{"decision":"allow"}`, as the script does when the device did not
+decide, and `Stop` prints nothing; both exit 0.
 
 agy has no "waiting for permission" event: its `PreToolUse` hook runs before every tool call,
 before agy decides whether to ask. So by default the plugin only alerts for agy's own questions

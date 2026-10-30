@@ -12,8 +12,11 @@
     `run_command` from the device is opt-in (`agy_wait`, it runs before agy's policy). Every
     `PreToolUse` run answers `{"decision":"allow"}` unless the device decided (what agy does with
     no answer is not documented). The hook commands find the script from any working folder
-    (`${PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_ROOT}`, the install folder, the app's clone, then
-    `./scripts`) and print nothing when it is missing. Not tested with a real `agy` yet.
+    (`${PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_ROOT}`, the install folder, the older install folder
+    `~/.gemini/antigravity-cli/plugins/simpleterm-antigravity`, the app's clone) and never run
+    one from the working folder itself (a workspace's own `scripts/agent-hook.sh`); with no
+    script, `PreToolUse` still answers `{"decision":"allow"}` and `Stop` prints nothing. Not
+    tested with a real `agy` yet.
   - **Grok Build**: Grok runs Claude Code plugins' hooks; with `GROK_HOOK_EVENT` set the hook
     reports `grok-build` instead of `claude-code`. Permission prompts and idle prompts are alerts,
     `Stop` (`end_turn` only) done, `StopFailure` error. A second copy of the same event within

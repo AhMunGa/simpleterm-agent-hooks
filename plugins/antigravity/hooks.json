@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'for d in \"${PLUGIN_ROOT}\" \"${CLAUDE_PLUGIN_ROOT}\" \"$HOME/.gemini/config/plugins/simpleterm-antigravity\" \"$HOME/.simpleterm/src/plugins/simpleterm\" .; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && exec sh \"$d/scripts/agent-hook.sh\" agy PreToolUse; done; exit 0'",
+            "command": "sh -c 'for d in \"${PLUGIN_ROOT}\" \"${CLAUDE_PLUGIN_ROOT}\" \"$HOME/.gemini/config/plugins/simpleterm-antigravity\" \"$HOME/.gemini/antigravity-cli/plugins/simpleterm-antigravity\" \"$HOME/.simpleterm/src/plugins/simpleterm\"; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && exec sh \"$d/scripts/agent-hook.sh\" agy PreToolUse; done; printf \"{\\\"decision\\\":\\\"allow\\\"}\\n\"; exit 0'",
             "timeout": 120
           }
         ]
@@ -15,7 +15,7 @@
     "Stop": [
       {
         "type": "command",
-        "command": "sh -c 'for d in \"${PLUGIN_ROOT}\" \"${CLAUDE_PLUGIN_ROOT}\" \"$HOME/.gemini/config/plugins/simpleterm-antigravity\" \"$HOME/.simpleterm/src/plugins/simpleterm\" .; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && exec sh \"$d/scripts/agent-hook.sh\" agy Stop; done; exit 0'",
+        "command": "sh -c 'for d in \"${PLUGIN_ROOT}\" \"${CLAUDE_PLUGIN_ROOT}\" \"$HOME/.gemini/config/plugins/simpleterm-antigravity\" \"$HOME/.gemini/antigravity-cli/plugins/simpleterm-antigravity\" \"$HOME/.simpleterm/src/plugins/simpleterm\"; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && exec sh \"$d/scripts/agent-hook.sh\" agy Stop; done; exit 0'",
         "timeout": 30
       }
     ]

@@ -1380,7 +1380,8 @@ def agy_stop(**kw):
 
 
 def t_agy(s):
-    """Antigravity: PreToolUse always answers (`{}` would deny); device waits are opt-in."""
+    """Antigravity: PreToolUse always answers with a decision (what agy does with `{}` or no
+    answer is not documented); device waits are opt-in."""
     s.setup([(LINK_A, {"decision": "allow", "after": 1})])
     rc, out, err, el = s.run("agy", agy_input(), args=("PreToolUse",))
     s.check("agy: no wait by default -> allow (policy decides)", out.strip() == '{"decision":"allow"}', out + err)
@@ -1431,27 +1432,32 @@ def agy_command(event):
 
 
 def t_agy_paths(s):
-    """agy's hook commands find the script without relying on the working directory."""
+    """agy's hook commands find the script without relying on the working directory, and never
+    run one from it: agy may run hooks in the workspace, a repository that can hold its own
+    scripts/agent-hook.sh."""
     s.setup([])
     tmp = s.tmp / "agy-paths"
     shutil.rmtree(tmp, ignore_errors=True)
-    root, cwd, elsewhere = tmp / "plugin-root", tmp / "workspace", tmp / "elsewhere"
+    root, workspace, elsewhere = tmp / "plugin-root", tmp / "workspace", tmp / "elsewhere"
     places = {
         "PLUGIN_ROOT": root,
         "installed": s.home / ".gemini" / "config" / "plugins" / "simpleterm-antigravity",
+        "old-installed": s.home / ".gemini" / "antigravity-cli" / "plugins" / "simpleterm-antigravity",
         "clone": s.home / ".simpleterm" / "src" / "plugins" / "simpleterm",
-        "cwd": cwd,
     }
     for name, d in places.items():
         write(d / "scripts" / "agent-hook.sh", STUB % name)
+    ran = tmp / "workspace-script-ran"
+    write(workspace / "scripts" / "agent-hook.sh",
+          "#!/bin/sh\n: >'%s'\nprintf 'workspace %%s %%s\\n' \"$1\" \"$2\"\n" % ran)
     elsewhere.mkdir(parents=True)
 
-    def run(event, where, env=None, substitute=False):
+    def run(event, where, env=None, substitute=False, stdin=b"{}"):
         cmd = agy_command(event)
         if substitute:  # agy replacing ${PLUGIN_ROOT} itself
             cmd = cmd.replace("${PLUGIN_ROOT}", str(root))
-        p = subprocess.run([s.argv[0], "-c", cmd], input=b"{}", capture_output=True, cwd=str(where),
-                           env=s.env(env), timeout=30)
+        p = subprocess.run([s.argv[0], "-c", cmd], input=stdin, capture_output=True, cwd=str(where),
+                           env=s.env(env), timeout=60)
         return p.returncode, p.stdout.decode()
 
     for label, env, sub, want in (
@@ -1460,22 +1466,33 @@ def t_agy_paths(s):
         ("CLAUDE_PLUGIN_ROOT in the environment", {"CLAUDE_PLUGIN_ROOT": str(root)}, False, "PLUGIN_ROOT agy PreToolUse"),
         ("no variable: the installed copy", None, False, "installed agy PreToolUse"),
     ):
-        rc, out = run("PreToolUse", cwd, env, sub)
+        rc, out = run("PreToolUse", workspace, env, sub)
         s.check("agy paths: %s" % label, rc == 0 and out.strip() == want, "%d %r" % (rc, out))
     shutil.rmtree(places["installed"])
-    rc, out = run("Stop", cwd)
+    rc, out = run("Stop", workspace)
+    s.check("agy paths: the old install folder (~/.gemini/antigravity-cli/plugins) next",
+            rc == 0 and out.strip() == "old-installed agy Stop", "%d %r" % (rc, out))
+    shutil.rmtree(places["old-installed"])
+    rc, out = run("Stop", workspace)
     s.check("agy paths: the app's clone next", rc == 0 and out.strip() == "clone agy Stop", "%d %r" % (rc, out))
     shutil.rmtree(places["clone"])
-    rc, out = run("PreToolUse", cwd)
-    s.check("agy paths: ./scripts last", rc == 0 and out.strip() == "cwd agy PreToolUse", "%d %r" % (rc, out))
-    for event in ("PreToolUse", "Stop"):
-        rc, out = run(event, elsewhere)
-        s.check("agy paths: no script anywhere -> no output, exit 0 (%s)" % event, rc == 0 and out == "", "%d %r" % (rc, out))
-    # The real plugin installed where agy puts it, run from a workspace.
+    # Nothing installed: PreToolUse still ends with a decision (as the script does), Stop
+    # prints nothing, and the workspace's own scripts/agent-hook.sh does not run.
+    for event, want in (("PreToolUse", '{"decision":"allow"}\n'), ("Stop", "")):
+        for where in (workspace, elsewhere):
+            rc, out = run(event, where)
+            s.check("agy paths: no script installed -> %s, exit 0 (%s from %s)" % (want.strip() or "no output", event, where.name),
+                    rc == 0 and out == want, "%d %r" % (rc, out))
+    s.check("agy paths: the workspace's scripts/agent-hook.sh never runs", not ran.exists(), "ran from %s" % workspace)
+    # The real plugin installed where agy puts it, run from the workspace. The device's answer
+    # shows that the plugin's script ran (with nothing found the command answers allow too).
     shutil.copytree(ROOT / "plugins" / "antigravity", places["installed"])
-    rc, out = run("PreToolUse", elsewhere)
-    s.check("agy paths: the installed plugin answers from any folder", rc == 0 and out.strip() == '{"decision":"allow"}',
-            "%d %r" % (rc, out))
+    s.setup([(LINK_A, {"decision": "allow", "after": 1})], conf={"agy_wait": 30})
+    if ran.exists():  # reported above; this case looks at its own run only
+        ran.unlink()
+    rc, out = run("PreToolUse", workspace, stdin=agy_input().encode())
+    s.check("agy paths: the installed plugin answers from any folder",
+            rc == 0 and out.strip() == '{"decision":"auto_approve"}' and not ran.exists(), "%d %r" % (rc, out))
     shutil.rmtree(s.home / ".gemini", ignore_errors=True)
     shutil.rmtree(tmp, ignore_errors=True)
 
