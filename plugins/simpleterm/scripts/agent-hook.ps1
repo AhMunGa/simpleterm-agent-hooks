@@ -24,8 +24,10 @@ if ($ScriptArgs.Count -gt 1) { $Mode = [string]$ScriptArgs[1] }
 
 $MaxInput = 262144
 $MaxLinks = 16
+# The plugin release of this script (the manifests carry the same).
+$HookVersion = '0.3.0'
 # Bumped when the ~/.simpleterm/bin/simpleterm.cmd wrapper must be rewritten.
-$CliRev = 1
+$CliRev = 2
 $Inv = [Globalization.CultureInfo]::InvariantCulture
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
 $IsWin = ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
@@ -949,8 +951,10 @@ function Invoke-UsageReport {
 
 # --- the `simpleterm` command (Windows) ---------------------------------------
 
-# Keeps ~/.simpleterm/bin/simpleterm.cmd pointing at this script, so that
-# `simpleterm notify "title" "body"` works in cmd and PowerShell.
+# Keeps ~/.simpleterm/bin/simpleterm.cmd pointing at the newest installed copy
+# of this script, so that `simpleterm notify "title" "body"` works in cmd and
+# PowerShell. Rewritten when missing, when its script is gone, when in an
+# older format or when it names an older release (as in agent-hook.sh).
 function Update-Cli {
     try {
         if (-not $IsWin -or -not [IO.Directory]::Exists($StDir)) { return }
@@ -962,10 +966,14 @@ function Update-Cli {
             $text = [IO.File]::ReadAllText($w)
             $m = [regex]::Match($text, '-File "([^"]+)"')
             $r = [regex]::Match($text, 'rev=([0-9]+)')
-            if ($m.Success -and [IO.File]::Exists($m.Groups[1].Value) -and $r.Success -and [int]$r.Groups[1].Value -ge $CliRev) { return }
+            $v = [regex]::Match($text, 'version=([0-9]+(\.[0-9]+){1,3})')
+            if ($m.Success -and [IO.File]::Exists($m.Groups[1].Value) -and $r.Success -and [int]$r.Groups[1].Value -ge $CliRev) {
+                if ($m.Groups[1].Value -eq $self) { return }
+                if ($v.Success -and -not ([version]$v.Groups[1].Value -lt [version]$HookVersion)) { return }
+            }
         }
         if (-not [IO.Directory]::Exists($bin)) { [void][IO.Directory]::CreateDirectory($bin) }
-        $body = "@echo off`r`nrem simpleterm: written by the SimpleTerm agent hooks plugin (rev=" + $CliRev + "); edits are overwritten.`r`n" +
+        $body = "@echo off`r`nrem simpleterm: written by the SimpleTerm agent hooks plugin (rev=" + $CliRev + " version=" + $HookVersion + "); edits are overwritten.`r`n" +
             'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $self + '" %*' + "`r`n"
         [IO.File]::WriteAllText($w, $body, (New-Object System.Text.ASCIIEncoding))
         Write-Log 'cli installed'

@@ -39,8 +39,10 @@ LOGGED=0
 
 MAX_INPUT=262144
 MAX_LINKS=16
+# The plugin release of this script (the manifests carry the same).
+HOOK_VERSION=0.3.0
 # Bumped when the ~/.simpleterm/bin/simpleterm wrapper must be rewritten.
-CLI_REV=1
+CLI_REV=2
 CR=$(printf '\r')
 
 log() {
@@ -1067,9 +1069,22 @@ usage_report() {
 
 # --- the `simpleterm` command --------------------------------------------------
 
-# Keeps ~/.simpleterm/bin/simpleterm pointing at this plugin's
-# simpleterm-notify.sh. Rewritten only when missing, when the script it
-# names is gone (the plugin moved: updated or removed) or when older.
+# True if dotted version $1 is older than $2.
+ver_lt() { # a b
+  awk -v a="$1" -v b="$2" 'BEGIN {
+    split(a, A, "."); split(b, B, ".")
+    for (i = 1; i <= 3; i++) { if (A[i] + 0 < B[i] + 0) exit 0; if (A[i] + 0 > B[i] + 0) exit 1 }
+    exit 1
+  }' 2>/dev/null
+}
+
+# Keeps ~/.simpleterm/bin/simpleterm pointing at the newest installed copy of
+# simpleterm-notify.sh. It is rewritten when missing, when the script it
+# names is gone (the plugin moved: updated or removed), when in an older
+# format, or when it names an older release than this one: an updated plugin
+# re-points it at once, though the agent may keep the old folder for a
+# while. Another copy of the same or a newer release (Codex, Gemini and
+# Grok install their own) is left alone, so copies do not take turns.
 ensure_cli() {
   [ -d "$ST_DIR" ] || return 0
   here=${0%/*}
@@ -1082,7 +1097,11 @@ ensure_cli() {
   if [ -f "$w" ]; then
     cur=$(sed -n "s/^s='\\(.*\\)'\$/\\1/p" "$w" 2>/dev/null | head -n 1)
     rev=$(sed -n 's/^# rev=\([0-9]*\)$/\1/p' "$w" 2>/dev/null | head -n 1)
-    [ -n "$cur" ] && [ -f "$cur" ] && is_uint "$rev" && [ "$rev" -ge "$CLI_REV" ] && return 0
+    ver=$(sed -n 's/^# version=\([0-9][0-9.]*\)$/\1/p' "$w" 2>/dev/null | head -n 1)
+    if [ -n "$cur" ] && [ -f "$cur" ] && is_uint "$rev" && [ "$rev" -ge "$CLI_REV" ]; then
+      [ "$cur" = "$src" ] && return 0
+      [ -n "$ver" ] && ! ver_lt "$ver" "$HOOK_VERSION" && return 0
+    fi
   fi
   mkdir -p "$ST_DIR/bin" 2>/dev/null || return 0
   {
@@ -1090,6 +1109,7 @@ ensure_cli() {
     printf '# simpleterm: written by the SimpleTerm agent hooks plugin, which keeps it\n'
     printf '# pointing at the plugin (see its README). Edits are overwritten.\n'
     printf '# rev=%s\n' "$CLI_REV"
+    printf '# version=%s\n' "$HOOK_VERSION"
     printf "s='%s'\n" "$src"
     printf '[ -f "$s" ] || { echo "simpleterm: $s is gone; start your agent once to update this command" >&2; exit 1; }\n'
     printf 'exec sh "$s" "$@"\n'

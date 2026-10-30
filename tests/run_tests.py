@@ -1252,9 +1252,41 @@ def t_cli_wrapper(s):
     s.check("cli: a moved plugin is reported", p.returncode == 1 and b"is gone" in p.stderr, p.stderr)
     s.run("claude", json.dumps({"session_id": "w", "hook_event_name": "SessionStart", "source": "startup"}))
     s.check("cli: rewritten when its script is gone", str(SCRIPTS) in w.read_text())
-    w.write_text(w.read_text().replace("# rev=1", "# rev=1\n# mine"))
+    current = w.read_text()
+    w.write_text(current.replace("#!/bin/sh\n", "#!/bin/sh\n# mine\n", 1))
     s.run("claude", json.dumps({"session_id": "w", "hook_event_name": "SessionStart", "source": "startup"}))
     s.check("cli: a current one is left alone", "# mine" in w.read_text())
+    # After an update the agent may keep the old version's folder for a while: the newer
+    # hook re-points the command. A copy of the same or a newer release is left alone.
+    ver = hook_version()
+    other = write(s.tmp / "plugin-cache" / "other" / "scripts" / "simpleterm-notify.sh", "#!/bin/sh\n")
+
+    def wrapper(version, rev=None):
+        text = current.replace(str(SCRIPTS / "simpleterm-notify.sh"), str(other))
+        text = "".join(l for l in text.splitlines(True) if not l.startswith("# version="))
+        if rev is not None:
+            text = "".join("# rev=%s\n" % rev if l.startswith("# rev=") else l for l in text.splitlines(True))
+        if version:
+            text = text.replace("\ns=", "\n# version=%s\ns=" % version, 1)
+        w.write_text(text)
+
+    for label, version, rev, kept in (("an older release's folder that is still there", "0.2.9", None, False),
+                                      ("a 0.3.0 command without a version line", None, 1, False),
+                                      ("a newer release's copy", "9.9.9", None, True),
+                                      ("another copy of the same release", ver, None, True)):
+        wrapper(version, rev)
+        s.run("claude", json.dumps({"session_id": "w", "hook_event_name": "Stop", "last_assistant_message": "ok"}))
+        text = w.read_text()
+        points = "s='%s'" % (SCRIPTS / "simpleterm-notify.sh") in text
+        s.check("cli: %s is %s" % (label, "left alone" if kept else "re-pointed"),
+                points != kept and (kept or "# version=%s\n" % ver in text), text)
+
+
+def hook_version():
+    """The release the sh hook under test says it belongs to (0.3.0 before the constant)."""
+    import re
+    m = re.search(r"^HOOK_VERSION=([0-9.]+)$", HOOK_SH.read_text(), re.M)
+    return m.group(1) if m else "0.3.0"
 
 
 def agy_input(tool="run_command", args=None, extra=None):
@@ -1585,6 +1617,23 @@ COPIES = [
 ]
 
 
+MANIFESTS = ["plugins/simpleterm/.claude-plugin/plugin.json", "plugins/simpleterm/.codex-plugin/plugin.json",
+             "gemini-extension.json", "plugins/antigravity/plugin.json", "plugins/opencode/package.json"]
+
+
+def versions_check():
+    """Every manifest and both hook scripts name the same release (the scripts' constant decides
+    when ~/.simpleterm/bin/simpleterm moves to an updated plugin)."""
+    import re
+    found = {m: json.loads((ROOT / m).read_text()).get("version") for m in MANIFESTS}
+    for path, pat in (("plugins/simpleterm/scripts/agent-hook.sh", r"^HOOK_VERSION=([0-9.]+)$"),
+                      ("plugins/simpleterm/scripts/agent-hook.ps1", r"^\$HookVersion = '([0-9.]+)'$")):
+        m = re.search(pat, (ROOT / path).read_text(), re.M)
+        found[path] = m.group(1) if m else None
+    want = found[MANIFESTS[0]]
+    return ["%s has version %s, %s has %s" % (k, v, MANIFESTS[0], want) for k, v in found.items() if v != want]
+
+
 def copies_check():
     """Plugins that are installed on their own carry copies of the scripts; they must not drift."""
     bad = []
@@ -1688,6 +1737,11 @@ def main():
     for p in copies:
         print("   FAIL " + p)
     failed += len(copies)
+    versions = versions_check()
+    print("== versions: %s" % ("ok" if not versions else "%d differ" % len(versions)))
+    for p in versions:
+        print("   FAIL " + p)
+    failed += len(versions)
     static = ps51_static_check()
     print("== PowerShell 5.1 static check: %s" % ("ok" if not static else "%d problem(s)" % len(static)))
     for p in static:

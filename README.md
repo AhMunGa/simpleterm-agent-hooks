@@ -229,9 +229,11 @@ In a SimpleTerm session it shows an OSC 777 notification on the terminal (inside
 tunnel and the relay), so it also reaches you when the app is in the background. The title is cut
 at 256 bytes and the body at 800. It returns at once and exits 0.
 
-The hooks keep the command at `~/.simpleterm/bin/simpleterm` (a small script that runs the
-installed plugin's `scripts/simpleterm-notify.sh`, rewritten when the plugin moves). Add the folder
-to your `PATH`, for example in `~/.profile` or `~/.zshrc`:
+The hooks keep the command at `~/.simpleterm/bin/simpleterm`, a small script that runs the
+installed plugin's `scripts/simpleterm-notify.sh`. At a session start and at the end of a turn
+they point it at the newest release they run from, so an update takes effect even while the agent
+keeps the old version's folder for a while; another agent's copy of the same or a newer release is
+left alone. Add the folder to your `PATH`, for example in `~/.profile` or `~/.zshrc`:
 
 ```sh
 export PATH="$HOME/.simpleterm/bin:$PATH"
@@ -421,7 +423,9 @@ They are ignored otherwise.
 
 When releasing, bump `version` in every manifest (`plugins/simpleterm/.claude-plugin/plugin.json`,
 `.codex-plugin/plugin.json`, `gemini-extension.json`, `plugins/antigravity/plugin.json`,
-`plugins/opencode/package.json`); installed copies update only when it changes.
+`plugins/opencode/package.json`) and the release in the scripts (`HOOK_VERSION` in
+`scripts/agent-hook.sh`, `$HookVersion` in `scripts/agent-hook.ps1`); installed copies update only
+when it changes, and the tests fail while they differ.
 
 ## License
 
