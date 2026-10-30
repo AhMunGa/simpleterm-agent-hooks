@@ -229,30 +229,48 @@ json_text() { # text maxu maxb [mode]
   json_trim "$t" "$2" "$3" "${4:-}"
 }
 
-# Plain text (no control characters) cut to at most $2 bytes without
-# splitting a UTF-8 sequence; for terminal sequences. C1 controls (U+0080
-# to U+009F, two bytes in UTF-8) become spaces, as in json_trim.
-UTF8_CUT='
-{
-  s = (NR > 1 ? s " " : "") $0
-}
-END {
-  n = length(s); i = 1; out = ""
+# Text of a `simpleterm notify` notification. The terminal (OSC 777) and the
+# `notify` event get the same text, so the app can tell two copies of one
+# notification from two notifications: whitespace runs, line breaks included
+# (TAB LF VT FF CR, NEL, U+2028, U+2029), become one space; other control
+# characters (C0, DEL, C1) and invalid UTF-8 are removed; leading and
+# trailing spaces go; then it is cut to $2 characters and $3 bytes, between
+# characters and not after a space.
+NOTIFY_TEXT='
+function feed(s,   n, i, c, w, j, x, lo, hi, ok, unit) {
+  n = length(s); i = 1
   while (i <= n) {
     c = substr(s, i, 1); w = 1
-    if (c >= "\300") { if (c < "\340") w = 2; else if (c < "\360") w = 3; else w = 4 }
-    else if (c >= "\200") { i++; continue }
-    u = substr(s, i, w)
-    if (c == "\302" && substr(u, 2, 1) < "\240") u = " "
-    if (length(out) + length(u) > maxb) break
-    out = out u; i += w
+    if (c >= "\302" && c <= "\364") {
+      w = c < "\340" ? 2 : (c < "\360" ? 3 : 4)
+      lo = "\200"; hi = "\277"
+      if (c == "\340") lo = "\240"; else if (c == "\355") hi = "\237"
+      else if (c == "\360") lo = "\220"; else if (c == "\364") hi = "\217"
+      x = substr(s, i + 1, 1); ok = (x >= lo && x <= hi)
+      for (j = 2; ok && j < w; j++) { x = substr(s, i + j, 1); if (x < "\200" || x > "\277") ok = 0 }
+      if (!ok) { i++; continue }
+      unit = substr(s, i, w)
+      if (unit == "\302\205" || unit == "\342\200\250" || unit == "\342\200\251") unit = " "
+      else if (c == "\302" && substr(unit, 2, 1) < "\240") unit = ""
+    } else if (c >= "\200") { i++; continue }
+    else if (c == " " || (c >= "\011" && c <= "\015")) unit = " "
+    else if (c < " " || c == "\177") unit = ""
+    else unit = c
+    i += w
+    if (unit == "") continue
+    if (unit == " ") { if (u > 0) sp = 1; continue }
+    if (u + sp + 1 > maxu || b + sp + length(unit) > maxb) return 1
+    if (sp) { out = out " "; u++; b++; sp = 0 }
+    out = out unit; u++; b += length(unit)
   }
-  printf "%s", out
-}'
+  return 0
+}
+NR > 1 && u > 0 { sp = 1 }
+{ if (feed($0)) exit }
+END { printf "%s", out }'
 
-plain_cut() { # text maxb
-  printf '%s' "$1" | tr -d '\000-\010\013-\037\177' | tr '\t\n' '  ' |
-    awk -v maxb="$2" "$UTF8_CUT" 2>/dev/null
+notify_text() { # text maxu maxb
+  printf '%s' "$1" | head -c 65536 | awk -v maxu="$2" -v maxb="$3" "$NOTIFY_TEXT" 2>/dev/null
 }
 
 is_hex() { # value length
@@ -1223,8 +1241,8 @@ USAGE_SEQ='' USAGE_JSON='' TITLE='' MSG=''
 # `simpleterm notify "title" ["body"]`: an OSC 777 notification on this
 # terminal (in a SimpleTerm session) and a `notify` event to every link.
 if [ "$AGENT" = notify ]; then
-  t=$(plain_cut "${2:-}" 256)
-  b=$(plain_cut "${3:-}" 800)
+  t=$(notify_text "${2:-}" 64 256)
+  b=$(notify_text "${3:-}" 200 800)
   [ -n "$t$b" ] || finish
   if [ "${SIMPLETERM:-}" = 1 ] && { : >/dev/tty; } 2>/dev/null; then
     if [ -n "${TMUX:-}" ]; then
@@ -1234,8 +1252,9 @@ if [ "$AGENT" = notify ]; then
       printf '\033]777;notify;%s;%s\007' "$t" "$b" >/dev/tty 2>/dev/null
     fi
   fi
-  TITLE=$(json_text "$t" 64 256)
-  MSG=$(json_text "$b" 200 800)
+  # Already within the limits; escaping can double the bytes, not the count.
+  TITLE=$(json_text "$t" 64 512)
+  MSG=$(json_text "$b" 200 1600)
   CWD_BASE=$(json_text "$PWD" 64 256 base)
   send_bg notify
   finish

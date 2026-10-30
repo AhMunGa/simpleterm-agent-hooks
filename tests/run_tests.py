@@ -1266,9 +1266,34 @@ def t_notify(s):
             % (p.get("rid"), s.tmp.name)), rec[0]["plain"] if rec else "")
         s.check("notify: tunnel event", wait_for(lambda: ingests(s, "notify", tctl), 20))
         s.ctl("/_ctl/reset", {})
-        # C1 controls (U+0080-U+009F) are terminal controls too: U+009C is ST, U+009B CSI.
-        rc, tty = notify_pty(s, ["notify", "C1", "a\u009cb\u009b2Jc\u0085d"], {"SIMPLETERM": "1"})
-        s.check("notify: C1 controls removed from the terminal sequence", b"\x1b]777;notify;C1;a b 2Jc d\x07" in tty, repr(tty))
+        # The terminal and the event get the same text (the app tells two copies of one
+        # notification from two notifications by it): whitespace runs, line breaks included,
+        # become one space; other control characters (C0, DEL, C1: U+009C is ST, U+009B CSI)
+        # and invalid UTF-8 go; leading and trailing spaces go; title 64 and body 200
+        # characters (256 and 800 bytes).
+        for n, (title, body, want_t, want_b) in enumerate((
+                ("Tests\nfinished", "line one\nline  two\r\n\tlast  ", "Tests finished", "line one line two last"),
+                ("  pad  ", " a \x01 b ", "pad", "a b"),
+                ("T" * 70, "x" * 250, "T" * 64, "x" * 200),
+                ('"' * 100, "\\" * 300, '"' * 64, "\\" * 200),
+                ("한" * 70, "😀" * 201, "한" * 64, "😀" * 200),
+                ("C1", "a\u009cb\u009b2Jc\u0085d\u2028e\u2029f", "C1", "ab2Jc d e f"),
+                (b"bad", b"ok \xff\xc3( \xe2\x82 end", "bad", "ok ( end"))):
+            s.ctl("/_ctl/reset", {})
+            rc, tty = notify_pty(s, ["notify", title, body], {"SIMPLETERM": "1"})
+            i = tty.find(b"\x1b]777;notify;")
+            osc = tty[i + 13:tty.find(b"\x07", i)] if i >= 0 else b""
+            screen = osc.split(b";", 1) + [b""]
+            rec = wait_for(lambda: ingests(s, "notify"), 20)
+            ev = rec[0].get("plain_json") or {} if rec else {}
+            got = (screen[0].decode("utf-8", "replace"), screen[1].decode("utf-8", "replace"), ev.get("title"), ev.get("msg"))
+            s.check("notify: case %d, the same normalized text on the terminal and in the event" % n,
+                    got == (want_t, want_b, want_t, want_b), repr(got)[:300])
+        s.ctl("/_ctl/reset", {})
+        rc, tty = notify_pty(s, ["notify", "   ", "\n\t "], {"SIMPLETERM": "1"})
+        time.sleep(1.5)
+        s.check("notify: only whitespace sends nothing", rc == 0 and b"\x1b]777" not in tty and not ingests(s, "notify"),
+                repr(tty))
         s.ctl("/_ctl/reset", {})
         rc, tty = notify_pty(s, ["notify", "Only title"])
         s.check("notify: no sequence outside SimpleTerm", b"\x1b]777" not in tty, repr(tty))

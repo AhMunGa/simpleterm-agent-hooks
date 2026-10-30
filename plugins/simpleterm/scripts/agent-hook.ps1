@@ -214,6 +214,30 @@ function ConvertTo-JsonText([string]$text, [int]$maxU, [int]$maxB) {
     return (Limit-JsonText $sb.ToString() $maxU $maxB)
 }
 
+# Text of a `simpleterm notify` notification, as notify_text in agent-hook.sh:
+# the terminal (OSC 777) and the `notify` event get the same text. Whitespace
+# runs, line breaks included (TAB LF VT FF CR, NEL, U+2028, U+2029), become
+# one space; other control characters (C0, DEL, C1) and lone surrogates (the
+# UTF-16 form of invalid UTF-8) are removed; leading and trailing spaces go;
+# then it is cut to $maxU characters and $maxB UTF-8 bytes, between
+# characters and not after a space.
+function Format-NotifyText([string]$text, [int]$maxU, [int]$maxB) {
+    $t = [regex]::Replace([string]$text, '[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]', '')
+    $t = [regex]::Replace($t, '[\t\n\x0b\x0c\r\u0085\u2028\u2029]', ' ')
+    $t = [regex]::Replace($t, '[\x00-\x1f\x7f-\x9f]', '')
+    $t = [regex]::Replace($t, ' {2,}', ' ').Trim(' ')
+    $sb = New-Object System.Text.StringBuilder
+    $u = 0; $b = 0
+    for ($i = 0; $i -lt $t.Length; $i++) {
+        $unit = [string]$t[$i]
+        if ([char]::IsHighSurrogate($t[$i])) { $unit = $t.Substring($i, 2); $i++ }
+        $n = $Utf8.GetByteCount($unit)
+        if ($u + 1 -gt $maxU -or $b + $n -gt $maxB) { break }
+        [void]$sb.Append($unit); $u++; $b += $n
+    }
+    return $sb.ToString().TrimEnd(' ')
+}
+
 function Test-Hex([string]$s, [int]$len) {
     return ($null -ne $s -and $s.Length -eq $len -and $s -cmatch '^[0-9a-f]+$')
 }
@@ -1127,16 +1151,15 @@ try {
         $b = ''
         if ($ScriptArgs.Count -gt 1) { $t = [string]$ScriptArgs[1] }
         if ($ScriptArgs.Count -gt 2) { $b = [string]$ScriptArgs[2] }
-        $t = ($t -replace '[\x00-\x1f\x7f-\x9f]', ' ')
-        $b = ($b -replace '[\x00-\x1f\x7f-\x9f]', ' ')
-        if ($t.Length -gt 120) { $t = $t.Substring(0, 120) }
-        if ($b.Length -gt 400) { $b = $b.Substring(0, 400) }
+        $t = Format-NotifyText $t 64 256
+        $b = Format-NotifyText $b 200 800
         if (-not ($t + $b)) { exit 0 }
         if ($env:SIMPLETERM -eq '1' -and -not [Console]::IsOutputRedirected) {
             try { [Console]::Out.Write([string][char]27 + ']777;notify;' + $t + ';' + $b + [string][char]7); [Console]::Out.Flush() } catch { }
         }
-        $Script:Title = ConvertTo-JsonText $t 64 256
-        $Script:Msg = ConvertTo-JsonText $b 200 800
+        # Already within the limits; escaping can double the bytes, not the count.
+        $Script:Title = ConvertTo-JsonText $t 64 512
+        $Script:Msg = ConvertTo-JsonText $b 200 1600
         $cwd = (Get-Location).Path
         $CwdBase = Limit-JsonText (ConvertTo-JsonText $cwd 4096 16384) 64 256 -Base
         Send-Background 'notify'
