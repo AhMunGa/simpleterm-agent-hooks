@@ -193,7 +193,7 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | Claude `SessionStart`, `PostCompact`, `PostModelSwitch` | none (context) | none |
 | Codex `PermissionRequest` | `permission` (waits up to 60 s) | none |
 | Codex `Stop` | `done` | none |
-| Codex `SessionStart`, `PostCompact` | none (context) | none |
+| Codex `SessionStart` (resumed or forked session), `PostCompact` | none (context) | none |
 | Gemini `Notification` (`ToolPermission`) | `question` (`approve <tool>: <command or file>`) | none |
 | Gemini `AfterAgent` | `done` | none |
 | agy `PreToolUse` `run_command` (only with `agy_wait`) | `permission` | none |
