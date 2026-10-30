@@ -729,7 +729,45 @@ USAGE_TAIL=2097152
 # main-thread assistant usage (input + cache creation + cache read, the
 # status line's formula) or, if a compaction came after it, its postTokens.
 # Only these keys are read; message text is never looked at.
+#
+# jwalk reads a line character by character, and BWK awk (macOS) measures
+# the whole string again on every substr(), so a 1 MiB line (a large Edit or
+# Write) took over 10 seconds. A line longer than 32 KiB is first cut down,
+# with index() only, to the keys used here: the first isSidechain, model and
+# role (the line's own, ahead of message.content), and the usage object, the
+# first `"usage":{` after `"stop_reason":` that holds input and output token
+# counts (message.content and wireToolInputs can hold a tool input with a
+# "usage" key of its own, before and after it).
 USAGE_CLAUDE=$JSON_FN'
+function after(s, key, n,   p) {
+  p = index(s, key)
+  return p ? substr(s, p + length(key), n) : ""
+}
+function skeleton(L,   v, side, model, s, p, k, u, piece) {
+  if (length(L) <= 32768) return L
+  if (after(L, "\"role\":\"", 10) != "assistant\"") {
+    if (!index(L, "\"subtype\":\"compact_boundary\"")) return ""
+    v = after(L, "\"compactMetadata\":{", 4096)
+    v = after(v, "\"postTokens\":", 24)
+    sub(/[^0-9].*/, "", v)
+    return "{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"compactMetadata\":{\"postTokens\":" (v == "" ? "null" : v) "}}"
+  }
+  side = (after(L, "\"isSidechain\":", 4) == "true")
+  model = after(L, "\"model\":\"", 128)
+  sub(/".*/, "", model)
+  s = L
+  p = index(s, "\"stop_reason\":")
+  if (p) s = substr(s, p)
+  for (k = 0; k < 8; k++) {
+    u = index(s, "\"usage\":{")
+    if (!u) return ""
+    piece = substr(s, u + 8, 2048)
+    if (match(piece, /"input_tokens":[0-9]/) && match(piece, /"output_tokens":[0-9]/)) break
+    s = substr(s, u + 9)
+  }
+  if (k == 8) return ""
+  return "{\"type\":\"assistant\",\"isSidechain\":" (side ? "true" : "false") ",\"message\":{\"model\":\"" model "\",\"usage\":" piece "}}"
+}
 BEGIN {
   jwant("type,isSidechain,subtype,message.model,message.usage.input_tokens,message.usage.cache_creation_input_tokens,message.usage.cache_read_input_tokens,message.usage.cache_creation.ephemeral_5m_input_tokens,message.usage.cache_creation.ephemeral_1h_input_tokens,compactMetadata.postTokens")
   n = 0
@@ -739,7 +777,7 @@ index($0, "\"compact_boundary\"") || (index($0, "\"usage\":{") && index($0, "\"t
 END {
   ctx = ""; model = ""
   for (k = n; k >= 1 && k > n - 8; k--) {
-    jwalk(L[k % 8])
+    jwalk(skeleton(L[k % 8]))
     if (GOT["type"] == "system") {
       if (GOT["subtype"] == "compact_boundary" && ctx == "" && isnum(GOT["compactMetadata.postTokens"]))
         ctx = GOT["compactMetadata.postTokens"] + 0

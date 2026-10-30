@@ -942,6 +942,52 @@ def t_usage_claude_big(s):
         s.check("usage big: %s quick" % name, el < 3, "%.2fs" % el)
 
 
+def big_tool_line(kib, model="claude-opus-5-5", side=False, inp=10, decoy=False):
+    """An assistant line of about `kib` KiB: a tool input dense with escapes (an Edit of code),
+    in message.content and again in wireToolInputs, as Claude Code 2.1.312 writes it."""
+    unit = 'x = "a\\\\b";\n'
+    tool = {"file_path": "/w/a.py", "old_string": "x", "new_string": ""}
+    if decoy:  # a tool input with a "usage" key of its own, before and after the real one
+        tool["usage"] = {"input_tokens": 999999, "output_tokens": 1}
+
+    def line(text):
+        t = dict(tool, new_string=text)
+        return json.dumps({
+            "parentUuid": "p", "isSidechain": side,
+            "message": {"model": model, "id": "m", "type": "message", "role": "assistant",
+                        "content": [{"type": "tool_use", "id": "t1", "name": "Edit", "input": t}],
+                        "stop_reason": "tool_use", "stop_sequence": None,
+                        "usage": {"input_tokens": inp, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 5000,
+                                  "cache_creation": {"ephemeral_5m_input_tokens": 100, "ephemeral_1h_input_tokens": 200},
+                                  "output_tokens": 50, "iterations": [{"input_tokens": 77, "output_tokens": 1}]}},
+            "wireToolInputs": {"t1": t}, "requestId": "r", "type": "assistant", "uuid": "a", "timestamp": "t",
+        }, separators=(",", ":"))
+    per = 2 * (len(json.dumps(unit)) - 2)
+    return line(unit * max(0, (kib * 1024 - len(line(""))) // per + 1))
+
+
+def t_usage_claude_huge(s):
+    """A very long transcript line (a large Edit) is read in linear time, with the same result (#342)."""
+    s.setup([], conf={})
+
+    def ctx_of(name, lines):
+        tr = write(s.tmp / "claude" / ("huge-%s.jsonl" % name), "\n".join([claude_user_line()] + lines) + "\n")
+        rc, out, err, el = s.run("claude", json.dumps({"session_id": "huge-" + name, "transcript_path": str(tr),
+                                                       "hook_event_name": "PostCompact"}), {"SIMPLETERM": "1"})
+        q = seqs(out)
+        return q[q.find("ctx="):q.find(" src=")], el
+
+    got, el = ctx_of("1m", [big_tool_line(1024)])
+    s.check("usage huge: a 1 MiB line is read quickly", got == "ctx=5310 win=1000000" and el < 5, "%r %.2fs" % (got, el))
+    got, el = ctx_of("side", [big_tool_line(100, inp=20), big_tool_line(100, inp=3, side=True),
+                              big_tool_line(100, model="<synthetic>", inp=0)])
+    s.check("usage huge: sidechain and synthetic lines are skipped", got == "ctx=5320 win=1000000", got)
+    got, el = ctx_of("decoy", [big_tool_line(100, decoy=True)])
+    s.check("usage huge: a tool input's own \"usage\" key is not the response's", got == "ctx=5310 win=1000000", got)
+    got, el = ctx_of("compact", [big_tool_line(100), COMPACT_LINE])
+    s.check("usage huge: a compaction after it gives postTokens", got == "ctx=42000 win=1000000", got)
+
+
 def t_usage_statusline(s):
     """The optional status line tap adds the window size and the 5-hour/7-day limits."""
     s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})])
@@ -1521,11 +1567,11 @@ def copies_check():
 TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t_timeout, t_multi_link,
          t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_agent_gone, t_events,
          t_hostile_input, t_log, t_argv, t_external_printf,
-         t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_statusline, t_usage_relay_policy, t_usage_codex, t_gemini, t_notify,
+         t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_codex, t_gemini, t_notify,
          t_cli_wrapper, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js]
 
 # Tests of the sh hook only (scripts and behaviour the PowerShell hook does not have).
-SH_ONLY = {"t_usage_claude_big", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_cli_wrapper",
+SH_ONLY = {"t_usage_claude_big", "t_usage_claude_huge", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_cli_wrapper",
            "t_agy", "t_agy_paths", "t_opencode_sh", "t_opencode_js"}
 
 
