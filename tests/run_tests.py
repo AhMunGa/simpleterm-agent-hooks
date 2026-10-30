@@ -1174,6 +1174,65 @@ def t_agy(s):
     s.check("agy: garbage input still answers allow", out.strip() == '{"decision":"allow"}', out)
 
 
+AGY_HOOKS = ROOT / "plugins" / "antigravity" / "hooks.json"
+STUB = "#!/bin/sh\nprintf '%s %%s %%s\\n' \"$1\" \"$2\"\n"
+
+
+def agy_command(event):
+    hooks = json.loads(AGY_HOOKS.read_text())["simpleterm-agent-hooks"][event]
+    return hooks[0]["hooks"][0]["command"] if "hooks" in hooks[0] else hooks[0]["command"]
+
+
+def t_agy_paths(s):
+    """agy's hook commands find the script without relying on the working directory."""
+    s.setup([])
+    tmp = s.tmp / "agy-paths"
+    shutil.rmtree(tmp, ignore_errors=True)
+    root, cwd, elsewhere = tmp / "plugin-root", tmp / "workspace", tmp / "elsewhere"
+    places = {
+        "PLUGIN_ROOT": root,
+        "installed": s.home / ".gemini" / "config" / "plugins" / "simpleterm-antigravity",
+        "clone": s.home / ".simpleterm" / "src" / "plugins" / "simpleterm",
+        "cwd": cwd,
+    }
+    for name, d in places.items():
+        write(d / "scripts" / "agent-hook.sh", STUB % name)
+    elsewhere.mkdir(parents=True)
+
+    def run(event, where, env=None, substitute=False):
+        cmd = agy_command(event)
+        if substitute:  # agy replacing ${PLUGIN_ROOT} itself
+            cmd = cmd.replace("${PLUGIN_ROOT}", str(root))
+        p = subprocess.run([s.argv[0], "-c", cmd], input=b"{}", capture_output=True, cwd=str(where),
+                           env=s.env(env), timeout=30)
+        return p.returncode, p.stdout.decode()
+
+    for label, env, sub, want in (
+        ("${PLUGIN_ROOT} replaced", None, True, "PLUGIN_ROOT agy PreToolUse"),
+        ("PLUGIN_ROOT in the environment", {"PLUGIN_ROOT": str(root)}, False, "PLUGIN_ROOT agy PreToolUse"),
+        ("CLAUDE_PLUGIN_ROOT in the environment", {"CLAUDE_PLUGIN_ROOT": str(root)}, False, "PLUGIN_ROOT agy PreToolUse"),
+        ("no variable: the installed copy", None, False, "installed agy PreToolUse"),
+    ):
+        rc, out = run("PreToolUse", cwd, env, sub)
+        s.check("agy paths: %s" % label, rc == 0 and out.strip() == want, "%d %r" % (rc, out))
+    shutil.rmtree(places["installed"])
+    rc, out = run("Stop", cwd)
+    s.check("agy paths: the app's clone next", rc == 0 and out.strip() == "clone agy Stop", "%d %r" % (rc, out))
+    shutil.rmtree(places["clone"])
+    rc, out = run("PreToolUse", cwd)
+    s.check("agy paths: ./scripts last", rc == 0 and out.strip() == "cwd agy PreToolUse", "%d %r" % (rc, out))
+    for event in ("PreToolUse", "Stop"):
+        rc, out = run(event, elsewhere)
+        s.check("agy paths: no script anywhere -> no output, exit 0 (%s)" % event, rc == 0 and out == "", "%d %r" % (rc, out))
+    # The real plugin installed where agy puts it, run from a workspace.
+    shutil.copytree(ROOT / "plugins" / "antigravity", places["installed"])
+    rc, out = run("PreToolUse", elsewhere)
+    s.check("agy paths: the installed plugin answers from any folder", rc == 0 and out.strip() == '{"decision":"allow"}',
+            "%d %r" % (rc, out))
+    shutil.rmtree(s.home / ".gemini", ignore_errors=True)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 def grok_input(event, **kw):
     snake = {"Notification": "notification", "Stop": "stop", "StopFailure": "stop_failure"}[event]
     j = {"hookEventName": snake, "sessionId": "gk-1", "cwd": "/w/grokproj", "workspaceRoot": "/w/grokproj",
@@ -1399,11 +1458,11 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_agent_gone, t_events,
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_claude_big, t_usage_statusline, t_usage_relay_policy, t_usage_codex, t_gemini, t_notify,
-         t_cli_wrapper, t_agy, t_grok, t_opencode_sh, t_opencode_js]
+         t_cli_wrapper, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js]
 
 # Tests of the sh hook only (scripts and behaviour the PowerShell hook does not have).
 SH_ONLY = {"t_usage_claude_big", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_cli_wrapper",
-           "t_agy", "t_opencode_sh", "t_opencode_js"}
+           "t_agy", "t_agy_paths", "t_opencode_sh", "t_opencode_js"}
 
 
 # PowerShell 7-only syntax and APIs that Windows PowerShell 5.1 (.NET Framework 4.5+) lacks.

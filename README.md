@@ -99,6 +99,15 @@ The plugin is `simpleterm-antigravity`, a folder of its own (`plugins/antigravit
 `plugin.json` and `hooks.json` at a plugin's top, and treats a folder with `.claude-plugin/` as a
 Claude Code plugin. Check that the hooks loaded with `agy -p "/hooks" --output-format json`.
 
+**Not tested with a real `agy` yet**: this plugin is built from agy's documentation and change
+log. They do not say in which folder a hook command runs, so each command finds the script
+itself, in this order: `${PLUGIN_ROOT}` and `${CLAUDE_PLUGIN_ROOT}` (if agy fills them in), the
+install folder `~/.gemini/config/plugins/simpleterm-antigravity`, the app's copy
+`~/.simpleterm/src/plugins/simpleterm`, then `./scripts`. If none is there, the hook prints
+nothing and exits 0. What agy does with an empty answer from `PreToolUse` is not documented
+either (a guess, not measured: its permission policy decides, as for `allow`); the script itself
+always answers with a decision.
+
 agy has no "waiting for permission" event: its `PreToolUse` hook runs before every tool call,
 before agy decides whether to ask. So by default the plugin only alerts for agy's own questions
 (`ask_question`, `ask_permission`) and when the agent stops. To approve commands from the device,

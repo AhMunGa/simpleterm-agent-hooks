@@ -64,9 +64,11 @@ finish() {
   exit 0
 }
 
-# Antigravity treats `{}` (and a crash) from PreToolUse as a denial: every
-# PreToolUse run ends with a decision, `allow` (the permission policy
-# decides) unless the device answered. Stop gets `{}` (the stop proceeds).
+# What Antigravity does with `{}`, no output or a crash from PreToolUse is
+# not documented and not measured yet (1.0.16 only says an empty decision is
+# handled safely). So every PreToolUse run ends with an explicit decision,
+# `allow` (the permission policy decides) unless the device answered. Stop
+# gets `{}` (the stop proceeds).
 ANSWERED=0
 agy_default() {
   [ "$AGENT" = agy ] && [ "$ANSWERED" = 0 ] || return 0
