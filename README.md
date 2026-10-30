@@ -242,7 +242,7 @@ notification.
 
 | Agent | Context | Window | Limits | From |
 |---|---|---|---|---|
-| Claude Code | last response's input + cache tokens, or the compaction's result | `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `CLAUDE_CODE_DISABLE_1M_CONTEXT`, else guessed from the model (marked `est`) | 5-hour and 7-day, only with the status line tap below; `reached` when a turn fails on a rate limit | the session transcript (only its last 2 MiB, only the `usage` keys) |
+| Claude Code | last response's input + cache tokens, or the compaction's result | `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `CLAUDE_CODE_DISABLE_1M_CONTEXT`, the status line tap, the `[1m]` model at session start (kept for the session until a model switch), else guessed from the model (marked `est`; a guess below the context in use becomes 1M) | 5-hour and 7-day, only with the status line tap below; `reached` when a turn fails on a rate limit | the session transcript (only its last 2 MiB, only the `usage` keys) |
 | Codex | the last request's tokens (`baseline` 12000, as the Codex TUI counts) | from Codex | primary/secondary windows, plan | the session rollout file |
 | Gemini CLI | the last request's prompt tokens | 1,048,576 (Gemma 4: 256,000) | none | the chat record |
 

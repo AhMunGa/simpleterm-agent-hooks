@@ -916,6 +916,8 @@ tail_awk() { # file program
 claude_window() { # model
   U_EST=0
   v=${CLAUDE_CODE_MAX_CONTEXT_TOKENS:-}
+  # A JSON number has no leading zeros (and $((v)) would read them as octal).
+  while :; do case $v in 0?*) v=${v#0} ;; *) break ;; esac; done
   if is_uint "$v" && [ "$v" -ge 1000 ]; then U_WIN=$v; return; fi
   case ${CLAUDE_CODE_DISABLE_1M_CONTEXT:-} in 1 | true | TRUE | True) U_WIN=200000; return ;; esac
   U_EST=1 U_WIN=200000
@@ -953,6 +955,18 @@ usage_compute() {
       is_uint "$ctx" || return 0
       model=$(printf '%s' "$model" | tr -cd 'A-Za-z0-9._:@/[]-')
       claude_window "$model"
+      # The session's window as last known, "<window|-> <est 0|1> <since>":
+      # transcripts drop the [1m] of a 1M session (only SessionStart names
+      # it), so a guess from them alone would flip between 1M and 200K.
+      # SessionStart and PostModelSwitch name the model in use: what was
+      # known before no longer holds, nor does a status line saved earlier.
+      wf=$RUN_DIR/$SID.win
+      mw='' me=1 ms=0
+      [ -f "$wf" ] && read -r mw me ms 2>/dev/null <"$wf"
+      is_uint "$mw" || mw=''
+      [ "$me" = 0 ] || me=1
+      is_uint "$ms" || ms=0
+      case $EVENT in SessionStart | PostModelSwitch) mw='' me=1 ms=$NOW ;; esac
       lims=''
       sl=$RUN_DIR/usage.$SID.json
       if [ -f "$sl" ]; then
@@ -961,11 +975,16 @@ usage_compute() {
           set -f
           set -- $(head -c 65536 "$sl" | awk -v now="$NOW" "$STATUSLINE_LIMS" 2>/dev/null)
           set +f
-          is_uint "${1:-}" && U_WIN=$1 U_EST=0
+          is_uint "${1:-}" && [ "$t" -gt "$ms" ] && U_WIN=$1 U_EST=0
           [ $# -gt 0 ] && shift
           lims=$*
         fi
       fi
+      if [ "$U_EST" = 1 ] && [ -n "$mw" ]; then U_WIN=$mw U_EST=$me; fi
+      # A guess below the context in use is wrong: the window is 1M.
+      [ "$U_EST" = 1 ] && [ "$ctx" -gt "$U_WIN" ] && U_WIN=1000000 mw=1000000
+      if [ "$U_EST" = 0 ]; then new="$U_WIN 0 $ms"; elif [ -n "$mw" ]; then new="$U_WIN 1 $ms"; else new="- 1 $ms"; fi
+      [ "$(cat "$wf" 2>/dev/null)" = "$new" ] || printf '%s\n' "$new" >"$wf" 2>/dev/null
       U_LINE="$ctx $U_WIN $src $U_EST - - $reached $lims"
       ;;
     codex)

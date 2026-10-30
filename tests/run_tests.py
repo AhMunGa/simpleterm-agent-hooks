@@ -850,9 +850,10 @@ def t_usage_claude(s):
                              {"SIMPLETERM": "1", "CLAUDE_CODE_DISABLE_1M_CONTEXT": "1"})
     s.check("usage claude: CLAUDE_CODE_DISABLE_1M_CONTEXT=1 is 200K",
             "ctx=53000 win=200000 src=hook\x07" in seqs(out), repr(out))
-    # Rate limit reached (StopFailure rate_limit).
+    # Rate limit reached (StopFailure rate_limit). A session of its own: the cases above set
+    # environment variables per hook, which one real session does not.
     s.ctl("/_ctl/reset", {})
-    rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-claude", "transcript_path": str(tr), "hook_event_name": "StopFailure",
+    rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-claude-rl", "transcript_path": str(tr), "hook_event_name": "StopFailure",
                                                    "error": "rate_limit", "last_assistant_message": "API Error"}), {"SIMPLETERM": "1"})
     s.check("usage claude: StopFailure rate_limit -> lim=reached",
             seqs(out) == "\x1b]9;simpleterm:state=done\x07\x1b]9;simpleterm:usage v=1 agent=claude-code ctx=42000 win=1000000"
@@ -872,6 +873,57 @@ def t_usage_claude(s):
     rc, out, err, el = s.run("claude", json.dumps(dict(stop, session_id="u-off")), {"SIMPLETERM": "1"})
     time.sleep(1.5)
     s.check("usage claude: usage=0 sends nothing", seqs(out) == "\x1b]9;simpleterm:state=done\x07" and not ingests(s, "usage"), out)
+
+
+def t_usage_window(s):
+    """A session keeps the window it showed; a guess below the context in use becomes 1M (#342)."""
+    s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})])
+    big = write(s.tmp / "claude" / "w46.jsonl", claude_line(model="claude-sonnet-4-6", inp=10, cr=300000, e5=0, e1=0) + "\n")
+    small = write(s.tmp / "claude" / "w46s.jsonl", claude_line(model="claude-sonnet-4-6", inp=10, cr=100000, e5=0, e1=0) + "\n")
+    compacted = write(s.tmp / "claude" / "w46c.jsonl", big.read_text() + COMPACT_LINE + "\n")
+
+    def osc(sid, event, path=None, env=None, **kw):
+        j = dict({"session_id": sid, "hook_event_name": event}, **kw)
+        if path:
+            j["transcript_path"] = str(path)
+        rc, out, err, el = s.run("claude", json.dumps(j), dict({"SIMPLETERM": "1"}, **(env or {})))
+        q = seqs(out)
+        return q[q.find("simpleterm:usage"):].rstrip("\x07")
+
+    U = "simpleterm:usage v=1 agent=claude-code "
+    # A [1m] session: SessionStart names the model, the transcript does not.
+    got = osc("w1", "SessionStart", source="resume", model="claude-sonnet-4-6[1m]", context_tokens=54000)
+    s.check("usage window: SessionStart [1m] is 1M, exact", got == U + "ctx=54000 win=1000000 src=hook", got)
+    got = osc("w1", "Stop", big, last_assistant_message="ok")
+    s.check("usage window: the same session keeps 1M past 200K", got == U + "ctx=300010 win=1000000 src=transcript", got)
+    got = osc("w1", "PostCompact", compacted)
+    s.check("usage window: and below 200K again (no flip to 200K)", got == U + "ctx=42000 win=1000000 src=transcript", got)
+    # No SessionStart seen: a guess of 200K under 300K of context is wrong.
+    got = osc("w2", "Stop", big, last_assistant_message="ok")
+    s.check("usage window: a guess below the context becomes 1M", got == U + "ctx=300010 win=1000000 src=transcript est=1", got)
+    got = osc("w2", "PostCompact", compacted)
+    s.check("usage window: the corrected guess stays", got == U + "ctx=42000 win=1000000 src=transcript est=1", got)
+    # A model switch starts over.
+    got = osc("w1", "PostModelSwitch", to_model="claude-sonnet-4-6", context_tokens=51000)
+    s.check("usage window: PostModelSwitch drops what the session knew", got == U + "ctx=51000 win=200000 src=hook est=1", got)
+    got = osc("w1", "Stop", small, last_assistant_message="ok")
+    s.check("usage window: no old 1M after the switch", got == U + "ctx=100010 win=200000 src=transcript est=1", got)
+    # A status line saved before a switch shows the old model's window.
+    sl = s.home / ".simpleterm" / "run" / "usage.w3.json"
+    sl.write_text("%d\n" % (time.time() - 5) + json.dumps(dict(STATUSLINE, session_id="w3",
+                                                                 context_window=dict(STATUSLINE["context_window"], context_window_size=1000000))) + "\n")
+    got = osc("w3", "Stop", small, last_assistant_message="ok")
+    s.check("usage window: the status line's window is exact", got.startswith(U + "ctx=100010 win=1000000 src=transcript lim="), got)
+    got = osc("w3", "PostModelSwitch", to_model="claude-sonnet-4-6", context_tokens=51000)
+    s.check("usage window: not the status line saved before the switch", got.startswith(U + "ctx=51000 win=200000 src=hook est=1 lim="), got)
+    # CLAUDE_CODE_MAX_CONTEXT_TOKENS with a leading zero is still a JSON number.
+    s.ctl("/_ctl/reset", {})
+    got = osc("w4", "PostModelSwitch", env={"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "0200000"}, to_model="claude-opus-5-5", context_tokens=52000)
+    rec = wait_for(lambda: ingests(s, "usage"), 20)
+    p = rec[0].get("plain_json") if rec else None
+    s.check("usage window: a leading zero in CLAUDE_CODE_MAX_CONTEXT_TOKENS is dropped",
+            got == U + "ctx=52000 win=200000 src=hook" and isinstance(p, dict) and p["ctx"].get("win") == 200000,
+            "%s %s" % (got, rec[0].get("plain") if rec else None))
 
 
 def t_usage_claude_big(s):
@@ -923,7 +975,12 @@ def t_usage_statusline(s):
     saved.write_text(old)
     rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-claude", "transcript_path": str(tr), "hook_event_name": "PostCompact"}),
                              {"SIMPLETERM": "1"})
-    s.check("statusline: stale file ignored", "lim=" not in seqs(out) and "est=1" in seqs(out), repr(out))
+    # A stale file gives no limits; the window it showed for this session (same model) stays.
+    s.check("statusline: stale file: no limits, the window it showed stays",
+            seqs(out) == "\x1b]9;simpleterm:usage v=1 agent=claude-code ctx=5310 win=200000 src=transcript\x07", repr(out))
+    rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-claude-2", "transcript_path": str(tr), "hook_event_name": "PostCompact"}),
+                             {"SIMPLETERM": "1"})
+    s.check("statusline: another session's file is not used", "lim=" not in seqs(out) and "est=1" in seqs(out), repr(out))
 
 
 def t_usage_relay_policy(s):
@@ -1464,7 +1521,7 @@ def copies_check():
 TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t_timeout, t_multi_link,
          t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_agent_gone, t_events,
          t_hostile_input, t_log, t_argv, t_external_printf,
-         t_usage_claude, t_usage_claude_big, t_usage_statusline, t_usage_relay_policy, t_usage_codex, t_gemini, t_notify,
+         t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_statusline, t_usage_relay_policy, t_usage_codex, t_gemini, t_notify,
          t_cli_wrapper, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js]
 
 # Tests of the sh hook only (scripts and behaviour the PowerShell hook does not have).

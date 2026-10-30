@@ -816,7 +816,7 @@ function Get-CodexUsage([string]$path) {
 # from the model name (est).
 function Get-ClaudeWindow([string]$model) {
     $v = [string]$env:CLAUDE_CODE_MAX_CONTEXT_TOKENS
-    if ($v -match '^[0-9]{4,12}$') { return @{ win = [int64]$v; est = $false } }
+    if ($v -match '^[0-9]{1,18}$' -and [int64]$v -ge 1000 -and [int64]$v -le 999999999999) { return @{ win = [int64]$v; est = $false } }
     if (@('1', 'true', 'TRUE', 'True') -contains [string]$env:CLAUDE_CODE_DISABLE_1M_CONTEXT) { return @{ win = 200000; est = $false } }
     $m = $model.ToLowerInvariant()
     $big = ($m -match 'claude-fable-') -or ($m -match 'claude-sonnet-([5-9]|[1-9][0-9])') -or
@@ -847,6 +847,22 @@ function Get-UsageNow {
     $w = Get-ClaudeWindow $model
     $u = @{ ctx = $ctx; win = $w.win; src = $src; est = $w.est; base = $null; plan = ''; reached = $false; lims = @() }
     if ($HookEvent -eq 'StopFailure' -and (Get-Field $f 'error') -eq 'rate_limit') { $u.reached = $true }
+    # The session's window as last known, "<window|-> <est 0|1> <since>" (as in
+    # agent-hook.sh): transcripts drop the [1m] of a 1M session. SessionStart
+    # and PostModelSwitch name the model in use and start it over.
+    $winPath = Join-Path $RunDir ($Sid + '.win')
+    $mw = ''; $me = $true; $ms = [int64]0
+    try {
+        if ([IO.File]::Exists($winPath)) {
+            $parts = @(([IO.File]::ReadAllText($winPath, $Utf8).Trim()) -split ' ')
+            if ($parts.Count -ge 3) {
+                if (Test-UInt $parts[0]) { $mw = $parts[0] }
+                $me = ($parts[1] -ne '0')
+                if (Test-UInt $parts[2]) { $ms = [int64]$parts[2] }
+            }
+        }
+    } catch { }
+    if ($HookEvent -eq 'SessionStart' -or $HookEvent -eq 'PostModelSwitch') { $mw = ''; $me = $true; $ms = Now-Epoch }
     # Optional status line tap (scripts/statusline-tap.sh): exact window, limits.
     $sl = Join-Path $RunDir ('usage.' + $Sid + '.json')
     try {
@@ -859,7 +875,7 @@ function Get-UsageNow {
             if ((Test-UInt $t) -and ($now - [int64]$t) -le 600 -and ([int64]$t - $now) -le 60) {
                 $o = ConvertFrom-JsonLine $text.Substring($nl + 1)
                 if ($null -ne $o) {
-                    if ($null -ne $o.context_window -and (Test-Num $o.context_window.context_window_size)) {
+                    if ($null -ne $o.context_window -and (Test-Num $o.context_window.context_window_size) -and [int64]$t -gt $ms) {
                         $u.win = [int64]$o.context_window.context_window_size; $u.est = $false
                     }
                     if ($null -ne $o.rate_limits) {
@@ -876,6 +892,16 @@ function Get-UsageNow {
                 }
             }
         }
+    } catch { }
+    if ($u.est -and $mw) { $u.win = [int64]$mw; $u.est = $me }
+    # A guess below the context in use is wrong: the window is 1M.
+    if ($u.est -and $u.ctx -gt $u.win) { $u.win = 1000000; $mw = '1000000' }
+    $new = '- 1 ' + $ms
+    if (-not $u.est) { $new = [string]$u.win + ' 0 ' + $ms } elseif ($mw) { $new = [string]$u.win + ' 1 ' + $ms }
+    try {
+        $old = ''
+        if ([IO.File]::Exists($winPath)) { $old = [IO.File]::ReadAllText($winPath, $Utf8).Trim() }
+        if ($old -ne $new) { [IO.File]::WriteAllText($winPath, $new + "`n", $Utf8) }
     } catch { }
     return $u
 }
