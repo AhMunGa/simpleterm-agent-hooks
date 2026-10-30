@@ -990,7 +990,9 @@ def t_usage_codex(s):
 
 
 def t_gemini(s):
-    s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})])
+    # Gemini CLI waits for the Notification hook before it shows its prompt: the hook must not
+    # wait for the network. The link answers after 4 s, so a send in the foreground shows.
+    s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel", "ingest_delay": 4})])
     tr = write(s.tmp / "gemini" / "chats" / "session-1.jsonl", GEMINI_JSONL)
     base = {"session_id": "gm", "transcript_path": str(tr), "cwd": "/w/site", "timestamp": "2026-10-29T00:00:00Z"}
     note = dict(base, hook_event_name="Notification", notification_type="ToolPermission",
@@ -1004,7 +1006,7 @@ def t_gemini(s):
     s.check("gemini: ToolPermission -> question (alert only)",
             rec and rec[0]["body"]["ev"] == "question" and p.get("app") == "gemini-cli" and p.get("msg") == "approve rm: rm -rf build"
             and "nonce" not in p and not s.records("/v1/decision"), str(p))
-    s.ctl("/_ctl/reset", {})
+    s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})])
     edit = dict(note, details={"type": "edit", "title": "Confirm Edit", "fileName": "a.txt", "filePath": "/w/site/a.txt",
                                "fileDiff": "@@", "originalContent": "x" * 5000, "newContent": "y"})
     s.run("gemini", json.dumps(edit))
