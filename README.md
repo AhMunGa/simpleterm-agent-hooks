@@ -215,8 +215,11 @@ login profile, only when it has no single local environment). Whatever your shel
 print to standard output (zsh always reads `~/.zshenv`) becomes the hook's output: it breaks the
 approval answer, and on `SessionStart` Codex adds it to the session as developer context. The
 plugin's `SessionStart` hook runs only for resumed and forked sessions (a new one has no usage
-yet), and the commands that need no answer send the script's own output to `/dev/null`. Print
-from those files only in an interactive shell (zsh: `[[ -o interactive ]] && …`).
+yet), and the commands that need no answer send the script's own output to `/dev/null`. That
+cannot catch what the shell prints before the command runs: **if a startup file writes to
+standard output (`~/.zshenv`, `BASH_ENV`, or a login profile when Codex uses `-lc`), that text
+can end up in the developer context of a resumed or forked session.** Print from those files
+only in an interactive shell (zsh: `[[ -o interactive ]] && …`).
 
 ## `simpleterm notify`
 
@@ -379,6 +382,14 @@ Not tested on Windows yet.
   hooks fail and alerts are not sent. The permission and question hooks are marked
   `"onFailure": "continue"`, so such a failure never blocks or denies a tool call.
 - Gemini CLI, Antigravity, Grok Build and OpenCode: Unix only (the hooks need `sh`).
+
+## Known limitations
+
+- **Large hook input on macOS.** The sh hook reads the agent's event JSON (at most 256 KiB) one
+  character at a time, which the macOS `awk` (BWK) does in time that grows faster than the input:
+  a `PostToolUse` after a large Read or command output takes up to about 0.9 s there (measured:
+  64 KiB 0.10 s, 128 KiB 0.28 s, 256 KiB 0.91 s). Transcripts are not affected: their long lines
+  are cut down first.
 
 ## Layout
 
