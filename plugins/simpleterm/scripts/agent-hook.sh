@@ -233,9 +233,10 @@ json_text() { # text maxu maxb [mode]
 # `notify` event get the same text, so the app can tell two copies of one
 # notification from two notifications: whitespace runs, line breaks included
 # (TAB LF VT FF CR, NEL, U+2028, U+2029), become one space; other control
-# characters (C0, DEL, C1) and invalid UTF-8 are removed; leading and
-# trailing spaces go; then it is cut to $2 characters and $3 bytes, between
-# characters and not after a space.
+# characters (C0, DEL, C1) and invalid UTF-8 are removed; `;`, the OSC 777
+# field separator, becomes `,`; leading and trailing spaces go; then it is
+# cut to $2 characters and $3 bytes, between characters and not after a
+# space.
 NOTIFY_TEXT='
 function feed(s,   n, i, c, w, j, x, lo, hi, ok, unit) {
   n = length(s); i = 1
@@ -255,6 +256,7 @@ function feed(s,   n, i, c, w, j, x, lo, hi, ok, unit) {
     } else if (c >= "\200") { i++; continue }
     else if (c == " " || (c >= "\011" && c <= "\015")) unit = " "
     else if (c < " " || c == "\177") unit = ""
+    else if (c == ";") unit = ","
     else unit = c
     i += w
     if (unit == "") continue

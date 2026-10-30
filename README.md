@@ -235,9 +235,10 @@ once and exits 0.
 The terminal and the event get the same text, so the app can tell the two copies of one
 notification from two notifications: runs of whitespace, line breaks included (tab, LF, VT, FF,
 CR, NEL, U+2028, U+2029), become one space; other control characters (C0, DEL, C1) and invalid
-UTF-8 are removed; leading and trailing spaces go; the title is cut at 64 characters (256 bytes)
-and the body at 200 characters (800 bytes), between characters and not after a space. Text that
-is only whitespace sends nothing.
+UTF-8 are removed; `;`, which separates the fields of OSC 777, becomes `,`; leading and trailing
+spaces go; the title is cut at 64 characters (256 bytes) and the body at 200 characters
+(800 bytes), between characters and not after a space. Text that is only whitespace sends
+nothing.
 
 The hooks keep the command at `~/.simpleterm/bin/simpleterm`, a small script that runs the
 installed plugin's `scripts/simpleterm-notify.sh`. At a session start and at the end of a turn

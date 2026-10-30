@@ -1255,12 +1255,12 @@ def t_notify(s):
         tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T)}})
         rc, tty = notify_pty(s, ["notify", "Build done", "exit 0; 한글 \x1b]0;x\x07"], {"SIMPLETERM": "1"})
         s.check("notify: exit 0", rc == 0, str(rc))
-        s.check("notify: OSC 777 on the terminal, control characters removed",
-                b"\x1b]777;notify;Build done;exit 0; \xed\x95\x9c\xea\xb8\x80 ]0;x\x07" in tty, repr(tty))
+        s.check("notify: OSC 777 on the terminal, control characters removed, `;` as `,`",
+                b"\x1b]777;notify;Build done;exit 0, \xed\x95\x9c\xea\xb8\x80 ]0,x\x07" in tty, repr(tty))
         rec = wait_for(lambda: ingests(s, "notify"), 20)
         p = rec[0].get("plain_json", {}) if rec else {}
         s.check("notify: relay event", p.get("app") == "script" and p.get("title") == "Build done"
-                and p.get("msg") == "exit 0; 한글 ]0;x" and p.get("host") == "dev-box", str(p))
+                and p.get("msg") == "exit 0, 한글 ]0,x" and p.get("host") == "dev-box", str(p))
         s.check("notify: plaintext order", rec and rec[0]["plain"].startswith(
             '{"v":1,"rid":"%s","ev":"notify","app":"script","host":"dev-box","cwd":"%s","title":"Build done","msg":"'
             % (p.get("rid"), s.tmp.name)), rec[0]["plain"] if rec else "")
@@ -1269,8 +1269,8 @@ def t_notify(s):
         # The terminal and the event get the same text (the app tells two copies of one
         # notification from two notifications by it): whitespace runs, line breaks included,
         # become one space; other control characters (C0, DEL, C1: U+009C is ST, U+009B CSI)
-        # and invalid UTF-8 go; leading and trailing spaces go; title 64 and body 200
-        # characters (256 and 800 bytes).
+        # and invalid UTF-8 go; `;` (OSC 777's field separator) becomes `,`; leading and
+        # trailing spaces go; title 64 and body 200 characters (256 and 800 bytes).
         for n, (title, body, want_t, want_b) in enumerate((
                 ("Tests\nfinished", "line one\nline  two\r\n\tlast  ", "Tests finished", "line one line two last"),
                 ("  pad  ", " a \x01 b ", "pad", "a b"),
@@ -1278,7 +1278,8 @@ def t_notify(s):
                 ('"' * 100, "\\" * 300, '"' * 64, "\\" * 200),
                 ("한" * 70, "😀" * 201, "한" * 64, "😀" * 200),
                 ("C1", "a\u009cb\u009b2Jc\u0085d\u2028e\u2029f", "C1", "ab2Jc d e f"),
-                (b"bad", b"ok \xff\xc3( \xe2\x82 end", "bad", "ok ( end"))):
+                (b"bad", b"ok \xff\xc3( \xe2\x82 end", "bad", "ok ( end"),
+                ("a;b", "c;d; e", "a,b", "c,d, e"))):
             s.ctl("/_ctl/reset", {})
             rc, tty = notify_pty(s, ["notify", title, body], {"SIMPLETERM": "1"})
             i = tty.find(b"\x1b]777;notify;")

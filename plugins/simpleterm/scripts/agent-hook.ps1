@@ -218,13 +218,14 @@ function ConvertTo-JsonText([string]$text, [int]$maxU, [int]$maxB) {
 # the terminal (OSC 777) and the `notify` event get the same text. Whitespace
 # runs, line breaks included (TAB LF VT FF CR, NEL, U+2028, U+2029), become
 # one space; other control characters (C0, DEL, C1) and lone surrogates (the
-# UTF-16 form of invalid UTF-8) are removed; leading and trailing spaces go;
-# then it is cut to $maxU characters and $maxB UTF-8 bytes, between
-# characters and not after a space.
+# UTF-16 form of invalid UTF-8) are removed; `;`, the OSC 777 field
+# separator, becomes `,`; leading and trailing spaces go; then it is cut to
+# $maxU characters and $maxB UTF-8 bytes, between characters and not after a
+# space.
 function Format-NotifyText([string]$text, [int]$maxU, [int]$maxB) {
     $t = [regex]::Replace([string]$text, '[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]', '')
     $t = [regex]::Replace($t, '[\t\n\x0b\x0c\r\u0085\u2028\u2029]', ' ')
-    $t = [regex]::Replace($t, '[\x00-\x1f\x7f-\x9f]', '')
+    $t = [regex]::Replace($t, '[\x00-\x1f\x7f-\x9f]', '').Replace(';', ',')
     $t = [regex]::Replace($t, ' {2,}', ' ').Trim(' ')
     $sb = New-Object System.Text.StringBuilder
     $u = 0; $b = 0

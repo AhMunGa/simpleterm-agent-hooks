@@ -29,8 +29,8 @@
   `~/.simpleterm/bin/simpleterm` pointing at the newest installed release of it, so an update
   takes effect while the agent still keeps the old folder): OSC 777 on a SimpleTerm terminal and a
   `notify` event to every link, with the same text in both (whitespace runs, line breaks
-  included, become one space; other control characters and invalid UTF-8 are removed; trimmed;
-  title 64 and body 200 characters), so the app can match the two. The background sender now
+  included, become one space; other control characters and invalid UTF-8 are removed; `;`
+  becomes `,`; trimmed; title 64 and body 200 characters), so the app can match the two. The background sender now
   ignores SIGHUP before it starts, so it outlives a terminal that closes right after the command.
 - Context and rate limits (#342): Claude Code (transcript; window from the environment, the status
   line tap or a `[1m]` model at session start, kept for the session until a model switch, else
