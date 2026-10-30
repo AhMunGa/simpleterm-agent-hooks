@@ -1323,6 +1323,57 @@ def t_opencode_js(s):
             wait_for(lambda: ingests(s, "done") and ingests(s, "error"), 20)
             and ingests(s, "done")[0]["plain_json"].get("msg") == "Ship it"
             and ingests(s, "error")[0]["plain_json"].get("msg") == "provider: overloaded", str(ingests(s))[:300])
+    # An input form: data is {form: {id, sessionID, title, fields}} (OpenCode 2.x schema, form.ts).
+    s.setup([(LINK_A, {"push": "disabled"})])
+    form = {"id": "evt_5", "type": "form.created", "location": {"directory": d},
+            "data": {"form": {"id": "frm_1", "sessionID": "ses_9", "title": "Pick a database",
+                              "fields": [{"type": "string", "key": "db", "title": "Database"}]}}}
+    node_plugin(s, "v2", {"directory": d, "steps": [{"event": form}], "wait": 3000})
+    rec = wait_for(lambda: ingests(s, "question"), 20)
+    s.check("opencode 2.x: form.created -> question with the form's title",
+            rec and rec[0]["plain_json"].get("msg") == "Pick a database", str(ingests(s))[:300])
+
+    # A running subagent's report wakes its parent again: no done until the
+    # parent ends with no direct child running (as the OpenCode TUI counts).
+    def ev(n, typ, sid, **data):
+        return {"event": {"id": "evt_%d" % n, "type": typ, "location": {"directory": d}, "data": dict(sessionID=sid, **data)}}
+
+    sess = {"ses_r": {"title": "Ship it"}, "ses_c": {"parentID": "ses_r"}, "ses_g": {"parentID": "ses_c"}}
+    for name, steps in (
+        ("execution events", [ev(10, "session.execution.started", "ses_r"), ev(11, "session.execution.started", "ses_c"),
+                              ev(12, "session.execution.succeeded", "ses_r"), {"sleep": 2500},
+                              ev(13, "session.execution.succeeded", "ses_c"), ev(14, "session.execution.started", "ses_r"),
+                              ev(15, "session.execution.succeeded", "ses_r")]),
+        ("session.status", [ev(20, "session.status", "ses_c", status={"type": "busy"}), ev(21, "session.execution.succeeded", "ses_r"),
+                            {"sleep": 2500}, ev(22, "session.status", "ses_c", status={"type": "idle"}),
+                            ev(23, "session.execution.started", "ses_g"), ev(24, "session.execution.succeeded", "ses_r")]),
+    ):
+        s.setup([(LINK_A, {"push": "disabled"})])
+        t0 = time.time()
+        node_plugin(s, "v2", {"directory": d, "sessions": sess, "steps": steps, "wait": 3000})
+        wait_for(lambda: ingests(s, "done"), 20)
+        time.sleep(1)
+        done = ingests(s, "done")
+        s.check("opencode 2.x: done waits for a running subagent, then comes once (%s)" % name,
+                len(done) == 1 and done[0]["plain_json"].get("msg") == "Ship it" and done[0]["received"] - t0 > 2.0,
+                str([(r["plain_json"].get("msg"), round(r["received"] - t0, 2)) for r in done]))
+
+    # Two instances (two project directories): an answer without a location
+    # still ends the wait in the instance that waits, whichever sees it first.
+    s.setup([(LINK_A, {})], conf={"opencode_wait": 60})
+    ask = {"id": "evt_30", "type": "permission.asked", "location": {"directory": d},
+           "data": {"id": "per_30", "sessionID": "ses_30", "action": "shell", "resources": ["make deploy"]}}
+    replied = {"id": "evt_31", "type": "permission.replied", "data": {"sessionID": "ses_30", "requestID": "per_30", "reply": "once"}}
+    calls = node_plugin(s, "v2", {"directory": d, "instances": [str(s.tmp / "other-project"), d],
+                                  "steps": [{"event": ask}, {"sleep": 3000}, {"event": replied}], "wait": 6000})
+    stamps = {}
+    for line in s.log_text().splitlines():
+        for key in ("ingest ev=permission", "permission signal"):
+            if key in line and key not in stamps:
+                stamps[key] = time.mktime(time.strptime(line.split()[0], "%Y-%m-%dT%H:%M:%SZ"))
+    took = stamps.get("permission signal", 1e12) - stamps.get("ingest ev=permission", 0)
+    s.check("opencode 2.x: an answer without a location ends the wait in the waiting instance",
+            not replies(calls) and took < 6, "%.0fs %s" % (took, s.log_text()[-300:]))
 
 
 COPIES = [

@@ -1,6 +1,6 @@
 // Drives the OpenCode plugins with fake OpenCode objects (tests only).
 //   node tests/opencode_harness.mjs v1|v2 <plugin file> '<scenario JSON>'
-// scenario: {directory, sessions: {id: info}, steps: [{event} | {sleep: ms}], wait: ms}
+// scenario: {directory, instances?: [dir], sessions: {id: info}, steps: [{event, gap?} | {sleep: ms}], wait: ms}
 // Prints the plugin's calls (permission replies) as JSON on the last line.
 import { pathToFileURL } from "node:url";
 
@@ -37,43 +37,57 @@ if (kind === "v1") {
   }
   await settle(scenario.wait || 1000);
 } else {
+  // One instance per directory (scenario.instances, default [directory]); like
+  // OpenCode, every instance gets every event, in the listed order.
   const def = mod.default;
   calls.push({ id: def.id, setup: typeof def.setup });
-  const queue = [];
-  let wake = null;
-  let subscribed = null;
-  const ctx = {
-    location: { directory: scenario.directory },
-    event: {
-      subscribe: (opts) => {
-        subscribed = opts.types;
-        return {
-          [Symbol.asyncIterator]() {
-            return {
-              next: async () => {
-                while (!queue.length) {
-                  if (opts.signal && opts.signal.aborted) return { done: true, value: undefined };
-                  await new Promise((r) => (wake = r));
-                }
-                return { done: false, value: queue.shift() };
-              },
-            };
-          },
-        };
+  const instances = [];
+  for (const directory of scenario.instances || [scenario.directory]) {
+    const inst = { queue: [], wake: null };
+    const ctx = {
+      location: { directory },
+      event: {
+        subscribe: (opts) => {
+          if (!instances.length) calls.push({ subscribed: opts.types });
+          return {
+            [Symbol.asyncIterator]() {
+              return {
+                next: async () => {
+                  while (!inst.queue.length) {
+                    if (opts.signal && opts.signal.aborted) return { done: true, value: undefined };
+                    await new Promise((r) => (inst.wake = r));
+                  }
+                  return { done: false, value: inst.queue.shift() };
+                },
+              };
+            },
+          };
+        },
       },
-    },
-    permission: { reply: async (args) => { calls.push({ reply: args }); } },
-    session: { get: async ({ sessionID }) => (scenario.sessions || {})[sessionID] || {} },
+      permission: { reply: async (args) => { calls.push({ reply: args, directory }); } },
+      session: { get: async ({ sessionID }) => (scenario.sessions || {})[sessionID] || {} },
+    };
+    inst.cleanup = await def.setup(ctx);
+    instances.push(inst);
+  }
+  const wakeAll = () => {
+    for (const inst of instances) {
+      const w = inst.wake;
+      inst.wake = null;
+      if (w) w();
+    }
   };
-  const cleanup = await def.setup(ctx);
-  calls.push({ subscribed });
   for (const step of scenario.steps) {
     if (step.sleep) await sleep(step.sleep);
-    else { queue.push(step.event); if (wake) wake(); }
+    else {
+      for (const inst of instances) inst.queue.push(step.event);
+      wakeAll();
+      await sleep(step.gap ?? 50);
+    }
   }
   await settle(scenario.wait || 1000);
-  if (typeof cleanup === "function") cleanup();
-  if (wake) wake();
+  for (const inst of instances) if (typeof inst.cleanup === "function") inst.cleanup();
+  wakeAll();
 }
 console.log(JSON.stringify(calls));
 process.exit(0);
