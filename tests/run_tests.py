@@ -1056,6 +1056,50 @@ def t_usage_relay_policy(s):
         tun.wait(5)
 
 
+def relink(s, link, url):
+    """Points an existing link file at another address (the app reconnected on a new port)."""
+    f = s.home / ".simpleterm" / "links" / (link["id"] + ".conf")
+    f.write_text("".join("relay=%s\n" % url if l.startswith("relay=") else l for l in f.read_text().splitlines(True)))
+
+
+def t_usage_delivery(s):
+    """A usage report counts as sent only once SimpleTerm got it: unchanged values go again until then."""
+    probe = __import__("socket").socket()
+    probe.bind(("127.0.0.1", 0))
+    closed = probe.getsockname()[1]
+    probe.close()
+    ro = write(s.tmp / "codex" / "rollout-dl.jsonl", codex_token_line(total=15159) + "\n")
+    stop = json.dumps({"session_id": "dl", "turn_id": "t", "transcript_path": str(ro), "cwd": "/w/repo", "hook_event_name": "Stop",
+                       "last_assistant_message": "Done."})
+    s.setup([(LINK_T, {"kind": "tunnel", "relay_url": "http://127.0.0.1:%d" % closed})])
+    s.run("codex", stop)
+    wait_for(lambda: "ingest ev=usage" in s.log_text(), 10)
+    tun, tctl = s.spawn_mock()
+    try:
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T)}})
+        relink(s, LINK_T, tctl.url)
+        s.run("codex", stop)
+        s.check("usage delivery: unchanged usage goes again once the tunnel is back",
+                wait_for(lambda: ingests(s, "usage", tctl), 20), s.log_text()[-300:])
+        n = len(ingests(s, "usage", tctl))
+        s.run("codex", stop)
+        time.sleep(1.5)
+        s.check("usage delivery: and not again after it got there", len(ingests(s, "usage", tctl)) == n,
+                str(len(ingests(s, "usage", tctl))))
+    finally:
+        tun.terminate()
+        tun.wait(5)
+    # Claude Code outside SimpleTerm with only a relay link: nothing shows it, so a later
+    # SimpleTerm session still gets the same value on its terminal.
+    s.setup([(LINK_A, {"push": "disabled"})])
+    tr = write(s.tmp / "claude" / "dl.jsonl", claude_line() + "\n")
+    stop = json.dumps({"session_id": "dl-c", "transcript_path": str(tr), "hook_event_name": "Stop", "last_assistant_message": "ok"})
+    s.run("claude", stop)
+    rc, out, err, el = s.run("claude", stop, {"SIMPLETERM": "1"})
+    s.check("usage delivery: shown on the terminal although unchanged since a run outside SimpleTerm",
+            USAGE_OSC_CLAUDE in seqs(out), repr(out))
+
+
 def t_usage_codex(s):
     s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})])
     ro = write(s.tmp / "codex" / "rollout.jsonl", "\n".join([
@@ -1221,6 +1265,10 @@ def t_notify(s):
             '{"v":1,"rid":"%s","ev":"notify","app":"script","host":"dev-box","cwd":"%s","title":"Build done","msg":"'
             % (p.get("rid"), s.tmp.name)), rec[0]["plain"] if rec else "")
         s.check("notify: tunnel event", wait_for(lambda: ingests(s, "notify", tctl), 20))
+        s.ctl("/_ctl/reset", {})
+        # C1 controls (U+0080-U+009F) are terminal controls too: U+009C is ST, U+009B CSI.
+        rc, tty = notify_pty(s, ["notify", "C1", "a\u009cb\u009b2Jc\u0085d"], {"SIMPLETERM": "1"})
+        s.check("notify: C1 controls removed from the terminal sequence", b"\x1b]777;notify;C1;a b 2Jc d\x07" in tty, repr(tty))
         s.ctl("/_ctl/reset", {})
         rc, tty = notify_pty(s, ["notify", "Only title"])
         s.check("notify: no sequence outside SimpleTerm", b"\x1b]777" not in tty, repr(tty))
@@ -1647,11 +1695,11 @@ def copies_check():
 TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t_timeout, t_multi_link,
          t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_agent_gone, t_events,
          t_hostile_input, t_log, t_argv, t_external_printf,
-         t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
+         t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js]
 
 # Tests of the sh hook only (scripts and behaviour the PowerShell hook does not have).
-SH_ONLY = {"t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_cli_wrapper",
+SH_ONLY = {"t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_delivery", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_cli_wrapper",
            "t_agy", "t_agy_paths", "t_opencode_sh", "t_opencode_js"}
 
 

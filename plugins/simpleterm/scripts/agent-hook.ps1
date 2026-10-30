@@ -438,6 +438,7 @@ function Complete-Ingest($op, [string]$ev) {
     if ($r.code -eq 410) {
         try { [IO.File]::WriteAllText((Join-Path $RunDir ($op.link.link + '.revoked')), '', $Utf8) } catch { }
     }
+    $Script:IngestCode = $r.code
     $shown = $push
     if (-not $shown) { $shown = '-' }
     Write-Log ('ingest ev=' + $ev + ' link=' + (Short $op.link.link) + ' http=' + ('{0:000}' -f $r.code) + ' push=' + $shown)
@@ -446,16 +447,19 @@ function Complete-Ingest($op, [string]$ev) {
 }
 
 # Sends the event to every link from a detached child process and returns.
-# $scope limits it to `tunnel` or `relay` links.
+# $scope limits it to `tunnel` or `relay` links; once a link took the event,
+# $markText is written to the run file $markName.
 # (PowerShell names are case-insensitive: a parameter `$rid` would hide `$Rid`.)
-function Send-Background([string]$ev, [string]$eventRid, [string]$scope) {
+function Send-Background([string]$ev, [string]$eventRid, [string]$scope, [string]$markName, [string]$markText) {
     if ($LinkFiles.Count -eq 0) { return }
     if (-not $eventRid) { $eventRid = $Rid }
     if (-not $scope) { $scope = 'all' }
     # The child gets the event through its environment, not its command line.
     $usage = [Convert]::ToBase64String($Utf8.GetBytes([string]$Script:UsageJson))
+    $mark = [Convert]::ToBase64String($Utf8.GetBytes([string]$markText))
     $payload = '{"ev":"' + $ev + '","rid":"' + $eventRid + '","ts":"' + $Ts + '","cwd":"' + $CwdBase +
-        '","msg":"' + $Script:Msg + '","title":"' + $Script:Title + '","usage":"' + $usage + '","scope":"' + $scope + '"}'
+        '","msg":"' + $Script:Msg + '","title":"' + $Script:Title + '","usage":"' + $usage + '","scope":"' + $scope +
+        '","mark":"' + $markName + '","marktext":"' + $mark + '"}'
     $env:SIMPLETERM_HOOK_PAYLOAD = [Convert]::ToBase64String($Utf8.GetBytes($payload))
     $exe = (Get-Process -Id $PID).Path
     $argList = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'), $Agent, '__send')
@@ -477,7 +481,7 @@ function Invoke-SendChild {
     $raw = $env:SIMPLETERM_HOOK_PAYLOAD
     if (-not $raw) { return }
     $json = $Utf8.GetString([Convert]::FromBase64String($raw))
-    $f = Get-JsonFields $json @('ev', 'rid', 'ts', 'msg', 'cwd', 'title', 'usage', 'scope')
+    $f = Get-JsonFields $json @('ev', 'rid', 'ts', 'msg', 'cwd', 'title', 'usage', 'scope', 'mark', 'marktext')
     $ev = Get-Field $f 'ev'
     $Script:Rid = Get-Field $f 'rid'
     $Script:Ts = Get-Field $f 'ts'
@@ -485,6 +489,10 @@ function Invoke-SendChild {
     $Script:Title = Get-Field $f 'title'
     $Script:CwdBase = Get-Field $f 'cwd'
     $scope = Get-Field $f 'scope'
+    $mark = Get-Field $f 'mark'
+    if (-not ($mark -cmatch '^[A-Za-z0-9_-]{1,80}\.usage$')) { $mark = '' }
+    $markText = ''
+    try { $markText = $Utf8.GetString([Convert]::FromBase64String((Get-Field $f 'marktext'))) } catch { $mark = '' }
     try { $Script:UsageJson = $Utf8.GetString([Convert]::FromBase64String((Get-Field $f 'usage'))) } catch { $Script:UsageJson = '' }
     if (-not ($ev -cmatch '^[a-z]{1,16}$') -or -not (Test-Hex $Script:Rid 16) -or -not (Test-UInt $Script:Ts)) { return }
     if ($ev -eq 'usage' -and -not $Script:UsageJson) { return }
@@ -496,7 +504,13 @@ function Invoke-SendChild {
         if ($scope -eq 'relay' -and $link.kind -eq 'tunnel') { continue }
         try { $op = Start-Ingest $link $Script:Rid $ev ''; if ($op) { $ops += $op } } catch { Write-Log 'ingest-failed' }
     }
-    foreach ($op in $ops) { try { [void](Complete-Ingest $op $ev) } catch { Write-Log 'ingest-failed' } }
+    foreach ($op in $ops) {
+        try {
+            $Script:IngestCode = 0
+            [void](Complete-Ingest $op $ev)
+            if ($Script:IngestCode -eq 200 -and $mark) { [IO.File]::WriteAllText((Join-Path $RunDir $mark), $markText + "`n", $Utf8) }
+        } catch { Write-Log 'ingest-failed' }
+    }
 }
 
 # --- terminal sequence (Claude Code only, SimpleTerm sessions only) -------
@@ -944,9 +958,13 @@ function Invoke-UsageReport {
     $prev = ''
     try { if ([IO.File]::Exists($last)) { $prev = [IO.File]::ReadAllText($last, $Utf8).Trim() } } catch { }
     if ($prev -eq $fmt.osc) { return }
-    try { [IO.File]::WriteAllText($last, $fmt.osc + "`n", $Utf8) } catch { }
+    # Recorded as sent only once SimpleTerm has it: on Claude Code's terminal,
+    # or when a tunnel link took the event (as in agent-hook.sh).
     $Script:UsageSeq = '\u001b]9;' + $fmt.osc + '\u0007'
-    Send-Background 'usage' (New-RandomHex 8) 'tunnel'
+    if ($Agent -eq 'claude' -and $env:SIMPLETERM -eq '1') {
+        try { [IO.File]::WriteAllText($last, $fmt.osc + "`n", $Utf8) } catch { }
+    }
+    Send-Background 'usage' (New-RandomHex 8) 'tunnel' ($Sid + '.usage') $fmt.osc
 }
 
 # --- the `simpleterm` command (Windows) ---------------------------------------
@@ -1064,10 +1082,16 @@ try {
         'tool_name', 'tool_input.command', 'tool_input.file_path', 'tool_input.url', 'tool_input.description',
         'tool_input.questions.0.question', 'session_id', 'sessionId', 'cwd', 'message', 'last_assistant_message',
         'lastAssistantMessage', 'last-assistant-message', 'input-messages.0', 'error', 'transcript_path', 'context_tokens',
-        'model', 'to_model', 'promptId', 'toolUseId')
+        'model', 'to_model', 'promptId', 'toolUseId', 'reason', 'timestamp')
     $HookEvent = Get-Field $f 'hook_event_name'
     if (-not $HookEvent) { $HookEvent = Get-Field $f 'hookEventName' }
     if ($Agent -eq 'codex-notify') { $HookEvent = 'notify' }
+    # Grok's camelCase event names (hookEventName), as in agent-hook.sh.
+    if ($Agent -eq 'grok') {
+        if ($HookEvent -eq 'notification') { $HookEvent = 'Notification' }
+        elseif ($HookEvent -eq 'stop') { $HookEvent = 'Stop' }
+        elseif ($HookEvent -eq 'stop_failure') { $HookEvent = 'StopFailure' }
+    }
     $Tool = Get-Field $f 'tool_name'
     $Detail = ''
     foreach ($k in @('tool_input.command', 'tool_input.file_path', 'tool_input.url')) {
@@ -1103,8 +1127,8 @@ try {
         $b = ''
         if ($ScriptArgs.Count -gt 1) { $t = [string]$ScriptArgs[1] }
         if ($ScriptArgs.Count -gt 2) { $b = [string]$ScriptArgs[2] }
-        $t = ($t -replace '[\x00-\x1f\x7f]', ' ')
-        $b = ($b -replace '[\x00-\x1f\x7f]', ' ')
+        $t = ($t -replace '[\x00-\x1f\x7f-\x9f]', ' ')
+        $b = ($b -replace '[\x00-\x1f\x7f-\x9f]', ' ')
         if ($t.Length -gt 120) { $t = $t.Substring(0, 120) }
         if ($b.Length -gt 400) { $b = $b.Substring(0, 400) }
         if (-not ($t + $b)) { exit 0 }
@@ -1181,7 +1205,7 @@ try {
             break
         }
         { $_ -eq 'claude:SessionStart' -or $_ -eq 'claude:PostCompact' -or $_ -eq 'claude:PostModelSwitch' -or
-          $_ -eq 'codex:SessionStart' -or $_ -eq 'codex:PostCompact' -or $_ -eq 'codex:UserPromptSubmit' } {
+          $_ -eq 'codex:SessionStart' -or $_ -eq 'codex:PostCompact' } {
             Invoke-UsageReport
             Write-UsageOnly
             if ($HookEvent -eq 'SessionStart') { Update-Cli }
@@ -1209,19 +1233,25 @@ try {
             break
         }
         'grok:Notification' {
-            # Grok asks in its own prompt and takes no answer from a hook.
+            # Grok asks in its own prompt and takes no answer from a hook:
+            # permission_prompt and idle_prompt are alerts. The key includes
+            # the event's timestamp, the same in every copy of one event.
             $nt = Get-Field $f 'notificationType'
             if (-not $nt) { $nt = Get-Field $f 'notification_type' }
-            if (@('permission_prompt', 'idle_prompt', 'elicitation_dialog') -notcontains $nt) { break }
-            $key = (Get-Sha256Hex ($HookEvent + '|' + $Sid + '|' + $nt + '|' + (Get-Field $f 'promptId') + '|' + $Last)).Substring(0, 16)
+            if (@('permission_prompt', 'idle_prompt') -notcontains $nt) { break }
+            $key = (Get-Sha256Hex ($HookEvent + '|' + $Sid + '|' + $nt + '|' + (Get-Field $f 'promptId') + '|' + (Get-Field $f 'timestamp') + '|' + $Last)).Substring(0, 16)
             if (-not (Test-Once $key)) { break }
             $Script:Msg = Limit-JsonText $Last 200 800
             Send-Background 'question'
             break
         }
         { $_ -eq 'grok:Stop' -or $_ -eq 'grok:StopFailure' } {
+            # A Stop also comes when the session closes (reason channel_closed
+            # or shutdown); only end_turn ends a turn.
+            $reason = Get-Field $f 'reason'
+            if ($HookEvent -eq 'Stop' -and $reason -and $reason -ne 'end_turn') { break }
             $err = Get-Field $f 'error'
-            $key = (Get-Sha256Hex ($HookEvent + '|' + $Sid + '|' + (Get-Field $f 'promptId') + '|' + $err + '|' + $Last)).Substring(0, 16)
+            $key = (Get-Sha256Hex ($HookEvent + '|' + $Sid + '|' + (Get-Field $f 'promptId') + '|' + (Get-Field $f 'timestamp') + '|' + $err + '|' + $Last)).Substring(0, 16)
             if (-not (Test-Once $key)) { break }
             if ($HookEvent -eq 'Stop') {
                 $Script:Msg = Limit-JsonText $Last 200 800

@@ -230,7 +230,8 @@ json_text() { # text maxu maxb [mode]
 }
 
 # Plain text (no control characters) cut to at most $2 bytes without
-# splitting a UTF-8 sequence; for terminal sequences.
+# splitting a UTF-8 sequence; for terminal sequences. C1 controls (U+0080
+# to U+009F, two bytes in UTF-8) become spaces, as in json_trim.
 UTF8_CUT='
 {
   s = (NR > 1 ? s " " : "") $0
@@ -241,8 +242,10 @@ END {
     c = substr(s, i, 1); w = 1
     if (c >= "\300") { if (c < "\340") w = 2; else if (c < "\360") w = 3; else w = 4 }
     else if (c >= "\200") { i++; continue }
-    if (length(out) + w > maxb) break
-    out = out substr(s, i, w); i += w
+    u = substr(s, i, w)
+    if (c == "\302" && substr(u, 2, 1) < "\240") u = " "
+    if (length(out) + length(u) > maxb) break
+    out = out u; i += w
   }
   printf "%s", out
 }'
@@ -434,16 +437,19 @@ ingest_one() { # rid ev nonce outfile
   rm -f "$4"
   log "ingest ev=$2 link=$(printf %.8s "$L_LINK") http=$code push=${push:--}"
   printf '%s' "${push:-http$code}"
+  [ "$code" = 200 ]
 }
 
 # Sends event $1 to every link in the background and returns at once.
 # Tunnels go first: the app reports a shown event to the relay ("seen"),
 # which holds a push for a few seconds to hear that, so a device that is
-# connected gets no second alert. $3 limits it to `tunnel` or `relay` links.
-send_bg() { # ev [rid] [all|tunnel|relay]
+# connected gets no second alert. $3 limits it to `tunnel` or `relay` links;
+# once a link took the event, text $5 is written to file $4.
+send_bg() { # ev [rid] [all|tunnel|relay] [file text]
   [ -n "$LINKS" ] || return 0
   sb_rid=${2:-$RID}
   sb_scope=${3:-all}
+  sb_file=${4:-} sb_text=${5:-}
   [ -n "$sb_rid" ] || return 0
   # Ignored before the fork, so the sender also outlives a terminal that
   # closes right after `simpleterm notify` (its children get SIGHUP).
@@ -454,7 +460,8 @@ send_bg() { # ev [rid] [all|tunnel|relay]
       printf '%s\n' "$LINKS" | while IFS= read -r f; do
         load_link "$f" || continue
         if [ "$L_KIND" = tunnel ]; then [ "$pass" = tunnel ] || continue; else [ "$pass" = relay ] || continue; fi
-        ingest_one "$sb_rid" "$1" '' "$RUN_DIR/ing.$$.$sb_rid.$(printf %.8s "$L_LINK")" >/dev/null
+        ingest_one "$sb_rid" "$1" '' "$RUN_DIR/ing.$$.$sb_rid.$(printf %.8s "$L_LINK")" >/dev/null &&
+          [ -n "$sb_file" ] && printf '%s\n' "$sb_text" >"$sb_file" 2>/dev/null
       done
     done
     trim_log
@@ -1061,10 +1068,13 @@ usage_report() {
   USAGE_JSON=$(printf '%s\n' "$out" | sed -n 2p)
   [ -n "$osc" ] && [ -n "$USAGE_JSON" ] || return 0
   [ "$(cat "$RUN_DIR/$SID.usage" 2>/dev/null)" != "$osc" ] || return 0
-  printf '%s\n' "$osc" >"$RUN_DIR/$SID.usage" 2>/dev/null
+  # Recorded as sent only once SimpleTerm has it: on Claude Code's terminal
+  # (printed below), or when a tunnel link took the event. Otherwise it goes
+  # again next time, though unchanged, in case the app connects meanwhile.
   USAGE_SEQ='\u001b]9;'$osc'\u0007'
+  [ "$AGENT" = claude ] && [ "${SIMPLETERM:-}" = 1 ] && printf '%s\n' "$osc" >"$RUN_DIR/$SID.usage" 2>/dev/null
   urid=$(rand_hex 8)
-  is_hex "$urid" 16 && send_bg usage "$urid" tunnel
+  is_hex "$urid" 16 && send_bg usage "$urid" tunnel "$RUN_DIR/$SID.usage" "$osc"
 }
 
 # --- the `simpleterm` command --------------------------------------------------
@@ -1397,7 +1407,7 @@ case $AGENT:$EVENT in
     usage_report
     print_state done
     ;;
-  codex:UserPromptSubmit | codex:SessionStart | codex:PostCompact)
+  codex:SessionStart | codex:PostCompact)
     usage_report
     ;;
   codex-notify:notify)
