@@ -9,10 +9,12 @@
 # not to hooks. This saves the status line input (session id, model, context
 # window, rate limits, cost; no conversation text) to
 # ~/.simpleterm/run/usage.<session>.json for the hooks, then runs your own
-# status line command with the same input and prints what it prints. Without
-# a command it prints a short line of its own (model, context, limits), so
-# the status line is not left blank. Nothing is saved when ~/.simpleterm is
-# absent.
+# status line command with the same input and prints what it prints. A
+# command given as one argument runs as Claude Code would run it on its own:
+# with /bin/sh -c (Claude Code spawns status line commands with shell: true).
+# Without a command it prints a short line of its own (model, context,
+# limits), so the status line is not left blank. Nothing is saved when
+# ~/.simpleterm is absent.
 
 [ -n "${ZSH_VERSION:-}" ] && emulate sh
 umask 077
@@ -46,7 +48,11 @@ if [ $# -eq 0 ]; then
   exit 0
 fi
 if [ $# -eq 1 ]; then
-  printf '%s' "$in" | sh -c "$1"
+  if [ -x /bin/sh ]; then
+    printf '%s' "$in" | /bin/sh -c "$1"
+  else
+    printf '%s' "$in" | sh -c "$1"
+  fi
 else
   printf '%s' "$in" | "$@"
 fi

@@ -260,7 +260,8 @@ command in `~/.claude/settings.json`:
 ```
 
 The tap saves the status line input to `~/.simpleterm/run/usage.<session>.json`, then runs your
-command with the same input and prints what it prints. If you have no status line of your own,
+command with the same input and prints what it prints. It runs the command with `/bin/sh -c`, as
+Claude Code does with a status line command of its own, so the command behaves as before. If you have no status line of your own,
 leave the command out (`~/.simpleterm/bin/simpleterm statusline`): the tap then prints a short
 line itself, such as `Opus · context 8% · 5h 23% · 7d 41%`. The hooks use the saved file while it
 is fresh (10 minutes) for the exact window size and the limits.

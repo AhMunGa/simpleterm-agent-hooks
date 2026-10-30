@@ -899,6 +899,11 @@ def t_usage_statusline(s):
     s.check("statusline: passes the input to the user's command", p.stdout.decode() == json.dumps(STATUSLINE), p.stdout[:200])
     saved = s.home / ".simpleterm" / "run" / "usage.u-claude.json"
     s.check("statusline: saved for the hooks", saved.exists() and saved.read_text().split("\n", 1)[1].strip() == json.dumps(STATUSLINE))
+    # Claude Code runs a status line command with /bin/sh -c (spawn shell: true), not $SHELL or
+    # the first sh on PATH: the user's command must see the same interpreter behind the tap.
+    p = subprocess.run([s.argv[0], str(tap), 'echo "$0"'], input=b"{}", capture_output=True,
+                       env=s.env({"SHELL": "/bin/zsh"}), timeout=20)
+    s.check("statusline: the user's command runs with /bin/sh, as in Claude Code", p.stdout == b"/bin/sh\n", p.stdout)
     p = subprocess.run([s.argv[0], str(tap)], input=b"{}", capture_output=True, env=s.env(), timeout=20)
     s.check("statusline: no command and no data prints nothing", p.stdout == b"" and p.returncode == 0, p.stdout)
     p = subprocess.run([s.argv[0], str(tap)], input=json.dumps(STATUSLINE).encode(), capture_output=True, env=s.env(), timeout=20)
