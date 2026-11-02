@@ -40,7 +40,7 @@ LOGGED=0
 MAX_INPUT=262144
 MAX_LINKS=16
 # The plugin release of this script (the manifests carry the same).
-HOOK_VERSION=0.3.1
+HOOK_VERSION=0.3.2
 # Bumped when the ~/.simpleterm/bin/simpleterm wrapper must be rewritten.
 CLI_REV=2
 CR=$(printf '\r')

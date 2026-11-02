@@ -1,7 +1,7 @@
 {
   "name": "simpleterm",
   "displayName": "SimpleTerm agent hooks",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Status badges, end-to-end encrypted alerts, permission approvals and context/rate-limit reports for Claude Code (and Grok Build, which runs Claude Code plugins) in the SimpleTerm app",
   "author": {
     "name": "AhMunGa",
