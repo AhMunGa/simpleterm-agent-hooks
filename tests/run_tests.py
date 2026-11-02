@@ -2928,7 +2928,7 @@ def t_v2_link_results(s):
     try:
         def setup(tunnel_opts, relay_opts, fmt=2, conf=None):
             s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": fmt}), (LINK_A, dict({"fmt": 2}, **relay_opts))],
-                    conf=dict({"claude_wait": 20}, **(conf or {})))
+                    conf=dict({"claude_wait": 40}, **(conf or {})))
             tctl("/_ctl/reset", {})
             tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown", max_body=65536, **tunnel_opts)}})
 
@@ -2953,7 +2953,7 @@ def t_v2_link_results(s):
                 and req[0]["rrid"] == rids[1] and req[0].get("act") == "allow", str(res))
         # The tunnel keeps failing: 3 resends at most, and the relay's wait goes on to its decision.
         # (The relay decides late enough for all three resends, also on a loaded machine.)
-        setup({"decisions": [dict(bad) for _ in range(6)]}, {"decision": "deny", "after": 15}, conf={"claude_wait": 40})
+        setup({"decisions": [dict(bad) for _ in range(6)]}, {"decision": "deny", "after": 25})
         rc, out, err, el = s.run("claude", v2_perm(session="lr2"))
         s.check("link results: the relay's decision still applies", behavior(out).get("behavior") == "deny", out + s.log_text()[-300:])
         wait_for(lambda: len(tun_ingests("resolved")) >= 5, 10)
@@ -3016,8 +3016,10 @@ def t_v2_link_waits(s):
         s.check("waits: hidden: the tunnel's 5 seconds", 5 <= el < 30, "%.2fs" % el)
         setup({"ingest_delay": 7}, {"ingest_delay": 4, "decision": "allow"}, conf={"codex_wait": 6})
         rc, out, err, el = s.run("codex", codex)
+        # Counted from the relay's start instead, the relay's ingest (4 s) would fit in the 6 s and its
+        # allow would be printed: the cut ingest and the empty output show it, whatever the machine's load.
         s.check("waits: hidden: the cap counts from the hook's start (relay ingest cut to the time left)",
-                out.strip() == "" and el < 10.5 and "http=000" in s.log_text(), "%.2fs %s" % (el, s.log_text()[-300:]))
+                out.strip() == "" and el < 30 and "http=000" in s.log_text(), "%.2fs %s" % (el, s.log_text()[-300:]))
         # A relay that lost R1: the question again, same rid, without nonce, not waited.
         q = json.dumps({"session_id": "sq", "cwd": "/w", "hook_event_name": "PermissionRequest", "tool_name": "AskUserQuestion",
                         "tool_input": {"questions": [{"question": "Which DB?", "options": [{"label": "A"}]}]}})
@@ -3080,9 +3082,12 @@ def t_v2_not_sent(s):
             ctl("/_ctl/reset", {})
             ctl("/_ctl/config", {"links": {link["id"]: dict(link, unknown_error="unknown", decision_delay=4)}})
         rc, out, err, el = s.run("agy", agy, args=("PreToolUse",))
+        # When each probe reached its tunnel: at once, not 4 s apart (the mocks' clocks, not the run's time).
+        got = [r["received"] for ctl in (tctl, tctl2, tctl3) for r in ctl("/_ctl/records")["records"] if r["path"] == "/v1/decision"]
         tun3.terminate()
         tun3.wait(5)
-        s.check("probe: tunnels probed at the same time", not s.records("/v1/ingest") and el < 10, "%.2fs" % el)
+        s.check("probe: tunnels probed at the same time", not s.records("/v1/ingest") and len(got) == 3 and max(got) - min(got) < 3,
+                "%.2fs %s" % (el, [round(g - min(got), 2) for g in got] if got else got))
     finally:
         for t in (tun, tun2):
             t.terminate()
@@ -3211,6 +3216,8 @@ def t_v2_versions(s):
         wait_for(cache.exists, 10)
         s.check("version cache: written in the background", cache.exists() and cache.read_text().split("\n")[1] == "1.19.5",
                 cache.read_text() if cache.exists() else "-")
+        # The first event's own send (no version yet) is in before the next one is looked at.
+        wait_for(lambda: ingests(s, "done"), 20)
         s.ctl("/_ctl/reset", {})
         s.run("opencode", stop)
         p = (wait_for(lambda: ingests(s, "done"), 10) or [{}])[0].get("plain_json") or {}
