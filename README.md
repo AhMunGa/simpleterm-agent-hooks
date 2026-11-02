@@ -188,32 +188,32 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | Agent event | Alert (`ev`) | Badge (Claude Code, SimpleTerm sessions only) |
 |---|---|---|
 | Claude `PermissionRequest` | `permission` (waits for your answer, up to 540 s) | waiting, then running |
-| Claude `PreToolUse` `AskUserQuestion`, `Notification` (idle, elicitation, input needed) | `question` (one per question: `PermissionRequest` repeats it) | waiting (idle keeps done; `agent_needs_input`, another session's, leaves the badge) |
+| Claude `PreToolUse` `AskUserQuestion`, `Notification` (idle, elicitation, input needed) | `question` (one per question: `PermissionRequest` repeats it; `idle_prompt` only when no `done` was sent or is pending for the turn) | waiting (idle keeps done; `agent_needs_input`, another session's, leaves the badge) |
 | Claude `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure` | none (context, see below) | running |
-| Claude `Stop` / `StopFailure` | `done` (sent 3 s later, see below) / `error` or `auth` | done |
+| Claude `Stop` / `StopFailure` | `done` (sent 3 s later on Claude Code, see below) / `error` or `auth` | done |
 | Claude `Stop` with `background_tasks` in flight | none (and no idle question until the next turn), unless the last message asks you something (`question`), only services or tasks that ran before your prompt are left (`done`) | background (+ an OSC 7501 `working` record, see below); waiting (+ a `blocked` record) for a question |
 | Claude `Stop` with `session_crons` set, turn started by a schedule | none (a question: `question`) | background, `scheduled: <schedule>` |
-| Claude `PostToolUseFailure` with `is_interrupt` (Esc) | none | idle |
+| Claude `PostToolUseFailure` with `is_interrupt` (Esc; not for a subagent's tool, `agent_id` set) | none | idle |
 | Claude `SessionStart`, `PostCompact`, `PostModelSwitch` | none (context) | none |
 | Codex `PermissionRequest` | `permission` (waits up to 60 s) | none |
 | Codex `Stop` | `done`, none while a `/goal` is active | none |
 | Codex `SessionStart` (resumed or forked session), `PostCompact` | none (context) | none |
 | Gemini `Notification` (`ToolPermission`) | `question` (`approve <tool>: <command or file>`) | none |
-| Gemini `AfterAgent` | `done` (3 s later); `error` when the turn had no response text (API error, cancel, loop) | none |
+| Gemini `AfterAgent` | `done` (at once); `error` when the turn had no response text (API error, cancel, loop) | none |
 | agy `PreToolUse` `run_command` (only with `agy_wait`) | `permission` | none |
 | agy `PreToolUse` `ask_question`, `ask_permission` | `question` | none |
 | agy `Stop` (fully idle) | `done`, or `error` | none |
-| Grok `Notification` `permission_prompt`, `idle_prompt` | `question` | none |
+| Grok `Notification` `permission_prompt`, `idle_prompt` | `question` (`idle_prompt` only when no `done` was sent or is pending for the turn) | none |
 | Grok `Stop` (`end_turn`) / `StopFailure` | `done` (none with `backgroundTasks` or `sessionCrons`, same rules as Claude) / `error` or `auth` | none |
 | OpenCode permission request | `permission` (waits up to 540 s) | none |
-| OpenCode turn finished / failed | `done` (none while a background shell or subagent of it runs) / `error` or `auth` | none |
+| OpenCode turn finished / failed | `done` (none while a subagent of it runs; a background shell is judged as Claude Code's `background_tasks`) / `error` or `auth` | none |
 | OpenCode 2.x input form | `question` | none |
 | `simpleterm notify` | `notify` | OSC 777 notification instead |
 
 **Background work is not done.** Claude Code (2.1.145+), Grok Build and OpenCode end a turn while a
 shell, subagent or monitor started in the background still runs, and take the turn up again when
-it reports back (OpenCode 2.x: `shell.created`/`shell.exited` and running child sessions; 1.x
-background subagents: busy child sessions). Such a `Stop` lists that work (`background_tasks`, Grok `backgroundTasks`), so the
+it reports back (OpenCode 2.x: `shell.created`/`shell.exited`, sent as `background_tasks`, and
+running child sessions; 1.x background subagents: busy child sessions). Such a `Stop` lists that work (`background_tasks`, Grok `backgroundTasks`), so the
 hook sends no `done` and no idle question then; the turn the agent takes up later sends `done` as
 usual. The badge says `background`. Claude Code 2.1.295+ also reports its own turns through OSC
 7501 and counts only background subagents as working, so the hook adds a `working` record of its
@@ -243,13 +243,59 @@ there):
   one extra alert. The word lists are one table (`ASK_AWK` in `agent-hook.sh`). Claude Code
   2.1.295+ gets a `blocked` (kind `question`) OSC 7501 record `simpleterm-bg` instead of the
   `working` one; the next turn takes it back. The idle question 60 s later stays suppressed.
-- **Services are not waited for.** A background shell whose command looks like a service (`npm
-  run dev`/`start`/`serve`/`preview`/`watch`, `next dev`, `vite`, `nodemon`, `python -m
-  http.server`, `manage.py runserver`, `rails s`, `flask run`, `uvicorn`, `docker compose up`
-  without `-d`, `tail -f`, `--watch`, `-w`, `watch`) never ends and never wakes the agent. When only
-  such shells (and the agent's housekeeping) are left, `done` goes at once, ending with `(still
-  running in the background: <task>)`, instead of after `bg_done_after`. The patterns are one
-  table (`SVC_AWK`); other shells keep the `bg_done_after` wait.
+- **Services are not waited for.** A background shell is a service when its command is a known
+  one, at the command position. When in doubt it is not: a wrong "service" ends the turn early and
+  sends a second `done` later, while a missed one only delays the `done` to `bg_done_after`. The
+  rules (`SVC_AWK`, one table):
+  - The command is cut at `;`, `&&`, `||`, `&` and line breaks; only the **last** element counts
+    (`cd web && npm run dev` and `npm run dev &` are services, `npm run dev & npx wait-on ... && npx
+    playwright test` is not), and any command of its `|` pipeline may be the service, unless the
+    last command of the pipeline can end it (`head`, `grep -q|-l|-m N`: `tail -f x | grep -m1 ready`
+    ends once `tail` writes again and dies of SIGPIPE, not at the match; measured, so this is a guess
+    towards "not a service").
+    One pass over the text drops comments (a `#` that starts a word, outside quotes, to the end of the
+    line: `npm run build  # then: preview & serve`), heredoc bodies and the inside of `"..."`, `'...'`
+    and `$'...'`, and joins backslash line continuations (`git commit -m "npm run dev"`, `sh -c
+    "..."` are not services). `\u00XX` escapes in the JSON are decoded for 0x20-0x7F (Go writes `&` as `\u0026`). A
+    command over 64 KiB is not looked at (not a service). Heredoc operators count only with a
+    delimiter that starts with a letter or `_` (or a quoted one), so `$((1<<3))` and `(( n <<= 1 ))`
+    are not heredocs; `"$(cat <<'EOF' ... EOF)"` bodies are dropped too.
+  - Leading `VAR=val` words and the launchers `npx`, `bunx`, `pnpm exec|dlx`, `yarn dlx`, `uv|poetry
+    run`, `bundle exec`, `env`, `nohup`, `exec`, `sudo` are skipped (an option we cannot read gives up).
+    Between the tool and its subcommand only options are allowed: ones that take a value
+    (`--filter -F -C --cwd --prefix --dir -p --project --workspace -w --app --namespace -n
+    --context --kubeconfig -f --file --env-file --project-name --profile --port --host --config -c
+    --mode -m --base --logLevel -l --outDir`), a few flags without one (`-r --recursive -s --silent
+    -q --quiet --if-present --workspaces -ws --include-workspace-root --stream --parallel --no-bail
+    --open --force --strictPort --debug --verbose -v --no-color --offline --prefer-offline
+    --ignore-scripts -A`), `--name=value`, and `run`; any other option gives up. Words after a lone
+    `--` belong to another command; tools that run a script (`node`, `python`, `tsx`) stop at it.
+  - Package managers `npm|pnpm|yarn|bun [run]` `dev|start|serve|preview|watch`, also `dev:web`
+    style names, `pnpm --filter web dev`, `yarn workspace web dev`, `bun --watch|--hot`; a name whose
+    suffix is a finite task (`setup migrate migration db seed build init prepare install reset
+    clean test lint check generate gen codegen deploy publish release typecheck format once`: `dev:setup`,
+    `start:db`) is a job, not a server.
+    Likewise `turbo [run] dev`, `nx serve|dev|start` and `nx run proj:serve`, `next dev|start`, `ng
+    serve`, `astro|nuxt dev|preview`, `expo start`, `storybook dev|start`, `browser-sync start`,
+    `vite` (also `vite --host`; not `vite build|optimize`), `parcel <entry>|serve|watch` (not `parcel
+    build`; the Parcel CLI docs: `parcel <entry>` is `serve`, `watch` keeps running), `vitest -w|--watch|dev|watch` (a plain `vitest` runs once under
+    an agent), `webpack serve|server|s|watch|w`, `webpack-dev-server`, `live-server`.
+  - `nodemon`, `uvicorn`, `gunicorn`, `python -m http.server|uvicorn|gunicorn|flask run`, `manage.py
+    runserver`, `rails s` (not with `-d`), `flask run`, `php artisan serve`, `hugo server|serve`, `jekyll
+    serve`, `serve`, `http-server`, `node --watch`, `deno run --watch`.
+  - `docker compose up` / `docker-compose up` unless it ends by itself (`-d`, `--detach`, `--wait`,
+    `--abort-on-container-exit|failure`, `--exit-code-from`, `--no-start`, `--dry-run`), `docker|
+    kubectl logs -f` (not for a `job/`), `kubectl port-forward`, `kubectl get ... -w`, `tail -f|-F|
+    --follow` (not with `--pid`), `journalctl -f`, `watch` (not with `-g`/`-e`).
+  - Watchers by their own flag: `tsc|webpack|rollup|swc|mocha|sass -w|--watch` (`-w` is the short form of
+    `--watch` in Dart Sass), `tailwindcss -w`, `esbuild --watch`, `jest --watch|--watchAll`, `cargo watch`, `tsx watch`, `watchexec`.
+
+  `-w` counts only for those tools (`make -w`, `curl -w`, `docker exec -w`, `jest -w` (that is
+  `--maxWorkers`), `kubectl rollout status -w` are not services), and so are not `--watch=false`,
+  `pnpm prisma migrate dev`, `pnpm sst deploy --stage dev`, `nx build web -c dev`, `npm install
+  vite`, `npm i -g http-server`. When only such shells (and the agent's housekeeping) are left, `done`
+  goes at once, ending with `(still running in the background: <task>)`, instead of after
+  `bg_done_after`; other shells keep the `bg_done_after` wait.
 - **Your own prompt is answered.** At every `Stop` the hook records the ids of the tasks running.
   When you typed the prompt that started the turn and every task still running was already running
   before it, the turn is a report: `done`, with the same `(still running in the background: ...)`
@@ -270,12 +316,19 @@ there):
   record with that text. A turn you typed still ends with `done`, a question still alerts, and an
   error always does. The first `Stop` that finds no schedule left is the `done`.
 
-**A `done` waits 3 seconds** (`done_delay`). Another Stop hook (yours or a plugin's) may block the
-stop so that the agent works on; Claude Code, Codex and Grok Build then fire `Stop` again with
-`stop_hook_active: true`, and Gemini CLI `AfterAgent`. Any newer event of the same session within
-the delay (a tool call, a prompt, a permission request) cancels the `done`, and a newer `Stop`
-replaces it, so such a turn sends one `done`, for its real end. The badge changes at once; only the
-alert is late. A `done` whose `Stop` carried `stop_hook_active: true` also carries
+**A `done` waits 3 seconds on Claude Code and Grok Build** (`done_delay`). Another Stop hook (yours
+or a plugin's) may block the stop so that the agent works on; the agent then fires `Stop` again
+with `stop_hook_active: true`. Any newer event of the same session within the delay (a tool call,
+a prompt, a permission request) cancels the `done`, and a newer `Stop` replaces it, so such a turn
+sends one `done`, for its real end. The badge changes at once; only the alert is late. Codex,
+Gemini CLI and OpenCode register no event that would arrive within the delay (Codex: `SessionStart`,
+`PermissionRequest`, `PostCompact`, `Stop`; Gemini: `Notification`, `AfterAgent`), so for them the
+wait could only delay the alert: their default is 0 (at once; set `done_delay` to wait anyway,
+a newer `Stop` then still replaces the first). Only events of the main thread cancel the wait: a
+subagent's own tool calls (their hook input carries `agent_id`, foreground or background; from the
+binary's schema, not yet captured from a background subagent's `PostToolUse`) carry the
+session id too, but are no sign of the main thread going on, so a `done` that leaves background
+work running is not lost to them. A `done` whose `Stop` carried `stop_hook_active: true` also carries
 `"stop_hook_active":true` in its plaintext.
 
 Codex runs a `PermissionRequest` hook before it shows its own approval prompt, so while the hook
@@ -373,7 +426,7 @@ poll_wait=25      # one long-poll, 1-25
 usage=1           # 0: send no context or rate limits
 bg_done_after=600 # a pause with only shells/monitors left: done after this many seconds; 0: never
 codex_goal_check=5 # seconds to wait for a Codex /goal's next turn before sending done
-done_delay=3      # seconds a done waits for a newer event of the session (another Stop hook); 0: at once
+done_delay=3      # seconds a done waits for a newer event of the session (another Stop hook); 0: at once (default 3 on Claude Code and Grok Build, 0 on Codex, Gemini CLI and OpenCode)
 ```
 
 ## Privacy
@@ -463,11 +516,33 @@ Not tested on Windows yet.
 
 - **Background work that never ends.** A dev server the table of services does not know, or
   another endless job left in the background, never wakes the agent: `done` comes only after
-  `bg_done_after` (default 10 minutes), and the badge stays `background` until the next turn.
-  Commands that look like services (`npm run dev`, `tail -f`, ...) get their `done` at once.
+  `bg_done_after` (default 10 minutes), and the badge stays `background` until the next turn
+  (a turn you type while it still runs is `done` at once). This holds on OpenCode 2.x too: an
+  open shell no longer blocks the dones of later turns. Known services (`npm run dev`,
+  `tail -f`, ...) get their `done` at once.
+- **Watch modes that read stdin.** `esbuild --watch` ends when stdin is closed (esbuild's docs);
+  `--watch=forever` keeps it running. Both count as services here. A background shell started
+  without `=forever` and with stdin closed ends by itself, which wakes the agent as any finished
+  task does. `tailwindcss --watch` may behave the same (not measured).
+- **Comments.** A `#` right after `$(...)` or after an escaped space is read as an ordinary
+  character (not a comment), and a `#` that starts a word inside `$(...)` as a comment start; at
+  worst the rest of the line is dropped or kept wrongly, which misses a service (a later `done`)
+  rather than invents one.
+- **A turn that ends with a question is a `done`.** Its `done` carries the question (the last
+  message) and no `question` follows when Claude Code's `idle_prompt` comes 60 s later, so the
+  alert does not change into "response needed". The lock-screen reply action that the old 60 s
+  `question` push offered is gone for these turns: type the follow-up in the app or the terminal.
+  The same holds at a `Stop` that lists only services or tasks that ran before your prompt (the
+  `done` carries the question). Only where the agent still waits for work it started (not a
+  service, not older than your prompt) the question is sent as a `question` (see above).
 - **Questions are read from text.** Whether the last message asks something is a guess from its
   last two sentences (see above); a question phrased in another way is read wrongly now and then. A report that
-  ends with a sign-off such as `Let me know if you need anything else` is not read as a question.
+  ends with a sign-off such as `Let me know if you need anything else` or `If you want me to ...`, a
+  wait or FYI request (`기다려 주세요`, `참고해 주시기 바랍니다`, `양해 부탁드립니다`: the word before the
+  ending starts with 기다, 참고, 참조, 양해, 이해, 감안 or 유의; `참고해서 결정해 주세요` still asks), or a
+  `?` inside inline code or a table row is not read as a question. Trade-off: any sentence with
+  `if you want me to` is read as an offer, not a question, so `If you want me to continue, say
+  so` stays quiet while `Do you want me to continue?` asks.
 - **Scheduled turns before Claude Code sends `UserPromptSubmit` `source`.** 2.1.316 sends none;
   a turn started by a schedule is recognised by its prompt (equal to one of the last `Stop`'s
   `session_crons`) and a typed prompt equal to a scheduled one counts as scheduled.

@@ -585,7 +585,8 @@ def t_background_work(s):
             len(rec) == 1 and rec[0]["plain_json"].get("msg") == "Tests pass.", str(ingests(s))[:300])
     s.ctl("/_ctl/reset", {})
     s.run("claude", ev("Notification", notification_type="idle_prompt", message="Claude is waiting for your input"), st)
-    s.check("background work: idle_prompt after a done turn asks again", wait_for(lambda: ingests(s, "question"), 20))
+    time.sleep(1.5)
+    s.check("background work: idle_prompt after a done turn repeats it: no question", not ingests(s), str(ingests(s))[:200])
 
     many = [dict(shell, id="b%08d" % i) for i in range(12)]
     _, out6, _, _ = s.run("claude", ev("Stop", stop_hook_active=False, last_assistant_message="x",
@@ -781,6 +782,7 @@ def t_question_while_background(s):
     s.check("question while waiting: OSC 7501 blocked/question record, no working record",
             seqs(out) == "\x1b]9;simpleterm:state=waiting " + q + "\x07\x1b]7501;state=blocked:id=simpleterm-bg:kind=question:msg="
             + b64(q) + "\x07", repr(out))
+    wait_for(lambda: ingests(s, "question"), 20)  # its send must land before the reset below
     _, out3, _, _ = s.run("claude", cc_event("qb2", "UserPromptSubmit", prompt="yes, fix them"), st)
     s.check("question while waiting: the next turn takes the record back",
             seqs(out3) == "\x1b]9;simpleterm:state=running\x07\x1b]7501;state=clear:id=simpleterm-bg\x07", repr(out3))
@@ -791,7 +793,21 @@ def t_question_while_background(s):
                        ("question in a code block", "Waiting.\n```\nwhy = a ?\n```\nStanding by."),
                        ("question older than the last two sentences", "Should I continue? I will. Meanwhile the tests run. Standing by."),
                        ("url with a query", "See https://example.com/?a=1 for the details of the run."),
-                       ("English sign-off", "The reviewer is running. Let me know if you need anything else.")):
+                       ("English sign-off", "The reviewer is running. Let me know if you need anything else."),
+                       ("Korean wait", "리뷰가 끝나면 알려드릴게요. 잠시만 기다려 주세요."),
+                       ("Korean for reference", "자세한 내용은 문서를 참고해 주세요."),
+                       ("Korean bear with us", "작업이 길어지고 있습니다. 양해 바랍니다."),
+                       ("English offer after if you", "The reviewer is running. Let me know if you want me to adjust anything."),
+                       ("question mark in inline code", "The helper returns `user?.name` while the reviewer runs."),
+                       ("question mark in inline code at the end", "The reviewer is running. Is it `a ?`"),
+                       ("question mark in a table cell", "Results so far:\n| check | ok? |\n| lint | yes |"),
+                       ("optional chaining", "The reviewer checks a?.b for me."),
+                       ("Korean polite FYI 1", "자세한 내용은 README를 참고하시기 바랍니다."),
+                       ("Korean polite FYI 2", "결과는 로그를 참고해 주시기 바랍니다."),
+                       ("Korean polite wait", "잠시 기다려 주시기 바랍니다."),
+                       ("Korean polite pardon", "양해해 주시기 바랍니다."),
+                       ("Korean polite note", "배포 전에 이 점 유의하시기 바랍니다."),
+                       ("Korean pardon request", "작업이 길어지고 있습니다. 양해 부탁드립니다.")):
         out = stop("qb3", last)
         s.check("question while waiting: %s -> background" % name,
                 seqs(out).startswith("\x1b]9;simpleterm:state=background subagent: Review the diff"), repr(out))
@@ -806,7 +822,9 @@ def t_question_while_background(s):
             ("Korean polite ask without a mark", "진행하시겠습니까", False),
             ("English let me know", "The reviewer is running. Let me know which option you prefer.", True),
             ("English would you like", "Part one is done. Would you like part two now", True),
-            ("full-width question mark", "리뷰가 돌고 있습니다？", True)):
+            ("full-width question mark", "리뷰가 돌고 있습니다？", True),
+            ("Korean real request after an FYI word", "리뷰가 돌고 있습니다. 참고해서 결정해 주세요.", True),
+            ("Korean butakdeurimnida", "리뷰가 돌고 있습니다. 선택 부탁드립니다.", True)):
         s.ctl("/_ctl/reset", {})
         out = stop("qb4", last, ascii_json=ascii_json)
         rec = wait_for(lambda: ingests(s, "question"), 20)
@@ -840,9 +858,11 @@ def t_service_shells(s):
     def shell(cmd, desc="Start the dev server"):
         return dict(SHELL, id="s" + str(abs(hash(cmd)) % 10**8), description=desc, command=cmd)
 
-    def stop(sid, tasks, last="Server started.", extra=None, env=None):
+    def stop(sid, tasks, last="Server started.", extra=None, env=None, amp=False):
         ev = cc_event(sid, "Stop", stop_hook_active=False, last_assistant_message=last, background_tasks=tasks, session_crons=[],
                       **(extra or {}))
+        if amp:
+            ev = ev.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
         return s.run("claude", ev, dict(st, **(env or {})))[1]
 
     out = stop("sv1", [shell("npm run dev")])
@@ -859,17 +879,121 @@ def t_service_shells(s):
             and len(msg) <= 200, repr(msg))
     # The commands the table knows, and some it must leave alone.
     s.ctl("/_ctl/reset", {})
-    for cmd, service in (("npm run dev -- --port 3000", True), ("pnpm run watch", True), ("next dev", True),
-                         ("python3 -m http.server 8000", True), ("python manage.py runserver 0.0.0.0:8000", True),
-                         ("bin/rails server", True), ("flask --app app run", True), ("uvicorn app:app --reload", True),
-                         ("docker compose up", True), ("tail -f /var/log/app.log", True), ("tsc --watch", True),
-                         ("cd web && npm start", True), ("docker compose up -d", False), ("tail -n 20 app.log", False),
-                         ("npm test", False), ("vite build", False), ("grep -w main src/app.dart", False),
-                         ("sleep 45; echo shell-done", False)):
+    # One table (SVC_AWK): a command is a service only at the command position of the last list element and when
+    # (tool, subcommand) is known; when in doubt it is not one (a wrong service sends an early done). A third
+    # field 'amp' sends the command the way Go writes JSON (& < > as \u0026 \u003c \u003e).
+    for cmd, service, *flag in (
+            ('npm run dev -- --port 3000', True), ('pnpm run watch', True), ('next dev', True),
+            ('python3 -m http.server 8000', True), ('python manage.py runserver 0.0.0.0:8000', True), ('bin/rails server', True),
+            ('flask --app app run', True), ('uvicorn app:app --reload', True), ('docker compose up', True),
+            ('tail -f /var/log/app.log', True), ('tsc --watch', True), ('cd web && npm start', True),
+            ('docker compose up -d', False), ('tail -n 20 app.log', False), ('npm test', False), ('vite build', False),
+            ('grep -w main src/app.dart', False), ('sleep 45; echo shell-done', False), ('npm install && npm run dev', True),
+            ('tsc -w', True), ('npm test -- --watchAll=false', False), ('npx jest --watch=false', False),
+            ('npm test -- --no-watch', False), ('python -W ignore -m pytest', False), ('make -w all', False),
+            ('docker exec -w /app api pytest', False), ('pip install flask && npm run build', False),
+            ('tail -n 50 build.log | cut -f 2', False), ('kubectl get pods -w', True), ('vite &', True), ('npx vite &', True),
+            ('npx vite | tee vite.log', True), ('npx tsc -w', True), ('npx webpack -w', True),
+            ('npx tailwindcss -i a.css -o b.css -w', True), ('docker logs -f api', True), ('kubectl logs -f web-1', True),
+            ('journalctl -f', True), ('vitest run', False), ('npx vitest --run', False), ('docker logs api', False),
+            ('vitest', False), ('npx vitest', False), ('npx vitest -w', True), ('npx vitest --watch', True),
+            ('npx vite 2>&1', True), ('npx vite > vite.log 2>&1 &', True), ('vite 2>&1 | tee vite.log', True),
+            ('npx vite >vite.log', True), ('npm create vite@latest', False), ('pnpm --filter web dev', True),
+            ('pnpm -F web dev', True), ('pnpm install', False), ('turbo dev', True), ('nx serve', True), ('ng serve', True),
+            ('astro dev', True), ('nuxt dev', True), ('npx expo start', True), ('storybook dev', True),
+            ('php artisan serve', True), ('hugo server', True), ('bundle exec jekyll serve', True), ('npx serve', True),
+            ('npx http-server', True), ('gunicorn app:app', True), ('kubectl port-forward svc/api 8080:80', True),
+            ('kubectl rollout status deploy/api -w', False),
+            ('until curl -s -o /dev/null -w "%{http_code}" localhost:3000; do sleep 1; done', False),
+            ('pnpm prisma migrate dev --name init', False), ('pnpm sst deploy --stage dev', False),
+            ('pnpm build --mode dev', False), ('nx build web -c dev', False), ('nx run-many -t build --configuration dev', False),
+            ('turbo run deploy -- --stage dev', False), ('pnpm add -D vite @vitejs/plugin-react', False),
+            ('yarn create vite my-app', False), ('npm install vite react', False), ('npm i -g http-server serve', False),
+            ('kubectl -n prod rollout status deploy/api -w', False), ("curl -w '%{http_code}' x", False), ('vitest dev', True),
+            ('vitest watch', True), ('watchexec -w src -- gcc -o a a.c', True), ('npm run dev:web', True), ('turbo run dev', True),
+            ('nx run web:serve', True), ('FOO=1 npm run dev', True), ('sudo -u x npm run dev', False),
+            ('kubectl -n prod get pods --watch', True), ('tail -F x', True), ('watch -n 1 ls', True), ('cargo watch -x run', True),
+            ('docker-compose up', True), ('docker compose -f a.yml up', True), ('yarn workspace web dev', True),
+            ('jest --watch', True), ('python -m flask run', True), ('vite --port 3000', True), ('vite --version', False),
+            ('npm --prefix web run dev', True), ('sudo npm run dev', True), ('env FOO=1 npm run dev', True),
+            ('./node_modules/.bin/vite', True), ('npx -y vite', True), ('uv run flask run', True), ('pnpm dlx serve', True),
+            ('pnpm exec vite', True), ('npm run -- dev', False), ('tsc --noEmit -- -w', False),
+            ('sass --watch a.scss b.css', True), ('sass -w a.scss b.css', True), ('npx jest -w 4', False),
+            ('jest -w 2 --ci', False), ('npx jest --maxWorkers=2', False), ('npx jest --watchAll=false -w 2', False),
+            ('jest --watchAll', True), ('tsx scripts/gen.ts -w', False), ('tsx watch src/index.ts', True),
+            ('node scripts/gen.js --watch', False), ('python script.py -m http.server', False),
+            ('docker compose up --abort-on-container-exit --exit-code-from tests', False),
+            ('docker compose up --build --exit-code-from e2e', False), ('docker compose up --wait', False),
+            ('docker compose up -d --wait', False),
+            ('docker-compose -f docker-compose.test.yml up --abort-on-container-exit', False),
+            ('docker compose up --no-start', False), ('docker compose up --dry-run', False),
+            ('docker compose up --build \\\n  -d', False), ('docker compose up --build \\\n  --abort-on-container-exit', False),
+            ('vite \\\n  build', False), ('docker compose up --build', True),
+            ("cat > start.sh <<'EOF2'\n#!/bin/sh\nnpm run dev\nEOF2\nsh -n start.sh", False),
+            ('grep -E "error|watch" app.log', False), ('grep -rE "TODO|vite" src/app.ts', False),
+            ('until grep -qE "Ready|serve" server.log; do sleep 1; done', False),
+            ('git commit -m "fix; npm run dev now works"', False), ('echo "step 1; tail -f log next"', False),
+            ('node -e "const w = 1; watch(\'src\')"', False), ("printf 'Run:\\nnpm run dev\\n'", False),
+            ("bash -c 'npm run build; npm test'", False), ('sh -c "cd web && npm run dev"', False),
+            ('timeout 120 npm run dev', False), ('npm run dev & npx wait-on http://localhost:3000 && npx playwright test', False),
+            ('npm run dev > dev.log 2>&1 & sleep 8 && curl -sf localhost:3000 && npm run test:e2e', False),
+            ('python -m http.server 8000 & sleep 2; curl -s localhost:8000 | head', False), ('cd web && npm run dev', True),
+            ('npm run dev &', True), ('python3 -m http.server 8000 &', True), ('npm run dev:setup', False),
+            ('npm run dev:seed', False), ('pnpm start:db', False), ('yarn dev:migrate', False), ('turbo run dev:setup', False),
+            ('npm run start:prod', True), ('kubectl logs -f job/db-migrate', False),
+            ('kubectl -n prod logs --follow job/seed', False), ('kubectl logs -f jobs/x', False),
+            ('kubectl logs -f deploy/api', True), ('docker compose logs -f migrate', True),
+            ('tail -f build.log --pid=1234', False), ('watch -g ls', False), ("watch -g 'kubectl get pods'", False),
+            ('npm --tag dev publish', False), ('yarn --frozen-lockfile dev', False), ('pnpm -w dev', False),
+            ('pnpm --filter "@app/*" dev', True), ('pnpm dev --filter web', True), ('npx live-server', True),
+            ('browser-sync start --server', True), ('node --watch server.js', True), ('bun --watch run index.ts', True),
+            ('deno run --watch main.ts', True), ('hugo serve', True), ('astro preview', True), ('nuxt preview', True),
+            ('storybook start', True), ('webpack serve', True), ('npx webpack-dev-server', True), ('rails server -d', False),
+            ('rails s', True), ('vite optimize', False), ('vite build --watch', False), ('npx vite@5', False),
+            ('bunx --bun vite', False), ('npm exec vite', False), ('php -S localhost:8000', False), ('make dev', False),
+            ('./gradlew bootRun', False), ('go run ./cmd/server', False), ('mocha -w', True), ('cargo watch -x test', True),
+            ('nx run web:serve-static', False), ('npx vite --open', True), ('python -m pytest tests -m uvicorn', False),
+            ('npm test -- -w 4', False), ('npx jest --watch', True), ("cat <<EOF > notes\ndon't stop\nEOF\nnpm run dev", True),
+            ('npm run dev \\\n  -- --port 3000', True), ('npm run build  # build & watch for type errors', False),
+            ('npm run build  # then: preview & serve', False), ('pnpm test  # unit tests; npm run dev is separate', False),
+            ('npm run lint\n# next: start dev & watch', False), ('curl http://x/#/a && npm test', False),
+            ('npm run dev -- --name "<<web>>" &\nsleep 5 && npm run test:e2e', False),
+            ("npm run dev  # it's the dev server", True), ('echo ${#a[@]}; npm run dev', True),
+            ("npm run dev &  # it's the dev server\nnpx playwright test", False), ('npm run dev # comment \\\nsleep 1', False),
+            ('echo a#b; npm run dev', True), ('tail -n 50 -f server.log | grep -m1 "ready"', False),
+            ('docker compose logs -f api | grep -q "listening"', False), ('tail -f build.log | head -n 20', False),
+            ('tail -f build.log | grep error', True), ('tail -f build.log | tee out.log', True), ('npm run dev | cat', True),
+            ("printf $'don\\'t; npm run dev\\n' > notes.txt", False), ("echo 'it'\\''s; npm run dev'", False),
+            ('cat <<-EOF > x\n\tnpm run dev\n\tEOF\nnpm test', False), ('cat <<"EOF" > x\nnpm run dev\nEOF\nnpm test', False),
+            ("cat << 'EOF' > x\nnpm run dev\nEOF\nnpm test", False), ('cat <<\\EOF > x\nnpm run dev\nEOF\nnpm test', False),
+            ('cat <<END-OF-FILE > x\nnpm run dev\nEND-OF-FILE\nnpm test', False),
+            ('npm run dev > dev.log 2>&1 &\necho "waiting for <<READY>> marker"\nnpx wait-on http://localhost:3000 && npm run test:e2e', False),
+            ('python3 -c "print(1 << SHIFT)"\nnpm test', False), ('( cd web && npm run dev ) &', True),
+            ('{ npm run dev; } &', True), ('nohup npm run dev > /dev/null 2>&1 &', True), ('exec npm run dev', True),
+            ('time npm run dev', True), ('time npm run build', False), ('npm run dev 2>&1 | tee dev.log', True),
+            ('npm test 2>&1 | tee test.log', False), ('npm run dev |& tee dev.log', True), ('npm run dev &> dev.log &', True),
+            ('vite --host', True), ('npx vite --host', True), ('vite --host 0.0.0.0', True), ('vite --host --port 3000', True),
+            ('deno run -A --watch main.ts', True), ('webpack w', True), ('webpack server', True), ('webpack s', True),
+            ('parcel src/index.html', True), ('parcel serve src/index.html', True), ('parcel watch src/index.html', True),
+            ('parcel build src/index.html', False), ('npm run dev:deploy', False), ('npm run dev:typecheck', False),
+            ('npm run dev:format', False), ('docker compose up -dV', False), ('docker compose up --detach=true', False),
+            ('kubectl logs -f job.batch/migrate', False), ('kubectl logs -f -l job-name=migrate', False),
+            ('gunicorn --check-config app:app', False), ('node run --watch', False), ('flask -A app run', False),
+            ('npm run dev & npx wait-on http://localhost:3000 && npx playwright test', False, 'amp'),
+            ('npm run dev &', True, 'amp'), ('cd web && npm run dev', True, 'amp'), ("printf $'it\\'s'; npm run dev", True),
+            ('x=$((1<<3)); npm run dev &\nnpx wait-on http://localhost:3000 && npx playwright test', False),
+            ('(( n <<= 1 )); npm run dev &\nsleep 5 && npm test', False), ('x=$((1<<3))\nnpm run dev', True),
+            ('git commit -m "$(cat <<\'EOF\'\nFix "quoted bug\nEOF\n)" && npm run dev', True),
+            ('git commit -m "$(cat <<\'EOF\'\nFix: start npm run dev\nEOF\n)" && npm test', False),
+            ('esbuild --watch=forever src/app.js', True), ('esbuild --watch src/app.js', True)):
         s.ctl("/_ctl/reset", {})
-        out = stop("sv3-%d" % abs(hash(cmd)), [shell(cmd, "Run it")])
+        out = stop("sv3-%d" % abs(hash(cmd)), [shell(cmd, "Run it")], amp=bool(flag))
         got = seqs(out).startswith("\x1b]9;simpleterm:state=done")
         s.check("service shell: %r -> %s" % (cmd, "service" if service else "waits"), got == service, repr(out))
+    # A command over 64 KiB is not looked at: not a service (the hook has seconds to answer).
+    s.ctl("/_ctl/reset", {})
+    out = stop("sv-big", [shell("echo " + "x" * 70000 + "; npm run dev", "Run it")])
+    s.check("service shell: a command over 64 KiB is not looked at", seqs(out).startswith("\x1b]9;simpleterm:state=background"), repr(out)[:200])
     time.sleep(1)
     # Mixes: only services (and the agent's own housekeeping) count as services.
     s.ctl("/_ctl/reset", {})
@@ -1099,10 +1223,128 @@ def t_done_delay(s):
     s.check("done delay: done_delay=0 -> at once", rec and rec[0]["received"] - t0 < 2.5, str([round(r["received"] - t0, 2) for r in rec]))
     s.setup([(LINK_A, {})], conf={"done_delay": None})
     t0 = time.time()
+    # Codex registers no event that would come within moments to cancel the wait: at once (0), the flag still passed on.
     s.run("codex", json.dumps({"session_id": "dd-cx", "turn_id": "t", "transcript_path": None, "cwd": "/w/repo",
-                               "hook_event_name": "Stop", "last_assistant_message": "Codex done.", "stop_hook_active": False}))
+                               "hook_event_name": "Stop", "last_assistant_message": "Codex done.", "stop_hook_active": True}))
+    # (a newer event of the session would have cancelled a pending done: it is not pending)
+    s.run("codex", json.dumps({"session_id": "dd-cx", "hook_event_name": "SessionStart", "cwd": "/w/repo", "transcript_path": None}))
     rec = wait_for(lambda: ingests(s, "done"), 20)
-    s.check("done delay: Codex too", rec and rec[0]["received"] - t0 >= 2.7, str([round(r["received"] - t0, 2) for r in rec]))
+    s.check("done delay: Codex has no wait by default (nothing could cancel it)",
+            rec and rec[0]["plain_json"].get("stop_hook_active") is True, str([round(r["received"] - t0, 2) for r in rec]))
+    # Grok Build keeps the wait (its other events come within moments).
+    s.ctl("/_ctl/reset", {})
+    t0 = time.time()
+    inp, env = grok_input("Stop", reason="end_turn", promptId="dd-g", timestamp="2026-11-02T10:20:00.000Z",
+                          lastAssistantMessage="Grok done.", backgroundTasks=[], sessionCrons=[])
+    s.run("claude", inp, env)
+    rec = wait_for(lambda: ingests(s, "done"), 20)
+    s.check("done delay: Grok Build keeps the 3 s wait", rec and rec[0]["received"] - t0 >= 2.7, str([round(r["received"] - t0, 2) for r in rec]))
+
+
+def t_background_events_and_badges(s):
+    """Review findings: a background subagent's own events must not eat the done of a typed turn, a question
+    stays `waiting` when a subagent runs a tool, and an interrupted subagent tool is not the main turn's end."""
+    st = {"SIMPLETERM": "1"}
+    old = dict(SUBAGENT)
+
+    def run(sid, name, **kw):
+        return s.run("claude", cc_event(sid, name, **kw), st)[1]
+
+    def stop(sid, tasks, last="Report."):
+        return run(sid, "Stop", stop_hook_active=False, last_assistant_message=last, background_tasks=tasks, session_crons=[])
+
+    # H1: the shipped 3 s done_delay; the tool call of the old subagent (same session id, agent_id set) that
+    # follows a typed turn's done must not cancel it.
+    s.setup([(LINK_A, {})], conf={"done_delay": None})
+    run("bev1", "UserPromptSubmit", prompt="review the diff in the background")
+    stop("bev1", [old])
+    run("bev1", "UserPromptSubmit", prompt="what is the status?")
+    t0 = time.time()
+    stop("bev1", [old], last="The reviewer is still working.")
+    run("bev1", "PostToolUse", tool_name="Read", tool_input={"file_path": "/w/proj/a.dart"}, agent_id="a42a3936ffcdae563")
+    rec = wait_for(lambda: ingests(s, "done"), 20)
+    time.sleep(4)
+    d = ingests(s, "done")
+    s.check("typed turn, old task left: a background subagent's tool call does not cancel the done",
+            len(d) == 1 and d[0]["received"] - t0 < 8 and "still running in the background" in d[0]["plain_json"].get("msg", ""),
+            str([(r["plain_json"].get("msg"), round(r["received"] - t0, 2)) for r in d]))
+
+    # A Stop another Stop hook blocks (the agent goes on) while an old task is left: the main thread's next
+    # event cancels the done, the next Stop sends it once (no done before and another after).
+    s.setup([(LINK_A, {})], conf={"done_delay": None})
+    run("bev4", "UserPromptSubmit", prompt="start")
+    stop("bev4", [old])
+    run("bev4", "UserPromptSubmit", prompt="status?")
+    stop("bev4", [old], last="First.")
+    run("bev4", "PostToolUse", tool_name="Bash", tool_input={"command": "npm test"})
+    run("bev4", "Stop", stop_hook_active=True, last_assistant_message="Second.", background_tasks=[old], session_crons=[])
+    wait_for(lambda: ingests(s, "done"), 20)
+    time.sleep(4)
+    d = ingests(s, "done")
+    s.check("blocked Stop with an old task left: one done, for the real end",
+            len(d) == 1 and d[0]["plain_json"].get("msg", "").startswith("Second."), str([r["plain_json"].get("msg") for r in d]))
+
+    # A run dir that cannot be written (here: a file where the directory belongs; the hook re-chmods a real
+    # directory itself): the hook still exits 0 and prints the badge (a failed redirection of the special
+    # builtin `:` would end the shell: exit 2 is "block and continue" for Claude Code's Stop).
+    s.setup([(LINK_A, {"push": "disabled"})])
+    rd = s.home / ".simpleterm" / "run"
+    shutil.rmtree(rd, ignore_errors=True)
+    rd.write_text("")
+    try:
+        rc, out, err, el = s.run("claude", cc_event("bev9", "Stop", stop_hook_active=False, last_assistant_message="Done.",
+                                                     background_tasks=[], session_crons=[]), st)
+    finally:
+        rd.unlink()
+    s.check("unwritable run dir: Stop exits 0 and prints the badge", rc == 0 and seqs(out) == "\x1b]9;simpleterm:state=done\x07",
+            "%s %r %r" % (rc, out, err[-200:]))
+
+    # A turn that ends with a question is done, with the question as its text; idle_prompt 60 s later adds none.
+    s.setup([(LINK_A, {"push": "disabled"})])
+    qd = "Should I deploy to staging now?"
+    stop("bev7", [], last=qd)
+    wait_for(lambda: ingests(s, "done"), 20)
+    run("bev7", "Notification", notification_type="idle_prompt", message="Claude is waiting for your input")
+    time.sleep(1.5)
+    evs = ingests(s)
+    s.check("question-ended turn: done carries the question, idle_prompt adds no question",
+            [r["body"]["ev"] for r in evs] == ["done"] and evs[0]["plain_json"].get("msg") == qd, str([r["plain_json"].get("msg") for r in evs]))
+
+    # idle_prompt (60 s after a turn) repeats a done that was sent: no question and no badge change. Without a done
+    # (the turn ended by an interrupt) it stays the safety net; a new prompt takes the mark back.
+    idle = dict(notification_type="idle_prompt", message="Claude is waiting for your input")
+    s.setup([(LINK_A, {"push": "disabled"})])
+    stop("bev5", [], last="Finished.")
+    wait_for(lambda: ingests(s, "done"), 20)
+    s.ctl("/_ctl/reset", {})
+    out = run("bev5", "Notification", **idle)
+    time.sleep(1.5)
+    s.check("idle_prompt after a done: no question, no badge change", out == "" and not ingests(s), repr(out) + str(ingests(s))[:200])
+    run("bev5", "UserPromptSubmit", prompt="next")
+    run("bev5", "PostToolUseFailure", tool_name="Bash", tool_input={"command": "ls"}, is_interrupt=True, error="interrupted")
+    run("bev5", "Notification", **idle)
+    rec = wait_for(lambda: ingests(s, "question"), 20)
+    s.check("idle_prompt after an interrupt (no done): question as before", len(rec) == 1, str(ingests(s))[:200])
+
+    # nit 1: the turn paused on a question; a subagent's tool call keeps the badge `waiting`.
+    s.setup([(LINK_A, {"push": "disabled"})])
+    q = "The reviewer is still running. Should I also fix the lint warnings meanwhile?"
+    out = stop("bev2", [old], last=q)
+    out2 = run("bev2", "PostToolUse", tool_name="Read", tool_input={"file_path": "/w/a"}, agent_id="a42a3936ffcdae563")
+    s.check("question while waiting: a subagent's tool call keeps the badge waiting",
+            seqs(out) == "\x1b]9;simpleterm:state=waiting " + q + "\x07" and seqs(out2) == "\x1b]9;simpleterm:state=waiting " + q + "\x07",
+            repr(out) + repr(out2))
+    out3 = stop("bev3", [old], last="The reviewer is still running.")
+    out4 = run("bev3", "PostToolUse", tool_name="Read", tool_input={"file_path": "/w/a"}, agent_id="a42a3936ffcdae563")
+    s.check("no question: a subagent's tool call keeps the badge background",
+            seqs(out4).startswith("\x1b]9;simpleterm:state=background subagent: Review the diff"), repr(out4))
+    # nit 4: Esc on a tool of a background subagent (agent_id) is not the end of the main turn; Esc on the main one is.
+    out5 = run("bev3", "PostToolUseFailure", tool_name="Bash", tool_input={"command": "ls"}, is_interrupt=True,
+               error="interrupted", agent_id="a42a3936ffcdae563")
+    s.check("interrupted subagent tool: the wait goes on (background, not idle)",
+            seqs(out5).startswith("\x1b]9;simpleterm:state=background subagent: Review the diff"), repr(out5))
+    out6 = run("bev3", "PostToolUseFailure", tool_name="Bash", tool_input={"command": "ls"}, is_interrupt=True, error="interrupted")
+    s.check("interrupted main tool: idle", seqs(out6) == "\x1b]9;simpleterm:state=idle\x07", repr(out6))
 
 
 def t_small_audit_fixes(s):
@@ -1221,6 +1463,8 @@ def t_events(s):
         j = json.dumps({"type": "agent-turn-complete", "thread-id": "x", "turn-id": "y", "cwd": "/r",
                         "client": "codex-tui", "input-messages": [first], "last-assistant-message": "done"})
         s.run("codex-notify", "", args=(j,))
+        if expect:
+            wait_for(lambda: s.records("/v1/ingest"), 20)
         time.sleep(1.5)
         s.check("events: codex notify %s" % ("filtered" if expect == 0 else "sent"),
                 len(s.records("/v1/ingest")) == expect, str(s.records("/v1/ingest"))[:200])
@@ -1755,6 +1999,7 @@ def t_usage_codex(s):
         tun.wait(5)
     s.ctl("/_ctl/reset", {})
     s.run("codex", json.dumps(dict(inp, transcript_path=None, session_id="cx2")))
+    wait_for(lambda: ingests(s, "done"), 20)
     time.sleep(1.5)
     s.check("usage codex: null transcript_path -> no usage", not ingests(s, "usage") and ingests(s, "done"))
 
@@ -1835,6 +2080,16 @@ def t_gemini(s):
     time.sleep(1.5)
     s.check("gemini: other events send nothing", not ingests(s))
 
+    # Gemini CLI registers no event that would come within moments to cancel a wait: no wait by default.
+    s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})], conf={"done_delay": None})
+    t0 = time.time()
+    s.run("gemini", json.dumps(dict(after, session_id="gm-fast", stop_hook_active=True)))
+    s.run("gemini", json.dumps(dict(note, session_id="gm-fast", notification_type="Other")))  # would cancel a pending done
+    rec = wait_for(lambda: ingests(s, "done"), 20)
+    s.check("gemini: done_delay defaults to 0 (nothing could cancel it), stop_hook_active passed on",
+            rec and rec[0]["plain_json"].get("stop_hook_active") is True,
+            str([(round(r["received"] - t0, 2), r["plain_json"]) for r in rec]))
+
 
 def notify_pty(s, args, extra=None):
     """Runs `simpleterm-notify.sh` on a terminal; returns (exit code, terminal output)."""
@@ -1868,6 +2123,17 @@ def notify_pty(s, args, extra=None):
         status = 0
     os.close(fd)
     return os.waitstatus_to_exitcode(status), out
+
+
+def t_notify_no_tty(s):
+    """`simpleterm notify` with SIMPLETERM=1 and no controlling terminal still sends its event (the probe of
+    /dev/tty used a special builtin: dash ended the whole script when it could not open it)."""
+    s.setup([(LINK_A, {"push": "disabled"})])
+    p = subprocess.run([s.argv[0], str(SCRIPTS / "simpleterm-notify.sh"), "notify", "no tty title", "body"], capture_output=True,
+                       env=s.env({"SIMPLETERM": "1"}), cwd=str(s.tmp), timeout=30, start_new_session=True, stdin=subprocess.DEVNULL)
+    rec = wait_for(lambda: ingests(s, "notify"), 20)
+    s.check("notify without a terminal: exit 0 and the event is sent", p.returncode == 0 and rec and rec[0]["plain_json"].get("title") == "no tty title",
+            "%s %s %s" % (p.returncode, p.stderr[-200:], str(ingests(s))[:200]))
 
 
 def t_notify(s):
@@ -2199,6 +2465,13 @@ def t_grok(s):
     rec = wait_for(lambda: ingests(s, "done"), 20)
     s.check("grok background: done after the turn it reported back in", rec and rec[0]["plain_json"].get("msg")
             == "The background job finished.", str(ingests(s))[:200])
+    # idle_prompt after that done repeats it: no question.
+    s.ctl("/_ctl/reset", {})
+    idle2, ienv2 = grok_input("Notification", notificationType="idle_prompt", message="Waiting for input",
+                              timestamp="2026-10-29T10:23:00.000Z")
+    s.run("claude", idle2, dict(ienv2, GROK_HOOK_EVENT="notification"))
+    time.sleep(1.5)
+    s.check("grok: idle_prompt after a done repeats it (no question)", not ingests(s, "question"), str(ingests(s))[:200])
 
 
 def t_opencode_sh(s):
@@ -2211,6 +2484,15 @@ def t_opencode_sh(s):
         rec = ingests(s, "permission")
         s.check("opencode sh: %s request" % verdict, rec and rec[0]["plain_json"].get("app") == "opencode"
                 and rec[0]["plain_json"].get("msg") == "approve bash: rm -rf dist", str(rec)[:200])
+    # A failed turn ends the pause of the Stop before it: an error, and no done from the pause's timer.
+    s.setup([(LINK_A, {"push": "disabled"})], conf={"bg_done_after": 2})
+    s.run("opencode", json.dumps({"hook_event_name": "Stop", "session_id": "oc-2", "cwd": "/w/ocproj", "last_assistant_message": "t",
+                                  "background_tasks": [{"id": "sh_1", "type": "shell", "command": "node worker.js"}]}))
+    s.run("opencode", json.dumps({"hook_event_name": "StopFailure", "session_id": "oc-2", "cwd": "/w/ocproj",
+                                  "error": "APIError", "last_assistant_message": "boom"}))
+    time.sleep(3.5)
+    evs = [r["body"]["ev"] for r in ingests(s)]
+    s.check("opencode sh: a failed turn ends the pause (error, no later done)", evs == ["error"], str(evs))
     s.setup([(LINK_A, {"push": "disabled"})])
     s.run("opencode", json.dumps({"hook_event_name": "StopFailure", "session_id": "oc-1", "cwd": "/w/ocproj",
                                   "error": "ProviderAuthError", "last_assistant_message": "API key invalid"}))
@@ -2293,6 +2575,19 @@ def t_opencode_js(s):
     s.check("opencode 1.x: no done while a background child is busy, then once",
             len(done) == 1 and done[0]["received"] - t0 > 2.0,
             str([(r["plain_json"].get("msg"), round(r["received"] - t0, 2)) for r in done]))
+    # An errored child is not busy any more: it must not hold the parent's done back for good.
+    s.setup([(LINK_A, {"push": "disabled"})])
+    t0 = time.time()
+    node_plugin(s, "v1", {"directory": d, "sessions": {"ses_1": {"title": "Fix the tests"}, "ses_bg": {"parentID": "ses_1"}},
+                          "steps": [st("ses_1", "busy"), st("ses_bg", "busy"), st("ses_1", "idle"), idle("ses_1"), {"sleep": 800},
+                                    {"event": {"type": "session.error", "properties": {"sessionID": "ses_bg",
+                                                                                        "error": {"name": "APIError", "data": {"message": "x"}}}}},
+                                    idle("ses_1")],
+                          "wait": 2500})
+    wait_for(lambda: ingests(s, "done"), 20)
+    time.sleep(1)
+    s.check("opencode 1.x: a child that errored does not hold the parent's done back",
+            len(ingests(s, "done")) == 1, str([(r["plain_json"].get("msg")) for r in ingests(s)]))
     # --- 2.x ---
     s.setup([(LINK_A, {"decision": "allow", "after": 1})])
     ask2 = {"id": "evt_1", "type": "permission.asked", "created": 1, "location": {"directory": d},
@@ -2373,6 +2668,115 @@ def t_opencode_js(s):
                 len(done) == 1 and done[0]["received"] - t0 > 2.0,
                 str([(r["plain_json"].get("msg"), round(r["received"] - t0, 2)) for r in done]))
 
+    # A background shell that never exits holds nothing back: the hook decides from the open shells.
+    def running_turns(name, shell_cmd, turns, conf=None):
+        s.setup([(LINK_A, {"push": "disabled"})], conf=conf)
+        steps = [ev(60, "session.execution.started", "ses_r"),
+                 shell_ev(61, "shell.created", info={"id": "sh_9", "status": "running", "command": shell_cmd,
+                                                     "metadata": {"sessionID": "ses_r"}}),
+                 ev(62, "session.execution.succeeded", "ses_r")]
+        if turns > 1:
+            steps += [{"sleep": 500}, ev(63, "session.execution.started", "ses_r"), ev(64, "session.execution.succeeded", "ses_r")]
+        t0 = time.time()
+        node_plugin(s, "v2", {"directory": d, "sessions": sess, "steps": steps, "wait": 3000})
+        return t0
+
+    t0 = running_turns("dev server, two turns", "npm run dev", 2)
+    wait_for(lambda: len(ingests(s, "done")) >= 2, 20)
+    done = ingests(s, "done")
+    s.check("opencode 2.x: a dev server left open does not block the done, of any turn",
+            len(done) == 2 and all(r["plain_json"].get("msg") == "Ship it (still running in the background: shell: npm run dev)" for r in done),
+            str([(r["plain_json"].get("msg"), round(r["received"] - t0, 2)) for r in done]))
+    t0 = running_turns("unknown shell, never exits", "node worker.js", 1, conf={"bg_done_after": 2})
+    rec = wait_for(lambda: ingests(s, "done"), 20)
+    s.check("opencode 2.x: a shell that never exits -> done after bg_done_after, saying what runs",
+            rec and rec[0]["received"] - t0 > 1.5
+            and rec[0]["plain_json"].get("msg") == "Ship it (still running in the background: shell: node worker.js)",
+            str([(r["plain_json"].get("msg"), round(r["received"] - t0, 2)) for r in ingests(s, "done")]))
+    # A turn that starts after the pause and runs longer than bg_done_after is not announced done meanwhile.
+    s.setup([(LINK_A, {"push": "disabled"})], conf={"bg_done_after": 2})
+    t0 = time.time()
+    node_plugin(s, "v2", {"directory": d, "sessions": sess, "wait": 3000, "steps": [
+        ev(70, "session.execution.started", "ses_r"),
+        shell_ev(71, "shell.created", info={"id": "sh_7", "status": "running", "command": "node worker.js", "metadata": {"sessionID": "ses_r"}}),
+        ev(72, "session.execution.succeeded", "ses_r"), {"sleep": 500},
+        ev(73, "session.execution.started", "ses_r"), {"sleep": 3500}, ev(74, "session.execution.succeeded", "ses_r")]})
+    wait_for(lambda: ingests(s, "done"), 20)
+    time.sleep(2.5)
+    done = ingests(s, "done")
+    s.check("opencode 2.x: a long turn after a pause gets no done before its own end",
+            len(done) == 1 and done[0]["received"] - t0 > 3.5, str([(r["plain_json"].get("msg"), round(r["received"] - t0, 2)) for r in done]))
+    # (bg_done_after 10: "at once" means well before the first pause's timer; generous for a loaded machine)
+    t0 = running_turns("unknown shell, second turn", "node worker.js", 2, conf={"bg_done_after": 10})
+    wait_for(lambda: ingests(s, "done"), 20)
+    first = ingests(s, "done")
+    time.sleep(max(0, t0 + 12.5 - time.time()))
+    done = ingests(s, "done")
+    s.check("opencode 2.x: the second turn with the same open shell is done at once (once, the old wait is over)",
+            len(first) == 1 and first[0]["received"] - t0 < 9 and len(done) == 1,
+            str([(r["plain_json"].get("msg"), round(r["received"] - t0, 2)) for r in done]))
+
+    # Lane jobs: a hung lookup does not hold later events of the session for good, and a permission request
+    # waits for the turn events that came before it (a late turn start would end its wait as answered locally).
+    s.setup([(LINK_A, {"push": "disabled"})])
+    node_plugin(s, "v2", {"directory": d, "sessions": {"ses_h": {"title": "Hung"}}, "wait": 4000,
+                          "env": {"SIMPLETERM_LANE_TIMEOUT_MS": "800"}, "getDelay": {"ses_h": {"ms": 60000, "times": 1}},
+                          "steps": [ev(80, "session.execution.started", "ses_h"), ev(81, "session.execution.succeeded", "ses_h")]})
+    rec = wait_for(lambda: ingests(s, "done"), 20)
+    s.check("opencode 2.x: a hung session lookup times out, the next turn event goes on", rec and rec[0]["plain_json"].get("msg") == "Hung",
+            str(ingests(s))[:200])
+    # The job the lane gave up on does nothing when its lookup comes back late: no late UserPromptSubmit (it
+    # would undo the pause of a later Stop; only that hook writes <session>.turn), no late Stop.
+    run_dir = s.home / ".simpleterm" / "run"
+    s.setup([(LINK_A, {"push": "disabled"})])
+    node_plugin(s, "v2", {"directory": d, "sessions": {"ses_h": {"title": "Late"}}, "wait": 5000,
+                          "env": {"SIMPLETERM_LANE_TIMEOUT_MS": "600"}, "getDelay": {"ses_h": {"ms": 2500, "times": 1}},
+                          "steps": [ev(82, "session.execution.started", "ses_h"), ev(83, "session.execution.succeeded", "ses_h")]})
+    rec = wait_for(lambda: ingests(s, "done"), 20)
+    time.sleep(1)
+    s.check("opencode 2.x: the start the lane gave up on sends nothing when its lookup returns late",
+            len(rec) == 1 and not (run_dir / "ses_h.turn").exists(), str(rec)[:200] + str(list(run_dir.glob("ses_h*"))))
+    s.setup([(LINK_A, {"push": "disabled"})])
+    node_plugin(s, "v2", {"directory": d, "sessions": {"ses_g": {"title": "Late stop"}}, "wait": 5000,
+                          "env": {"SIMPLETERM_LANE_TIMEOUT_MS": "600"}, "getDelay": {"ses_g": {"ms": 2500, "times": 1}},
+                          "steps": [ev(84, "session.execution.succeeded", "ses_g"), ev(85, "session.execution.started", "ses_g")]})
+    s.check("opencode 2.x: the Stop the lane gave up on sends nothing when its lookup returns late",
+            not ingests(s, "done") and (run_dir / "ses_g.turn").exists(), str(ingests(s))[:200] + str(list(run_dir.glob("ses_g*"))))
+    # A hook the lane gave up on is stopped: a fake `sh` (first in PATH) that waits and notes its SIGTERM.
+    fake = s.tmp / "fakebin"
+    fake.mkdir(exist_ok=True)
+    mark = s.tmp / "fake-sh-killed"
+    mark.unlink(missing_ok=True)
+    (fake / "sh").write_text("#!/bin/sh\ntrap 'echo killed >\"$SIMPLETERM_FAKE_MARK\"; exit 0' TERM\n"
+                             "i=0; while [ $i -lt 100 ]; do /bin/sleep 0.2; i=$((i+1)); done\n")
+    (fake / "sh").chmod(0o755)
+    s.setup([(LINK_A, {"push": "disabled"})])
+    node_plugin(s, "v2", {"directory": d, "sessions": {"ses_k": {}}, "wait": 2500,
+                          "env": {"SIMPLETERM_LANE_TIMEOUT_MS": "600", "SIMPLETERM_FAKE_MARK": str(mark),
+                                  "PATH": str(fake) + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")},
+                          "steps": [ev(86, "session.execution.started", "ses_k")]})
+    s.check("opencode 2.x: a hook the lane gave up on is stopped (SIGTERM)", mark.exists(), "no mark: the hook was left running")
+    # A permission request answered while it still waits on its session lane is dropped, not sent.
+    s.setup([(LINK_A, {"decision": "allow", "after": 1})])
+    ask_r = {"id": "evt_95", "type": "permission.asked", "location": {"directory": d},
+             "data": {"id": "per_95", "sessionID": "ses_r2", "action": "shell", "resources": ["make"]}}
+    replied_r = {"id": "evt_96", "type": "permission.replied", "data": {"sessionID": "ses_r2", "requestID": "per_95", "reply": "once"}}
+    calls = node_plugin(s, "v2", {"directory": d, "sessions": {"ses_r2": {}}, "wait": 3500,
+                                  "getDelay": {"ses_r2": {"ms": 1500, "times": 1}},
+                                  "steps": [ev(94, "session.execution.started", "ses_r2"), {"event": ask_r}, {"event": replied_r}]})
+    s.check("opencode 2.x: a request answered while it waited on the lane is not sent",
+            not ingests(s, "permission") and not replies(calls), str(ingests(s))[:200] + str(calls)[:200])
+    s.setup([(LINK_A, {"decision": "allow", "after": 1})])
+    ask_p = {"id": "evt_90", "type": "permission.asked", "location": {"directory": d},
+             "data": {"id": "per_90", "sessionID": "ses_p", "action": "shell", "resources": ["make"]}}
+    t0 = time.time()
+    node_plugin(s, "v2", {"directory": d, "sessions": {"ses_p": {}}, "wait": 30000, "replies": 1,
+                          "getDelay": {"ses_p": {"ms": 1500, "times": 1}},
+                          "steps": [ev(91, "session.execution.started", "ses_p"), {"event": ask_p}]})
+    rec = ingests(s, "permission")
+    s.check("opencode 2.x: a permission request waits for the session's earlier turn events",
+            rec and rec[0]["received"] - t0 >= 1.3, str([round(r["received"] - t0, 2) for r in rec]))
+
     # Two instances (two project directories): an answer without a location
     # still ends the wait in the instance that waits, whichever sees it first.
     s.setup([(LINK_A, {})], conf={"opencode_wait": 60})
@@ -2428,13 +2832,13 @@ def copies_check():
 
 
 TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t_timeout, t_multi_link,
-         t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_work_7501, t_question_while_background, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_done_delay, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
+         t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_work_7501, t_question_while_background, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_done_delay, t_background_events_and_badges, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
-         t_cli_wrapper, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js]
+         t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js]
 
 # Tests of the sh hook only (scripts and behaviour the PowerShell hook does not have).
-SH_ONLY = {"t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_delivery", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_cli_wrapper",
+SH_ONLY = {"t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_delivery", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_notify_no_tty", "t_cli_wrapper",
            "t_agy", "t_agy_paths", "t_opencode_sh", "t_opencode_js"}
 
 
@@ -2487,29 +2891,59 @@ def run_suite(suite, only):
             suite.check("%s raised" % t.__name__, False, repr(e))
 
 
-def own_process_group():
-    """Lead a process group: every hook the suites start, and the background sends they
-    leave sleeping (bg_done_after waits up to 600 s), stay in it so they can be reaped."""
+def run_in_own_group(run):
+    """Runs `run()` (the suites) in a child that leads its own process group, then stops that
+    group: every hook the suites start, and the background sends they leave sleeping
+    (bg_done_after waits up to 600 s), belong to it, so a finished run leaves nothing behind.
+    Only the child's group is touched: this process may share its group with others (a
+    `python run_tests.py | tail` under job control), and it stays in the terminal's group
+    (Ctrl+C reaches it). Returns the child's exit code."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.setpgid(0, 0)
+        except OSError:
+            pass
+        code = 1
+        try:
+            run()
+        except SystemExit as e:
+            code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+        except BaseException:
+            import traceback
+            traceback.print_exc()
+        finally:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(code)
     try:
-        os.setpgid(0, 0)
+        os.setpgid(pid, pid)  # whichever of parent and child gets there first
     except OSError:
         pass
-
-
-def reap_process_group():
-    """Stop what the hooks left running (sleeping background sends) before exiting, so a
-    finished run leaves no processes behind. The runner itself ignores the signal."""
-    old = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    code = 1
     try:
-        os.killpg(os.getpgid(0), signal.SIGTERM)
-    except OSError:
-        pass
+        _, status = os.waitpid(pid, 0)
+        code = os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else (status >> 8)
+    except KeyboardInterrupt:
+        code = 130
     finally:
-        signal.signal(signal.SIGTERM, old)
+        old = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        finally:
+            signal.signal(signal.SIGTERM, old)
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except OSError:
+            pass
+    return code
 
 
 def main():
-    own_process_group()
     ap = argparse.ArgumentParser()
     ap.add_argument("--shell", action="append", help="shell to run agent-hook.sh with (repeatable)")
     ap.add_argument("--pwsh", help="pwsh executable to run agent-hook.ps1 with")
@@ -2573,9 +3007,8 @@ def main():
         failed += len(bad)
         s.close()
     print("TOTAL FAILURES:", failed)
-    reap_process_group()
     sys.exit(1 if failed else 0)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(run_in_own_group(main))

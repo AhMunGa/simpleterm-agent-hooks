@@ -25,7 +25,7 @@ if ($ScriptArgs.Count -gt 1) { $Mode = [string]$ScriptArgs[1] }
 $MaxInput = 262144
 $MaxLinks = 16
 # The plugin release of this script (the manifests carry the same).
-$HookVersion = '0.3.1'
+$HookVersion = '0.3.2'
 # Bumped when the ~/.simpleterm/bin/simpleterm.cmd wrapper must be rewritten.
 $CliRev = 2
 $Inv = [Globalization.CultureInfo]::InvariantCulture
@@ -1144,6 +1144,7 @@ function Add-Note([string]$kind, [string]$fp) {
         if ($kind -eq 'turn') {
             [IO.File]::WriteAllText($path, ([string](Now-Epoch) + " turn -`n"), $Utf8)
             [IO.File]::Delete((Join-Path $RunDir ($Sid + '.goal')))
+            [IO.File]::Delete((Join-Path $RunDir ($Sid + '.done')))
             $bg = Join-Path $RunDir ($Sid + '.bg')
             if ([IO.File]::Exists($bg)) {
                 $lines = [IO.File]::ReadAllLines($bg, $Utf8)
@@ -1166,6 +1167,7 @@ function Add-Note([string]$kind, [string]$fp) {
 # OSC 7501 `working` record (as agent-hook.sh explains: Claude Code 2.1.295+
 # reports `done` for its own turn through OSC 7501).
 $BgId = 'simpleterm-bg'
+function Test-TurnDone { return [IO.File]::Exists((Join-Path $RunDir ($Sid + '.done'))) }
 function Test-BgPaused { return [IO.File]::Exists((Join-Path $RunDir ($Sid + '.bg'))) }
 
 function Test-Claude7501 {
@@ -1257,7 +1259,12 @@ function Invoke-BgPause([bool]$ask) {
         $Script:BgSeq += '\u0007'
     }
     $bgFile = Join-Path $RunDir ($Sid + '.bg')
-    try { [IO.File]::WriteAllText($bgFile, $m + "`n" + $flag + "`n" + $Rid + "`n", $Utf8) } catch { }
+    # Line 1: the badge's message (the question when asking), 2: the OSC 7501
+    # flag, 3: the pause's token, 4: `ask` while the badge says waiting.
+    $bm = $m
+    $askMark = ''
+    if ($ask) { $bm = Limit-JsonText $Last 80 320; $askMark = 'ask' }
+    try { [IO.File]::WriteAllText($bgFile, $bm + "`n" + $flag + "`n" + $Rid + "`n" + $askMark + "`n", $Utf8) } catch { }
     if ($ask) {
         $Script:Msg = Limit-JsonText $Last 200 800
         Send-Background 'question'
@@ -1277,10 +1284,14 @@ function Invoke-BgPause([bool]$ask) {
 # Sends done (text Msg) done_delay seconds from now (default 3; 0: at once)
 # unless something of the session happens first: another Stop hook may have
 # kept the agent going, and then its next event (or Stop) comes within
-# moments. The event is made then (fresh rid and time).
+# moments. The event is made then (fresh rid and time). Only where the agent
+# has such an event to send (Claude Code, Grok Build): Codex registers none
+# that would come within moments, so its default is 0.
 function Send-DoneLater {
     if ($LinkFiles.Count -eq 0) { return }
-    $dw = Get-ConfInt 'done_delay' 3
+    $dw = 3
+    if ($Agent -eq 'codex') { $dw = 0 }
+    $dw = Get-ConfInt 'done_delay' $dw
     if ($dw -le 0) { Send-Background 'done'; return }
     $pendFile = Join-Path $RunDir ($Sid + '.pend')
     try { [IO.File]::WriteAllText($pendFile, $Rid + "`n", $Utf8) } catch { Send-Background 'done'; return }
@@ -1357,7 +1368,18 @@ function Write-TurnMark([bool]$user) {
 $AskKo = @([regex]::Unescape('\uAE4C\uC694'), [regex]::Unescape('\uB2C8\uAE4C'), [regex]::Unescape('\uD558\uC2DC\uACA0\uC5B4\uC694'),
     [regex]::Unescape('\uC8FC\uC138\uC694'), [regex]::Unescape('\uC8FC\uC2DC\uACA0\uC5B4\uC694'), [regex]::Unescape('\uC8FC\uC2E4\uB798\uC694'),
     [regex]::Unescape('\uB098\uC694'), [regex]::Unescape('\uC778\uAC00\uC694'), [regex]::Unescape('\uBC14\uB78D\uB2C8\uB2E4'),
-    [regex]::Unescape('\uD560\uB798\uC694'))
+    [regex]::Unescape('\uD560\uB798\uC694'), [regex]::Unescape('\uBD80\uD0C1\uB4DC\uB9BD\uB2C8\uB2E4'))
+# Endings that can be a plain request or a wait / FYI note (juseyo, baramnida,
+# butakdeurimnida), and the polite forms before them (juusigi, hasigi, sigi).
+$AskReq = @([regex]::Unescape('\uC8FC\uC138\uC694'), [regex]::Unescape('\uBC14\uB78D\uB2C8\uB2E4'),
+    [regex]::Unescape('\uBD80\uD0C1\uB4DC\uB9BD\uB2C8\uB2E4'))
+$AskHon = @([regex]::Unescape('\uC8FC\uC2DC\uAE30'), [regex]::Unescape('\uD558\uC2DC\uAE30'), [regex]::Unescape('\uC2DC\uAE30'))
+# Words just before a request ending that make it no ask ("wait a moment",
+# "for your reference", "bear with us"): kidari, chamgo, chamjo, yanghae,
+# ihae, gamangan, yuui: the last word before the ending starts with one.
+$AskFyi = @([regex]::Unescape('\uAE30\uB2E4'), [regex]::Unescape('\uCC38\uACE0'), [regex]::Unescape('\uCC38\uC870'),
+    [regex]::Unescape('\uC591\uD574'), [regex]::Unescape('\uC774\uD574'), [regex]::Unescape('\uAC10\uC548'),
+    [regex]::Unescape('\uC720\uC758'))
 $AskEn = @('should i', 'shall i', 'would you like', 'do you want', 'let me know which', 'let me know whether', 'want me to', 'please confirm',
     'please choose', 'please select', 'please tell me')
 $AskFwQ = [string][char]0xFF1F
@@ -1428,15 +1450,24 @@ function Test-AskText([string]$raw) {
     $txt = $kept.ToString()
     $sent = New-Object System.Collections.ArrayList
     $cur = New-Object System.Text.StringBuilder
+    $code = $false
+    $line = ''
     for ($i = 0; $i -lt $txt.Length; $i++) {
         $c = [string]$txt[$i]
         [void]$cur.Append($c)
+        $line += $c
         $term = ''
         $nx = ''
         if ($i + 1 -lt $txt.Length) { $nx = [string]$txt[$i + 1] }
-        if ($c -eq "`n") { $term = 'nl' }
-        elseif ($c -eq '?' -or $c -eq '!') { if ($nx -notmatch '[A-Za-z0-9]') { $term = $c } }
-        elseif ($c -eq '.') { if ($nx -eq '' -or $nx -eq ' ' -or $nx -eq "`n") { $term = $c } }
+        $nx2 = ''
+        if ($i + 2 -lt $txt.Length) { $nx2 = [string]$txt[$i + 2] }
+        if ($c -eq "`n") { $term = 'nl'; $line = ''; $code = $false }
+        elseif ($c -eq '`') { $code = -not $code }
+        # No sentence ends inside inline code or in a table row; a?.b is not one either.
+        elseif (($c -eq '?' -or $c -eq '!') -and -not $code -and $line -notmatch '^[ \t]*\|') {
+            if ($nx -notmatch '[A-Za-z0-9]' -and -not ($c -eq '?' -and $nx -eq '.' -and $nx2 -match '[A-Za-z0-9_$]')) { $term = $c }
+        }
+        elseif ($c -eq '.' -and -not $code) { if ($nx -eq '' -or $nx -eq ' ' -or $nx -eq "`n") { $term = $c } }
         elseif ($AskTermChars -contains $c) { $term = $c }
         if ($term) {
             $x = $cur.ToString().Trim()
@@ -1455,47 +1486,391 @@ function Test-AskText([string]$raw) {
     for ($k = $sent.Count - 1; $k -ge 0 -and $k -ge $sent.Count - 2; $k--) {
         if ($sent[$k][1] -eq '?' -or $sent[$k][1] -eq $AskFwQ) { return $true }
         $core = Get-AskCore $sent[$k][0]
-        foreach ($ko in $AskKo) { if ($core.EndsWith($ko, [StringComparison]::Ordinal)) { return $true } }
+        for ($j = 0; $j -lt $AskKo.Count; $j++) {
+            $ko = $AskKo[$j]
+            if (-not $core.EndsWith($ko, [StringComparison]::Ordinal)) { continue }
+            # A request ending after a wait / FYI word is no ask; "check it, then
+            # decide for me" keeps asking (its last word is the thing asked).
+            if ($AskReq -contains $ko) {
+                $tail = $core.Substring(0, $core.Length - $ko.Length).TrimEnd(' ')
+                foreach ($h in $AskHon) {
+                    if ($tail.EndsWith($h, [StringComparison]::Ordinal)) { $tail = $tail.Substring(0, $tail.Length - $h.Length).TrimEnd(' '); break }
+                }
+                $lastWord = $tail
+                $sp = $tail.LastIndexOf(' ')
+                if ($sp -ge 0) { $lastWord = $tail.Substring($sp + 1) }
+                $fyi = $false
+                foreach ($w in $AskFyi) { if ($lastWord.StartsWith($w, [StringComparison]::Ordinal)) { $fyi = $true } }
+                if ($fyi) { continue }
+            }
+            return $true
+        }
         $low = ' ' + $core.ToLowerInvariant() + ' '
-        foreach ($en in $AskEn) { if ($low.Contains(' ' + $en + ' ')) { return $true } }
+        foreach ($en in $AskEn) {
+            $p = $low.IndexOf(' ' + $en + ' ', [StringComparison]::Ordinal)
+            if ($p -lt 0) { continue }
+            if ($p -ge 6 -and $low.Substring($p - 6, 6) -eq 'if you') { continue }
+            return $true
+        }
     }
     return $false
 }
 
 # --- services ------------------------------------------------------------------
 
-# A shell task whose command looks like a service (a dev server, a watcher, a
+# A shell task whose command is a service (a dev server, a watcher, a
 # follower) is not something the agent waits for: it never ends and never
-# wakes the agent. One @(pattern, exception) per line, matched against the
-# lowercased command with ; & | ( ) and JSON escapes turned into single
-# spaces and one space at each end (the same table as SVC_AWK in agent-hook.sh).
-$ServiceCmds = @(
-    @(' (npm|pnpm|yarn|bun)( run| run-script)? (dev|start|serve|preview|watch)(:[a-z0-9_-]+)? ', ''),
-    @(' next (dev|start) ', ''),
-    @(' vite (dev |serve |preview |-)| vite $', ''),
-    @(' nodemon ', ''),
-    @(' python[0-9.]* -m http[.]server ', ''),
-    @('manage[.]py runserver ', ''),
-    @('[ /]rails (s|server) ', ''),
-    @('[ /]flask ([^ ]+ )*run ', ''),
-    @('[ /]uvicorn ', ''),
-    @('docker[ -]compose ([^ ]+ )*up ', ' (-d|--detach) '),
-    @(' tail ([^ ]+ )*(-[a-z]*f[a-z]*|--follow[^ ]*) ', ''),
-    @(' --watch[a-z-]*(=[^ ]*)? ', ''),
-    @(' -w ', ' (grep|egrep|fgrep|rg|wc|ls|sort|diff|cut|tr|sed|awk|ps|date|stat|find|git|npm|pnpm|yarn|npx) '),
-    @(' watch ', '')
-)
+# wakes the agent. A wrong "service" ends the turn early and sends a second
+# done later; a missed one only delays the done to bg_done_after: so when in
+# doubt it is not one, and only what is known is matched, at the command
+# position (the same table as SVC_AWK in agent-hook.sh; read its comment). The
+# command is unescaped, backslash-newline joined, heredoc bodies dropped and
+# the inside of quotes emptied, then cut at ; && || & and line breaks into list
+# elements: only the last one counts, and any command of its pipeline may be
+# the service.
+$SvcValueFlags = ' --filter -F -C --cwd --prefix --dir -p --project --workspace -w --app --namespace -n --context --kubeconfig -f --file --env-file --project-name --profile --port --host --config -c --mode -m --base --logLevel -l --outDir '
+$SvcBoolFlags = ' -r --recursive -s --silent -q --quiet --if-present --workspaces -ws --include-workspace-root --stream --parallel --no-bail --open --force --strictPort --debug --verbose -v --no-color --offline --prefer-offline --ignore-scripts -A '
+$SvcDoneWords = ' setup migrate migration db seed build init prepare install reset clean test lint check generate gen codegen deploy publish release typecheck format once '
+$SvcUnk = 1000000
+$SvcWords = @()
+$SvcN = 0
+
+function Get-SvcBase([string]$w) { return ([regex]::Replace($w, '^.*/', '')).ToLowerInvariant() }
+
+function Get-SvcWord([int]$j) {
+    if ($j -ge 0 -and $j -lt $Script:SvcN) { return [string]$Script:SvcWords[$j] }
+    return ''
+}
+
+# The index of the first word from j on that is not an option (or an option value); N at
+# the end or a lone --, $SvcUnk when an option is not known. A value flag takes the next
+# word only when that is no option.
+function Skip-SvcOpts([int]$j) {
+    while ($j -lt $Script:SvcN -and (Get-SvcWord $j).StartsWith('-')) {
+        $x = Get-SvcWord $j
+        if ($x -ceq '--') { return $Script:SvcN }
+        if ($x.IndexOf('=') -ge 0 -or $SvcBoolFlags.Contains(' ' + $x + ' ')) { $j++ }
+        elseif ($SvcValueFlags.Contains(' ' + $x + ' ')) {
+            if (($j + 1) -lt $Script:SvcN -and -not (Get-SvcWord ($j + 1)).StartsWith('-')) { $j += 2 } else { $j++ }
+        }
+        else { return $SvcUnk }
+    }
+    return $j
+}
+
+# Does an option word matching the (case-sensitive) regex come from j on, before a lone --?
+function Test-SvcAnyOpt([int]$j, [string]$re) {
+    for ($k = $j; $k -lt $Script:SvcN; $k++) {
+        $x = Get-SvcWord $k
+        if ($x -ceq '--') { return $false }
+        if ($x -cmatch $re) { return $true }
+    }
+    return $false
+}
+
+# Leading options only (tools that run a script: the script ends them); `run` may come between when allowed.
+function Test-SvcLeadOpt([int]$j, [string]$re, [bool]$allowRun) {
+    while ($j -lt $Script:SvcN) {
+        $x = Get-SvcWord $j
+        if ($x -ceq '--') { return $false }
+        if ($allowRun -and $x -ceq 'run') { $j++; continue }
+        if (-not $x.StartsWith('-')) { return $false }
+        if ($x -cmatch $re) { return $true }
+        if ($x.IndexOf('=') -lt 0 -and $SvcValueFlags.Contains(' ' + $x + ' ') -and ($j + 1) -lt $Script:SvcN -and -not (Get-SvcWord ($j + 1)).StartsWith('-')) { $j += 2 } else { $j++ }
+    }
+    return $false
+}
+
+# A script name `dev:setup` is a job, not a server, when a part of its suffix is a finite task.
+function Test-SvcJobName([string]$t) {
+    $p = $t.IndexOf(':')
+    if ($p -lt 0) { return $false }
+    foreach ($part in [regex]::Split($t.Substring($p + 1), '[:_-]')) {
+        if ($SvcDoneWords.Contains(' ' + $part + ' ')) { return $true }
+    }
+    return $false
+}
+
+function Test-ServiceSegment([string]$seg) {
+    $seg = [regex]::Replace($seg, '[()\t]', ' ')
+    $Script:SvcWords = @($seg -split ' +' | Where-Object { $_ -ne '' })
+    $Script:SvcN = $Script:SvcWords.Count
+    $n = $Script:SvcN
+    $i = 0
+    while ($i -lt $n) {
+        $w = Get-SvcWord $i
+        if ($w -cmatch '^[A-Za-z_][A-Za-z0-9_]*=') { $i++; continue }
+        $lw = Get-SvcBase $w
+        if ($lw -cmatch '^(do|then|else|elif|if|while|until|time|nohup|exec|bunx|!|[{}])$') { $i++; continue }
+        if ($lw -ceq 'npx') {
+            $i++
+            while ($i -lt $n -and (Get-SvcWord $i).StartsWith('-')) {
+                if ((Get-SvcWord $i) -cmatch '^(-y|--yes|--no-install|--no|-q|--quiet)$') { $i++ } else { return $false }
+            }
+            continue
+        }
+        if ($lw -ceq 'env' -or $lw -ceq 'sudo') { $i++; if ((Get-SvcWord $i).StartsWith('-')) { return $false }; continue }
+        $nx = Get-SvcWord ($i + 1)
+        if (($lw -ceq 'pnpm' -and ($nx -ceq 'exec' -or $nx -ceq 'dlx')) -or ($lw -ceq 'yarn' -and $nx -ceq 'dlx') -or
+            (($lw -ceq 'uv' -or $lw -ceq 'poetry') -and $nx -ceq 'run') -or ($lw -ceq 'bundle' -and $nx -ceq 'exec')) {
+            $i += 2
+            if ((Get-SvcWord $i).StartsWith('-')) { return $false }
+            continue
+        }
+        break
+    }
+    if ($i -ge $n) { return $false }
+    $c = Get-SvcBase (Get-SvcWord $i)
+    $j = $i + 1
+    if ($c -cmatch '^(npm|pnpm|yarn|bun)$') {
+        if ($c -ceq 'bun' -and (Test-SvcLeadOpt $j '^--(watch|hot)$' $true)) { return $true }
+        $j = Skip-SvcOpts $j
+        if ($c -ceq 'yarn' -and (Get-SvcWord $j) -ceq 'workspace') { $j = Skip-SvcOpts ($j + 2) }
+        if ((Get-SvcWord $j) -ceq 'run' -or (Get-SvcWord $j) -ceq 'run-script') { $j = Skip-SvcOpts ($j + 1) }
+        $t = (Get-SvcWord $j).ToLowerInvariant()
+        return ($j -lt $n -and $t -cmatch '^(dev|start|serve|preview|watch)(:[a-z0-9_-]+)?$' -and -not (Test-SvcJobName $t))
+    }
+    if ($c -ceq 'next') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(dev|start)$') }
+    if ($c -ceq 'vite') {
+        if (Test-SvcAnyOpt $j '^(-v|-h|--version|--help)$') { return $false }
+        $j = Skip-SvcOpts $j
+        if ($j -ge $SvcUnk) { return $false }
+        $x = Get-SvcWord $j
+        return ($j -ge $n -or $x -cmatch '^(dev|serve|preview)$' -or $x -cmatch '^[0-9]*[<>]' -or $x.Contains('/') -or $x.Contains('.'))
+    }
+    if ($c -ceq 'vitest') {
+        return ((Test-SvcAnyOpt $j '^(-w|--watch|--watch=true|--watch=1)$') -or (Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(dev|watch)$')
+    }
+    if ($c -ceq 'watch') { return (-not (Test-SvcAnyOpt $j '^(-[a-zA-Z]*[ge][a-zA-Z]*|--chgexit|--errexit)$')) }
+    if ($c -ceq 'gunicorn') { return (-not (Test-SvcAnyOpt $j '^--check-config$')) }
+    if ($c -cmatch '^(nodemon|uvicorn|watchexec|serve|http-server|live-server|webpack-dev-server)$') { return $true }
+    if ($c -ceq 'parcel') { $j = Skip-SvcOpts $j; return ($j -lt $n -and (Get-SvcWord $j) -cne 'build') }
+    if ($c -ceq 'node') { return (Test-SvcLeadOpt $j '^--watch(-path(=.*)?)?$' $false) }
+    if ($c -ceq 'deno') { return (Test-SvcLeadOpt $j '^--watch(=.*)?$' $true) }
+    if ($c -cmatch '^python[0-9.]*$') {
+        for ($k = $j; $k -lt $n; $k++) {
+            $x = Get-SvcWord $k
+            $y = Get-SvcWord ($k + 1)
+            if ($x -ceq '-m') {
+                if ($y -cmatch '^(http[.]server|uvicorn|gunicorn|hypercorn)$') { return $true }
+                if ($y -ceq 'flask') { return ((Get-SvcWord (Skip-SvcOpts ($k + 2))) -ceq 'run') }
+                return $false
+            }
+            if (-not $x.StartsWith('-')) { return ($x -cmatch 'manage[.]py$' -and $y -ceq 'runserver') }
+        }
+        return $false
+    }
+    if ($c -cmatch 'manage[.]py$') { return ((Get-SvcWord (Skip-SvcOpts $j)) -ceq 'runserver') }
+    if ($c -ceq 'rails') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(s|server)$' -and -not (Test-SvcAnyOpt $j '^(-d|--daemon)$')) }
+    if ($c -ceq 'flask') { return ((Get-SvcWord (Skip-SvcOpts $j)) -ceq 'run') }
+    if ($c -ceq 'docker' -or $c -ceq 'docker-compose') {
+        $j = Skip-SvcOpts $j
+        if ($c -ceq 'docker' -and (Get-SvcWord $j) -ceq 'compose') { $j = Skip-SvcOpts ($j + 1) }
+        elseif ($c -ceq 'docker') { if ((Get-SvcWord $j) -cne 'logs') { return $false } }
+        if ((Get-SvcWord $j) -ceq 'up') {
+            return (-not (Test-SvcAnyOpt ($j + 1) '^(-[a-zA-Z]*d[a-zA-Z]*|--detach(=.*)?|--wait|--abort-on-container-exit|--abort-on-container-failure|--exit-code-from(=.*)?|--no-start|--dry-run)$'))
+        }
+        if ((Get-SvcWord $j) -ceq 'logs') { return (Test-SvcAnyOpt ($j + 1) '^(-[a-zA-Z]*f[a-zA-Z]*|--follow)$') }
+        return $false
+    }
+    if ($c -ceq 'kubectl') {
+        $j = Skip-SvcOpts $j
+        $sub = Get-SvcWord $j
+        if ($sub -ceq 'port-forward') { return $true }
+        if ($sub -ceq 'logs') {
+            for ($k = $j + 1; $k -lt $n; $k++) { $w2 = Get-SvcWord $k; if ($w2 -cmatch '^jobs?(\.[a-z]+)*(/|$)' -or $w2.Contains('job-name=')) { return $false } }
+            return (Test-SvcAnyOpt ($j + 1) '^(-[a-zA-Z]*f[a-zA-Z]*|--follow)$')
+        }
+        if ($sub -ceq 'get') { return (Test-SvcAnyOpt ($j + 1) '^(-w|--watch|--watch-only)$') }
+        return $false
+    }
+    if ($c -ceq 'tail') { return ((Test-SvcAnyOpt $j '^(-[a-zA-Z]*[fF][a-zA-Z]*|--follow(=.*)?)$') -and -not (Test-SvcAnyOpt $j '^--pid(=.*)?$')) }
+    if ($c -ceq 'journalctl') { return (Test-SvcAnyOpt $j '^(-[a-zA-Z]*f[a-zA-Z]*|--follow)$') }
+    if ($c -ceq 'turbo') {
+        $j = Skip-SvcOpts $j
+        if ((Get-SvcWord $j) -ceq 'run') { $j = Skip-SvcOpts ($j + 1) }
+        $t = (Get-SvcWord $j).ToLowerInvariant()
+        return ($t -cmatch '^(dev|watch|serve|start)(:[a-z0-9_-]+)?$' -and -not (Test-SvcJobName $t))
+    }
+    if ($c -ceq 'nx') {
+        $j = Skip-SvcOpts $j
+        if ((Get-SvcWord $j) -cmatch '^(serve|dev|start)$') { return $true }
+        if ((Get-SvcWord $j) -ceq 'run') { return ((Get-SvcWord (Skip-SvcOpts ($j + 1))) -cmatch ':(serve|dev|start)(:|$)') }
+        return $false
+    }
+    if ($c -ceq 'ng') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(serve|s)$') }
+    if ($c -ceq 'astro' -or $c -ceq 'nuxt' -or $c -ceq 'nuxi') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(dev|preview)$') }
+    if ($c -ceq 'expo') { return ((Get-SvcWord (Skip-SvcOpts $j)) -ceq 'start') }
+    if ($c -ceq 'storybook' -or $c -ceq 'sb') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(dev|start)$') }
+    if ($c -ceq 'browser-sync') { return ((Get-SvcWord (Skip-SvcOpts $j)) -ceq 'start') }
+    if ($c -ceq 'php') {
+        for ($k = $j; $k -lt ($n - 1); $k++) { if ((Get-SvcWord $k) -ceq 'artisan') { return ((Get-SvcWord ($k + 1)) -ceq 'serve') } }
+        return $false
+    }
+    if ($c -ceq 'hugo') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(server|serve)$') }
+    if ($c -ceq 'jekyll') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(serve|s)$') }
+    if ($c -ceq 'cargo') { return ((Get-SvcWord (Skip-SvcOpts $j)) -ceq 'watch') }
+    if ($c -ceq 'tsx') { return ((Get-SvcWord (Skip-SvcOpts $j)) -ceq 'watch') }
+    if ($c -ceq 'tsc' -or $c -ceq 'rollup' -or $c -ceq 'swc' -or $c -ceq 'mocha') { return (Test-SvcAnyOpt $j '^(-w|--watch)$') }
+    if ($c -ceq 'webpack') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(serve|server|s|watch|w)$' -or (Test-SvcAnyOpt $j '^(-w|--watch)$')) }
+    if ($c -ceq 'tailwindcss') { return (Test-SvcAnyOpt $j '^(-w|--watch(=always)?)$') }
+    if ($c -ceq 'sass') { return (Test-SvcAnyOpt $j '^(-w|--watch)$') }
+    if ($c -ceq 'esbuild') { return (Test-SvcAnyOpt $j '^--watch(=forever)?$') }
+    if ($c -ceq 'jest') { return (Test-SvcAnyOpt $j '^--(watch|watchAll)$') }
+    return $false
+}
+
+# The JSON string body as the text of the command: real characters, line breaks kept. A
+# \u00XX in the ASCII range (0x20-0x7F) is that character (Go writes `&` as `\u0026`), any
+# other \u escape
+# a space.
+function Get-SvcUnescape([string]$raw) {
+    $sb = New-Object System.Text.StringBuilder
+    for ($i = 0; $i -lt $raw.Length; $i++) {
+        $c = $raw[$i]
+        if ($c -ne '\') { [void]$sb.Append($c); continue }
+        if ($i + 1 -ge $raw.Length) { break }
+        $e = $raw[$i + 1]
+        $i++
+        if ($e -eq 'n') { [void]$sb.Append("`n") }
+        elseif ($e -eq 'r' -or $e -eq 't') { [void]$sb.Append(' ') }
+        elseif ($e -eq 'u') {
+            $hex = ''
+            if ($i + 4 -lt $raw.Length) { $hex = $raw.Substring($i + 1, 4) }
+            $ch = ' '
+            if ($hex -match '^[0-9A-Fa-f]{4}$') {
+                $v = [Convert]::ToInt32($hex, 16)
+                if ($v -ge 32 -and $v -le 127) { $ch = [string][char]$v }
+            }
+            [void]$sb.Append($ch)
+            $i += 4
+        }
+        else { [void]$sb.Append($e) }
+    }
+    return $sb.ToString()
+}
+
+# A heredoc operator at i (<<, not <<<): its delimiter, or '' when there is none. $SvcHde is the
+# index of the last character of the operator. The delimiter starts with a letter or _ (so
+# $((1<<3)) and (( n <<= 1 )) are not heredocs) unless it is quoted.
+$SvcHde = 0
+function Get-SvcHdParse([string]$s, [int]$i) {
+    $len = $s.Length
+    $e = $i + 2
+    if ($e -lt $len -and $s[$e] -eq '-') { $e++ }
+    while ($e -lt $len -and ($s[$e] -eq ' ' -or $s[$e] -eq "`t")) { $e++ }
+    $bq = ''
+    if ($e -lt $len -and ($s[$e] -eq "'" -or $s[$e] -eq '"' -or $s[$e] -eq '\')) { $bq = [string]$s[$e]; $e++ }
+    if (-not ($bq -eq "'" -or $bq -eq '"' -or ($e -lt $len -and ([string]$s[$e]) -cmatch '^[A-Za-z_]$'))) { return '' }
+    $de = $e
+    while ($de -lt $len -and " `t`n;&|()<>'`"".IndexOf($s[$de]) -lt 0) { $de++ }
+    if ($de -le $e) { return '' }
+    if ($bq -eq "'" -or $bq -eq '"') { $Script:SvcHde = $de } else { $Script:SvcHde = $de - 1 }
+    return $s.Substring($e, $de - $e)
+}
+
+# From the line break at j: the index of the line break that ends the body (the line of hd).
+function Get-SvcHdSkip([string]$s, [int]$j, [string]$hd) {
+    $len = $s.Length
+    while (($j + 1) -lt $len) {
+        $nl = $s.IndexOf([char]10, $j + 1)
+        if ($nl -lt 0) { $ln = $s.Substring($j + 1); $j = $len } else { $ln = $s.Substring($j + 1, $nl - $j - 1); $j = $nl }
+        if ($ln.TrimStart(' ', "`t") -ceq $hd) { break }
+    }
+    return $j
+}
+
+# The text of the command in one pass: comments (a # that starts a word, outside quotes, up
+# to the line break) and heredoc bodies dropped, line continuations joined, the inside of
+# quotes emptied (one word _ is left), redirections with & removed, then every list
+# separator is a ; and a pipe stays a |.
+function Get-SvcClean([string]$s) {
+    $out = New-Object System.Text.StringBuilder
+    $q = ''
+    $hd = ''
+    $len = $s.Length
+    for ($i = 0; $i -lt $len; $i++) {
+        $ch = [string]$s[$i]
+        if ($q -eq '') {
+            $pv = ''
+            if ($i -gt 0) { $pv = [string]$s[$i - 1] }
+            if ($ch -eq '#' -and ($pv -eq '' -or " `t`n;&|()".IndexOf([char]$pv) -ge 0)) {
+                while (($i + 1) -lt $len -and $s[$i + 1] -ne "`n") { $i++ }
+                continue
+            }
+            if ($ch -eq "`n") {
+                [void]$out.Append("`n")
+                if ($hd -ne '') { $i = Get-SvcHdSkip $s $i $hd; $hd = '' }
+                continue
+            }
+            if ($ch -eq '\') {
+                if (($i + 1) -lt $len -and $s[$i + 1] -eq "`n") { [void]$out.Append(' ') } else { [void]$out.Append('_') }
+                $i++
+                continue
+            }
+            if ($ch -eq "'" -or $ch -eq '"') { $q = $ch; [void]$out.Append('_'); continue }
+            if ($ch -eq '$' -and ($i + 1) -lt $len -and $s[$i + 1] -eq "'") { $q = 'a'; [void]$out.Append('_'); $i++; continue }
+            if ($ch -eq '<' -and ($i + 1) -lt $len -and $s[$i + 1] -eq '<') {
+                if (($i + 2) -lt $len -and $s[$i + 2] -eq '<') { [void]$out.Append('<<<'); $i += 2; continue }
+                $d = Get-SvcHdParse $s $i
+                if ($d -ne '') { $hd = $d; $i = $Script:SvcHde; [void]$out.Append(' '); continue }
+            }
+            [void]$out.Append($ch)
+        }
+        elseif ($q -eq "'") { if ($ch -eq "'") { $q = '' } }
+        elseif ($q -eq 'a') {
+            if ($ch -eq '\') { $i++ }
+            elseif ($ch -eq "'") { $q = '' }
+        }
+        else {
+            if ($ch -eq '\') { $i++ }
+            elseif ($ch -eq '"') { $q = '' }
+            elseif ($ch -eq '<' -and ($i + 1) -lt $len -and $s[$i + 1] -eq '<' -and -not (($i + 2) -lt $len -and $s[$i + 2] -eq '<')) {
+                # a heredoc inside a $(...) in double quotes (the line break follows the delimiter): its body
+                # is not part of the command either
+                $d = Get-SvcHdParse $s $i
+                $j = $Script:SvcHde + 1
+                while ($j -lt $len -and ($s[$j] -eq ' ' -or $s[$j] -eq "`t")) { $j++ }
+                if ($d -ne '' -and $j -lt $len -and $s[$j] -eq "`n") { $i = Get-SvcHdSkip $s $j $d }
+            }
+        }
+    }
+    $t = $out.ToString()
+    $t = $t.Replace('|&', '|')
+    $t = [regex]::Replace($t, '[0-9]*[<>]&[0-9-]*', ' ')
+    $t = [regex]::Replace($t, '&>>?', ' > ')
+    return $t.Replace('||', ';').Replace('&&', ';').Replace('&', ';').Replace("`n", ';')
+}
+
+# A last pipeline command that ends early (head, grep -q|-l|-m N) can end the pipeline too: when the
+# earlier command writes again it dies of SIGPIPE (not before; measured), so this is a guess.
+function Test-SvcConsumer([string]$seg) {
+    $x = @([regex]::Replace($seg, '[()\t]', ' ') -split ' +' | Where-Object { $_ -ne '' })
+    $k = 0
+    while ($k -lt $x.Count -and $x[$k] -cmatch '^[A-Za-z_][A-Za-z0-9_]*=') { $k++ }
+    if ($k -ge $x.Count) { return $false }
+    $c = Get-SvcBase ([string]$x[$k])
+    if ($c -ceq 'head') { return $true }
+    if ($c -cmatch '^(grep|egrep|fgrep)$') {
+        for ($k = $k + 1; $k -lt $x.Count; $k++) {
+            if ([string]$x[$k] -cmatch '^(-[a-zA-Z]*[qlm][a-zA-Z0-9]*|--quiet|--silent|--max-count(=.*)?|--files-with-matches)$') { return $true }
+        }
+    }
+    return $false
+}
 
 function Test-ServiceCmd([string]$cmd) {
-    $c = $cmd.ToLowerInvariant()
-    $c = [regex]::Replace($c, '\\[nrt"]', ' ')
-    $c = [regex]::Replace($c, '[;&|()\t]', ' ')
-    $c = ' ' + $c + ' '
-    $c = [regex]::Replace($c, ' +', ' ')
-    foreach ($e in $ServiceCmds) {
-        if ($c -match $e[0]) {
-            if (-not $e[1] -or $c -notmatch $e[1]) { return $true }
-        }
+    # A command over 64 KiB is not looked at (the hook has seconds, not a minute): not a service.
+    if ($cmd.Length -gt 65536) { return $false }
+    $last = ''
+    foreach ($el in ((Get-SvcClean (Get-SvcUnescape $cmd)) -split ';')) {
+        $t = $el -replace '[ \t]', ''
+        if ($t -ne '' -and $t -ne '}') { $last = $el }
+    }
+    $parts = @($last -split '\|')
+    if ($parts.Count -gt 1 -and (Test-SvcConsumer $parts[$parts.Count - 1])) { return $false }
+    foreach ($part in $parts) {
+        if (Test-ServiceSegment $part) { return $true }
     }
     return $false
 }
@@ -1515,6 +1890,9 @@ function Invoke-StopDone([string]$what) {
     if ($what) { $Script:Msg = Get-DoneMsg $what } else { $Script:Msg = Limit-JsonText $Last 200 800 }
     if ((Get-Field $f 'stop_hook_active') -eq 'true') { $Script:XFlag = '1' }
     Send-DoneLater
+    # The turn's done is sent (or pending): Claude Code's idle_prompt, 60 s
+    # later, repeats it (the next turn note takes the mark back).
+    try { [IO.File]::WriteAllText((Join-Path $RunDir ($Sid + '.done')), "`n", $Utf8) } catch { }
     Invoke-UsageReport
     Write-State 'done' ''
     Update-Cli
@@ -1555,14 +1933,20 @@ function Invoke-StopFlow {
     Update-Cli
 }
 
-# The status of a running turn: `background` while a paused session's
-# background subagents run tools, `running` otherwise.
+# The status of a running turn: while a paused session's background subagents
+# run tools, the pause's own badge (`waiting` when the turn paused on a
+# question, `background` otherwise); `running` otherwise.
 function Write-Running {
     $path = Join-Path $RunDir ($Sid + '.bg')
     if ([IO.File]::Exists($path)) {
         $m = ''
-        try { $m = ([IO.File]::ReadAllText($path, $Utf8) -split "`n")[0] } catch { }
-        Write-State 'background' $m
+        $state = 'background'
+        try {
+            $bl = [IO.File]::ReadAllText($path, $Utf8) -split "`n"
+            $m = $bl[0]
+            if ($bl.Count -gt 3 -and $bl[3] -eq 'ask') { $state = 'waiting' }
+        } catch { }
+        Write-State $state $m
     } else {
         Write-State 'running' ''
     }
@@ -1609,7 +1993,7 @@ try {
         'tool_input.questions.0.question', 'session_id', 'sessionId', 'cwd', 'message', 'last_assistant_message',
         'lastAssistantMessage', 'last-assistant-message', 'input-messages.0', 'error', 'transcript_path', 'context_tokens',
         'model', 'to_model', 'promptId', 'toolUseId', 'reason', 'timestamp', 'prompt', 'source', 'stop_hook_active',
-        'is_interrupt') + $bgWant + $cronWant)
+        'is_interrupt', 'agent_id') + $bgWant + $cronWant)
     $HookEvent = Get-Field $f 'hook_event_name'
     if (-not $HookEvent) { $HookEvent = Get-Field $f 'hookEventName' }
     if ($Agent -eq 'codex-notify') { $HookEvent = 'notify' }
@@ -1717,9 +2101,12 @@ try {
     }
 
     # A done waits done_delay seconds (Send-DoneLater) in case another Stop
-    # hook keeps the agent going; any later event of the session ends that
-    # wait. Only the Stop events that send a done themselves leave it be.
-    if (@('claude:Stop', 'codex:Stop', 'grok:Stop') -notcontains ($Agent + ':' + $HookEvent)) {
+    # hook keeps the agent going; any later event of the main thread ends that
+    # wait. Only the Stop events that send a done themselves leave it be, and
+    # so do the events of a subagent (agent_id is set, foreground or
+    # background): its tool calls carry the session id and are no sign of the
+    # main thread going on.
+    if (@('claude:Stop', 'codex:Stop', 'grok:Stop') -notcontains ($Agent + ':' + $HookEvent) -and -not (Get-Field $f 'agent_id')) {
         try { [IO.File]::Delete((Join-Path $RunDir ($Sid + '.pend'))) } catch { }
     }
 
@@ -1758,6 +2145,9 @@ try {
                 # Claude Code sends it 60 s after a turn while only background
                 # shells or monitors run: the work is not waiting for the user.
                 if (Test-BgPaused) { break }
+                # Already told by this turn's done: the prompt repeats it. Without
+                # a done (interrupt, StopFailure, no Stop hook) it stays the safety net.
+                if (Test-TurnDone) { break }
                 $Script:Msg = Limit-JsonText (Get-Field $f 'message') 200 800
                 Send-Background 'question'
             } elseif ($nt -eq 'elicitation_dialog' -or $nt -eq 'elicitation_url_dialog') {
@@ -1780,8 +2170,10 @@ try {
             break
         }
         { $_ -eq 'claude:PostToolUse' -or $_ -eq 'claude:PostToolUseFailure' } {
-            if ($HookEvent -eq 'PostToolUseFailure' -and (Get-Field $f 'is_interrupt') -eq 'true') {
+            if ($HookEvent -eq 'PostToolUseFailure' -and (Get-Field $f 'is_interrupt') -eq 'true' -and -not (Get-Field $f 'agent_id')) {
                 # Esc during a tool call: the turn is over (no Stop follows).
+                # Not when a subagent's tool was interrupted (agent_id is
+                # set): the main session's wait goes on.
                 Add-Note 'turn' ''
                 Write-State 'idle' ''
                 break
@@ -1853,7 +2245,7 @@ try {
             $nt = Get-Field $f 'notificationType'
             if (-not $nt) { $nt = Get-Field $f 'notification_type' }
             if (@('permission_prompt', 'idle_prompt') -notcontains $nt) { break }
-            if ($nt -eq 'idle_prompt' -and (Test-BgPaused)) { break }
+            if ($nt -eq 'idle_prompt' -and ((Test-BgPaused) -or (Test-TurnDone))) { break }
             $key = (Get-Sha256Hex ($HookEvent + '|' + $Sid + '|' + $nt + '|' + (Get-Field $f 'promptId') + '|' + (Get-Field $f 'timestamp') + '|' + $Last)).Substring(0, 16)
             if (-not (Test-Once $key)) { break }
             $Script:Msg = Limit-JsonText $Last 200 800

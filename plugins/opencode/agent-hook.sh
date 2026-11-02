@@ -40,7 +40,7 @@ LOGGED=0
 MAX_INPUT=262144
 MAX_LINKS=16
 # The plugin release of this script (the manifests carry the same).
-HOOK_VERSION=0.3.1
+HOOK_VERSION=0.3.2
 # Bumped when the ~/.simpleterm/bin/simpleterm wrapper must be rewritten.
 CLI_REV=2
 CR=$(printf '\r')
@@ -454,7 +454,7 @@ ingest_one() { # rid ev nonce outfile
     200)
       push=$(resp_get "$4" push | sed -n 's/^push=//p')
       ;;
-    410) : >"$RUN_DIR/$L_LINK.revoked" ;;
+    410) printf '' 2>/dev/null >"$RUN_DIR/$L_LINK.revoked" ;;
   esac
   rm -f "$4"
   log "ingest ev=$2 link=$(printf %.8s "$L_LINK") http=$code push=${push:--}"
@@ -570,7 +570,7 @@ EOF
       404 | 410 | 401 | 403)
         log "decision link=$(printf %.8s "$L_LINK") http=$code"
         [ "$code" = 410 ] && [ "$(resp_get "$resp" error)" = 'error=revoked' ] &&
-          : >"$RUN_DIR/$L_LINK.revoked"
+          printf '' 2>/dev/null >"$RUN_DIR/$L_LINK.revoked"
         break
         ;;
       000)
@@ -1256,7 +1256,7 @@ if [ "$AGENT" = notify ]; then
   t=$(notify_text "${2:-}" 64 256)
   b=$(notify_text "${3:-}" 200 800)
   [ -n "$t$b" ] || finish
-  if [ "${SIMPLETERM:-}" = 1 ] && { : >/dev/tty; } 2>/dev/null; then
+  if [ "${SIMPLETERM:-}" = 1 ] && { printf '' >/dev/tty; } 2>/dev/null; then
     if [ -n "${TMUX:-}" ]; then
       # tmux forwards it only with `set -g allow-passthrough on`.
       printf '\033Ptmux;\033\033]777;notify;%s;%s\007\033\\' "$t" "$b" >/dev/tty 2>/dev/null
@@ -1278,8 +1278,10 @@ case $AGENT in
   claude | opencode)
     # background_tasks (Claude Code Stop): the first ten tasks.
     # session_crons (the first five): scheduled wake-ups. prompt/source tell
-    # who started a turn; stop_hook_active and is_interrupt are flags.
-    WANT='hook_event_name,notification_type,tool_name,tool_input.command,tool_input.file_path,tool_input.url,tool_input.description,tool_input.questions.0.question,session_id,cwd,message,last_assistant_message,error,transcript_path,context_tokens,model,to_model,prompt,source,stop_hook_active,is_interrupt'
+    # who started a turn; stop_hook_active and is_interrupt are flags. agent_id is
+    # there only when a subagent's own tool call fires the hook (foreground or
+    # background; absent for the main thread).
+    WANT='hook_event_name,notification_type,tool_name,tool_input.command,tool_input.file_path,tool_input.url,tool_input.description,tool_input.questions.0.question,session_id,cwd,message,last_assistant_message,error,transcript_path,context_tokens,model,to_model,prompt,source,stop_hook_active,is_interrupt,agent_id'
     for i in 0 1 2 3 4 5 6 7 8 9; do WANT=$WANT,background_tasks.$i.id,background_tasks.$i.type,background_tasks.$i.description,background_tasks.$i.command; done
     for i in 0 1 2 3 4; do WANT=$WANT,session_crons.$i.id,session_crons.$i.schedule,session_crons.$i.prompt; done
     ;;
@@ -1305,45 +1307,321 @@ esac
 
 EVENT='' NTYPE='' TOOL='' DETAIL='' DESC='' SID='' CWD='' LAST='' ERR='' QTEXT='' FIRSTIN='' NTYPE2=''
 TPATH='' CTXTOK='' MODEL='' GTYPE='' FULLYIDLE='' TERMREASON='' EXTRA='' GKEY='' REASON=''
-PROMPT='' SRC='' STOPACT='' ISINT='' PROMPTID='' XFLAGS=''
+PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS=''
 BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_SEQ=''
 BG_SVC=0 BG_IDMAP='' BG_KEEP='' BG_SHELLS='' BG_IDS='' BG_NOID=0 BG_M=''
 CRON_N=0 CRON_SCHED='' CRON_SUMS=''
 
 # --- what the hook reads from the text of a turn ------------------------------
 
-# A shell task whose command looks like a service (a dev server, a watcher, a
+# A shell task whose command is a service (a dev server, a watcher, a
 # follower) is not something the agent waits for: it never ends and never
 # wakes the agent. exit 0 when the command (one JSON-escaped line on stdin) is
-# one. One `svc(pattern, exception)` per line, matched against the lowercased
-# command with ; & | ( ) and JSON escapes turned into single spaces and one
-# space at each end; add a line to teach it another.
+# one. A wrong "service" ends the turn early and sends a second done later; a
+# missed one only delays the done to bg_done_after: so when in doubt it is not
+# one, and only what is known is matched, at the command position:
+#  - the command is unescaped, backslash-newline joined, heredoc bodies
+#    dropped and the text of "..." and '...' emptied (a word is left), then
+#    cut at ; && || & and line breaks into list elements; only the LAST
+#    element counts (`cd web && npm run dev`, `npm run dev &`), and of its
+#    pipeline (|) any command may be the service;
+#  - in each command leading VAR=val words, shell keywords and a few
+#    launchers (npx, bunx, pnpm exec|dlx, yarn dlx, uv|poetry run, bundle
+#    exec, env, nohup, exec, sudo; an option we cannot read gives up) are
+#    skipped, and the command word with its subcommand is looked up in
+#    svcseg. Between the two only options are allowed: VF takes a value, BOOL
+#    does not, any other one gives up. Words after a lone -- belong to
+#    another command, and tools that run a script (node, python, tsx) stop
+#    at the script.
 SVC_AWK='
-function svc(re, ex) { if (c ~ re && (ex == "" || c !~ ex)) found = 1 }
+BEGIN {
+  VF = " --filter -F -C --cwd --prefix --dir -p --project --workspace -w --app --namespace -n --context --kubeconfig -f --file --env-file --project-name --profile --port --host --config -c --mode -m --base --logLevel -l --outDir "
+  BOOL = " -r --recursive -s --silent -q --quiet --if-present --workspaces -ws --include-workspace-root --stream --parallel --no-bail --open --force --strictPort --debug --verbose -v --no-color --offline --prefer-offline --ignore-scripts -A "
+  UNK = 1000000
+  DONE = " setup migrate migration db seed build init prepare install reset clean test lint check generate gen codegen deploy publish release typecheck format once "
+}
+function base(w) { sub(/^.*\//, "", w); return tolower(w) }
+function isopt(w) { return substr(w, 1, 1) == "-" }
+# The first word from j on that is not an option (or an option value); n + 1 at the end or a lone --,
+# UNK when an option is not known. A value flag takes the next word only when that is no option.
+function nxt(j) {
+  while (j <= n && isopt(W[j])) {
+    if (W[j] == "--") return n + 1
+    if (index(W[j], "=") > 0 || index(BOOL, " " W[j] " ") > 0) j++
+    else if (index(VF, " " W[j] " ") > 0) { if (j < n && !isopt(W[j + 1])) j += 2; else j++ }
+    else return UNK
+  }
+  return j
+}
+# Does an option word matching the regex string re come from j on (before a lone --)?
+function anyopt(j, re,   k) {
+  for (k = j; k <= n; k++) { if (W[k] == "--") return 0; if (W[k] ~ re) return 1 }
+  return 0
+}
+# Leading options only (tools that run a script: the script ends them); `run` may come between when allowed.
+function leadopt(j, re, allowrun) {
+  while (j <= n) {
+    if (W[j] == "--") return 0
+    if (allowrun && W[j] == "run") { j++; continue }
+    if (!isopt(W[j])) return 0
+    if (W[j] ~ re) return 1
+    if (index(W[j], "=") == 0 && index(VF, " " W[j] " ") > 0 && j < n && !isopt(W[j + 1])) j += 2; else j++
+  }
+  return 0
+}
+# A script name `dev:setup` is a job, not a server, when a part of its suffix is a finite task.
+function jobname(t,   p, m, SP, k) {
+  p = index(t, ":")
+  if (p == 0) return 0
+  m = split(substr(t, p + 1), SP, /[:_-]/)
+  for (k = 1; k <= m; k++) if (index(DONE, " " SP[k] " ") > 0) return 1
+  return 0
+}
+function svcseg(seg,   i, w, lw, c, j, k, t) {
+  gsub(/[()\t]/, " ", seg)
+  n = split(seg, W, " ")
+  i = 1
+  while (i <= n) {
+    w = W[i]
+    if (w ~ /^[A-Za-z_][A-Za-z0-9_]*=/) { i++; continue }
+    lw = base(w)
+    if (lw ~ /^(do|then|else|elif|if|while|until|time|nohup|exec|bunx|!|[{}])$/) { i++; continue }
+    if (lw == "npx") {
+      i++
+      while (i <= n && isopt(W[i])) { if (W[i] ~ /^(-y|--yes|--no-install|--no|-q|--quiet)$/) i++; else return 0 }
+      continue
+    }
+    if (lw == "env" || lw == "sudo") { i++; if (isopt(W[i])) return 0; continue }
+    if ((lw == "pnpm" && (W[i + 1] == "exec" || W[i + 1] == "dlx")) || (lw == "yarn" && W[i + 1] == "dlx") || ((lw == "uv" || lw == "poetry") && W[i + 1] == "run") || (lw == "bundle" && W[i + 1] == "exec")) {
+      i += 2
+      if (isopt(W[i])) return 0
+      continue
+    }
+    break
+  }
+  if (i > n) return 0
+  c = base(W[i]); j = i + 1
+  if (c ~ /^(npm|pnpm|yarn|bun)$/) {
+    if (c == "bun" && leadopt(j, "^--(watch|hot)$", 1)) return 1
+    j = nxt(j)
+    if (c == "yarn" && W[j] == "workspace") j = nxt(j + 2)
+    if (W[j] == "run" || W[j] == "run-script") j = nxt(j + 1)
+    t = tolower(W[j])
+    return (j <= n && t ~ /^(dev|start|serve|preview|watch)(:[a-z0-9_-]+)?$/ && !jobname(t))
+  }
+  if (c == "next") { j = nxt(j); return (W[j] ~ /^(dev|start)$/) }
+  if (c == "vite") {
+    if (anyopt(j, "^(-v|-h|--version|--help)$")) return 0
+    j = nxt(j)
+    if (j >= UNK) return 0
+    return (j > n || W[j] ~ /^(dev|serve|preview)$/ || W[j] ~ /^[0-9]*[<>]/ || index(W[j], "/") > 0 || index(W[j], ".") > 0)
+  }
+  if (c == "vitest") return (anyopt(j, "^(-w|--watch|--watch=true|--watch=1)$") || W[nxt(j)] ~ /^(dev|watch)$/)
+  if (c == "watch") return !anyopt(j, "^(-[a-zA-Z]*[ge][a-zA-Z]*|--chgexit|--errexit)$")
+  if (c == "gunicorn") return !anyopt(j, "^--check-config$")
+  if (c ~ /^(nodemon|uvicorn|watchexec|serve|http-server|live-server|webpack-dev-server)$/) return 1
+  if (c == "parcel") { j = nxt(j); return (j <= n && W[j] != "build") }
+  if (c == "node") return leadopt(j, "^--watch(-path(=.*)?)?$", 0)
+  if (c == "deno") return leadopt(j, "^--watch(=.*)?$", 1)
+  if (c ~ /^python[0-9.]*$/) {
+    for (k = j; k <= n; k++) {
+      if (W[k] == "-m") {
+        if (W[k + 1] ~ /^(http[.]server|uvicorn|gunicorn|hypercorn)$/) return 1
+        if (W[k + 1] == "flask") return (W[nxt(k + 2)] == "run")
+        return 0
+      }
+      if (!isopt(W[k])) return (W[k] ~ /manage[.]py$/ && W[k + 1] == "runserver")
+    }
+    return 0
+  }
+  if (c ~ /manage[.]py$/) return (W[nxt(j)] == "runserver")
+  if (c == "rails") return (W[nxt(j)] ~ /^(s|server)$/ && !anyopt(j, "^(-d|--daemon)$"))
+  if (c == "flask") return (W[nxt(j)] == "run")
+  if (c == "docker" || c == "docker-compose") {
+    j = nxt(j)
+    if (c == "docker" && W[j] == "compose") j = nxt(j + 1)
+    else if (c == "docker") { if (W[j] != "logs") return 0 }
+    if (W[j] == "up") return !anyopt(j + 1, "^(-[a-zA-Z]*d[a-zA-Z]*|--detach(=.*)?|--wait|--abort-on-container-exit|--abort-on-container-failure|--exit-code-from(=.*)?|--no-start|--dry-run)$")
+    if (W[j] == "logs") return anyopt(j + 1, "^(-[a-zA-Z]*f[a-zA-Z]*|--follow)$")
+    return 0
+  }
+  if (c == "kubectl") {
+    j = nxt(j)
+    if (W[j] == "port-forward") return 1
+    if (W[j] == "logs") {
+      for (k = j + 1; k <= n; k++) if (W[k] ~ /^jobs?(\.[a-z]+)*(\/|$)/ || index(W[k], "job-name=") > 0) return 0
+      return anyopt(j + 1, "^(-[a-zA-Z]*f[a-zA-Z]*|--follow)$")
+    }
+    if (W[j] == "get") return anyopt(j + 1, "^(-w|--watch|--watch-only)$")
+    return 0
+  }
+  if (c == "tail") return (anyopt(j, "^(-[a-zA-Z]*[fF][a-zA-Z]*|--follow(=.*)?)$") && !anyopt(j, "^--pid(=.*)?$"))
+  if (c == "journalctl") return anyopt(j, "^(-[a-zA-Z]*f[a-zA-Z]*|--follow)$")
+  if (c == "turbo") {
+    j = nxt(j)
+    if (W[j] == "run") j = nxt(j + 1)
+    t = tolower(W[j])
+    return (t ~ /^(dev|watch|serve|start)(:[a-z0-9_-]+)?$/ && !jobname(t))
+  }
+  if (c == "nx") {
+    j = nxt(j)
+    if (W[j] ~ /^(serve|dev|start)$/) return 1
+    if (W[j] == "run") { j = nxt(j + 1); return (W[j] ~ /:(serve|dev|start)(:|$)/) }
+    return 0
+  }
+  if (c == "ng") return (W[nxt(j)] ~ /^(serve|s)$/)
+  if (c == "astro" || c == "nuxt" || c == "nuxi") return (W[nxt(j)] ~ /^(dev|preview)$/)
+  if (c == "expo") return (W[nxt(j)] == "start")
+  if (c == "storybook" || c == "sb") return (W[nxt(j)] ~ /^(dev|start)$/)
+  if (c == "browser-sync") return (W[nxt(j)] == "start")
+  if (c == "php") { for (k = j; k < n; k++) if (W[k] == "artisan") return (W[k + 1] == "serve"); return 0 }
+  if (c == "hugo") return (W[nxt(j)] ~ /^(server|serve)$/)
+  if (c == "jekyll") return (W[nxt(j)] ~ /^(serve|s)$/)
+  if (c == "cargo") return (W[nxt(j)] == "watch")
+  if (c == "tsx") return (W[nxt(j)] == "watch")
+  if (c == "tsc" || c == "rollup" || c == "swc" || c == "mocha") return anyopt(j, "^(-w|--watch)$")
+  if (c == "webpack") return (W[nxt(j)] ~ /^(serve|server|s|watch|w)$/ || anyopt(j, "^(-w|--watch)$"))
+  if (c == "tailwindcss") return anyopt(j, "^(-w|--watch(=always)?)$")
+  if (c == "sass") return anyopt(j, "^(-w|--watch)$")
+  if (c == "esbuild") return anyopt(j, "^--watch(=forever)?$")
+  if (c == "jest") return anyopt(j, "^--(watch|watchAll)$")
+  return 0
+}
+# One hex digit, -1 if it is none.
+function hexd(c) { return index("0123456789abcdef", tolower(c)) - 1 }
+# JSON string body to the text of the command: real characters, line breaks kept. A \u00XX
+# in the ASCII range (0x20-0x7F) is that character (Go writes `&` as `\u0026`), any other \u
+# escape a space.
+function unesc(s,   out, p, c, d1, d2, d3, d4, v) {
+  out = ""
+  while ((p = index(s, "\\")) > 0) {
+    out = out substr(s, 1, p - 1)
+    c = substr(s, p + 1, 1)
+    if (c == "n") { out = out "\n"; s = substr(s, p + 2) }
+    else if (c == "r" || c == "t") { out = out " "; s = substr(s, p + 2) }
+    else if (c == "u") {
+      d1 = hexd(substr(s, p + 2, 1)); d2 = hexd(substr(s, p + 3, 1)); d3 = hexd(substr(s, p + 4, 1)); d4 = hexd(substr(s, p + 5, 1))
+      v = d1 * 4096 + d2 * 256 + d3 * 16 + d4
+      if (d1 == 0 && d2 == 0 && d3 >= 2 && d3 <= 7) out = out sprintf("%c", v); else out = out " "
+      s = substr(s, p + 6)
+    }
+    else { out = out c; s = substr(s, p + 2) }
+  }
+  return out s
+}
+# The text of the command in one pass: comments (a # that starts a word, outside quotes, up to
+# the line break) and heredoc bodies dropped, line continuations joined, the inside of quotes
+# emptied (one word `_` is left), redirections with & removed, then every list separator is a ;
+# and a pipe stays a |.
+# A heredoc operator at i (<<, not <<<): its delimiter, or "" when there is none. HDE is the index
+# of the last character of the operator. The delimiter starts with a letter or _ (so $((1<<3)) and
+# (( n <<= 1 )) are not heredocs) unless it is quoted.
+function hdparse(s, i, len,   e, bq, de, sq, dq) {
+  sq = "\047"; dq = "\""
+  e = i + 2
+  if (substr(s, e, 1) == "-") e++
+  while (substr(s, e, 1) == " " || substr(s, e, 1) == "\t") e++
+  bq = substr(s, e, 1)
+  if (bq == sq || bq == dq || bq == "\\") e++; else bq = ""
+  if (!(bq == sq || bq == dq || substr(s, e, 1) ~ /[A-Za-z_]/)) return ""
+  de = e
+  while (de <= len && index(" \t\n;&|()<>" sq dq, substr(s, de, 1)) == 0) de++
+  if (de <= e) return ""
+  if (bq == sq || bq == dq) HDE = de; else HDE = de - 1
+  return substr(s, e, de - e)
+}
+# From the line break at j: the index of the line break that ends the body (the line of hd).
+function hdskip(s, j, len, hd,   nl, ln, t) {
+  while (j < len) {
+    nl = index(substr(s, j + 1), "\n")
+    if (nl == 0) { ln = substr(s, j + 1); j = len } else { ln = substr(s, j + 1, nl - 1); j += nl }
+    t = ln; sub(/^[ \t]+/, "", t)
+    if (t == hd) break
+  }
+  return j
+}
+function clean(s,   out, i, len, ch, pv, q, hd, d, j, sq, dq) {
+  sq = "\047"; dq = "\""
+  out = ""; q = ""; hd = ""; len = length(s)
+  for (i = 1; i <= len; i++) {
+    ch = substr(s, i, 1)
+    if (q == "") {
+      pv = (i > 1) ? substr(s, i - 1, 1) : ""
+      if (ch == "#" && (pv == "" || index(" \t\n;&|()", pv) > 0)) {
+        while (i < len && substr(s, i + 1, 1) != "\n") i++
+        continue
+      }
+      if (ch == "\n") {
+        out = out "\n"
+        if (hd != "") { i = hdskip(s, i, len, hd); hd = "" }
+        continue
+      }
+      if (ch == "\\") {
+        if (substr(s, i + 1, 1) == "\n") out = out " "; else out = out "_"
+        i++
+        continue
+      }
+      if (ch == sq || ch == dq) { q = ch; out = out "_"; continue }
+      if (ch == "$" && substr(s, i + 1, 1) == sq) { q = "a"; out = out "_"; i++; continue }
+      if (ch == "<" && substr(s, i + 1, 1) == "<") {
+        if (substr(s, i + 2, 1) == "<") { out = out "<<<"; i += 2; continue }
+        d = hdparse(s, i, len)
+        if (d != "") { hd = d; i = HDE; out = out " "; continue }
+      }
+      out = out ch
+    } else if (q == sq) { if (ch == sq) q = "" }
+    else if (q == "a") { if (ch == "\\") i++; else if (ch == sq) q = "" }
+    else {
+      if (ch == "\\") i++
+      else if (ch == dq) q = ""
+      else if (ch == "<" && substr(s, i + 1, 1) == "<" && substr(s, i + 2, 1) != "<") {
+        # a heredoc inside a $(...) in double quotes (the line break follows the delimiter): its body
+        # is not part of the command either
+        d = hdparse(s, i, len)
+        j = HDE + 1
+        while (substr(s, j, 1) == " " || substr(s, j, 1) == "\t") j++
+        if (d != "" && substr(s, j, 1) == "\n") i = hdskip(s, j, len, d)
+      }
+    }
+  }
+  gsub(/\|&/, "|", out)
+  gsub(/[0-9]*[<>]&[0-9-]*/, " ", out)
+  gsub(/&>>?/, " > ", out)
+  gsub(/\|\|/, ";", out)
+  gsub(/&&/, ";", out)
+  gsub(/&/, ";", out)
+  gsub(/\n/, ";", out)
+  return out
+}
+# A last pipeline command that ends early (head, grep -q|-l|-m N) can end the pipeline too: when the
+# earlier command writes again it dies of SIGPIPE (not before; measured), so this is a guess.
+function consumer(seg,   m, X, k, c) {
+  gsub(/[()\t]/, " ", seg)
+  m = split(seg, X, " ")
+  k = 1
+  while (k <= m && X[k] ~ /^[A-Za-z_][A-Za-z0-9_]*=/) k++
+  c = base(X[k])
+  if (c == "head") return 1
+  if (c ~ /^(grep|egrep|fgrep)$/) {
+    for (k++; k <= m; k++) if (X[k] ~ /^(-[a-zA-Z]*[qlm][a-zA-Z0-9]*|--quiet|--silent|--max-count(=.*)?|--files-with-matches)$/) return 1
+  }
+  return 0
+}
 {
-  c = tolower($0)
-  gsub(/\\[nrt"]/, " ", c)
-  gsub(/[;&|()\t]/, " ", c)
-  c = " " c " "
-  gsub(/  +/, " ", c)
-  svc(" (npm|pnpm|yarn|bun)( run| run-script)? (dev|start|serve|preview|watch)(:[a-z0-9_-]+)? ", "")
-  svc(" next (dev|start) ", "")
-  svc(" vite (dev |serve |preview |-)| vite $", "")
-  svc(" nodemon ", "")
-  svc(" python[0-9.]* -m http[.]server ", "")
-  svc("manage[.]py runserver ", "")
-  svc("[ /]rails (s|server) ", "")
-  svc("[ /]flask ([^ ]+ )*run ", "")
-  svc("[ /]uvicorn ", "")
-  svc("docker[ -]compose ([^ ]+ )*up ", " (-d|--detach) ")
-  svc(" tail ([^ ]+ )*(-[a-z]*f[a-z]*|--follow[^ ]*) ", "")
-  svc(" --watch[a-z-]*(=[^ ]*)? ", "")
-  svc(" -w ", " (grep|egrep|fgrep|rg|wc|ls|sort|diff|cut|tr|sed|awk|ps|date|stat|find|git|npm|pnpm|yarn|npx) ")
-  svc(" watch ", "")
+  s = clean(unesc($0))
+  ne = split(s, E, ";")
+  last = ""
+  for (q = ne; q >= 1; q--) { t = E[q]; gsub(/[ \t]/, "", t); if (t != "" && t != "}") { last = E[q]; break } }
+  np = split(last, part, "|")
+  if (!(np > 1 && consumer(part[np]))) for (q = 1; q <= np; q++) if (svcseg(part[q])) found = 1
 }
 END { exit !found }'
 
-is_service_cmd() { printf '%s\n' "$1" | awk "$SVC_AWK" 2>/dev/null; }
+# A command over 64 KiB is not looked at (the hook has seconds, not a minute): not a service.
+is_service_cmd() {
+  [ "${#1}" -le 65536 ] || return 1
+  printf '%s\n' "$1" | awk "$SVC_AWK" 2>/dev/null
+}
 
 # Does the last message of a turn ask the user something? exit 0 if so (one
 # JSON-escaped line on stdin). Only the end of the message counts: its last
@@ -1358,9 +1636,12 @@ is_service_cmd() { printf '%s\n' "$1" | awk "$SVC_AWK" 2>/dev/null; }
 # baramnida, hallaeyo.
 ASK_AWK='
 BEGIN {
-  nk = split("\352\271\214\354\232\224|\353\213\210\352\271\214|\355\225\230\354\213\234\352\262\240\354\226\264\354\232\224|\354\243\274\354\204\270\354\232\224|\354\243\274\354\213\234\352\262\240\354\226\264\354\232\224|\354\243\274\354\213\244\353\236\230\354\232\224|\353\202\230\354\232\224|\354\235\270\352\260\200\354\232\224|\353\260\224\353\236\215\353\213\210\353\213\244|\355\225\240\353\236\230\354\232\224", KO, "|")
+  nk = split("\352\271\214\354\232\224|\353\213\210\352\271\214|\355\225\230\354\213\234\352\262\240\354\226\264\354\232\224|\354\243\274\354\204\270\354\232\224|\354\243\274\354\213\234\352\262\240\354\226\264\354\232\224|\354\243\274\354\213\244\353\236\230\354\232\224|\353\202\230\354\232\224|\354\235\270\352\260\200\354\232\224|\353\260\224\353\236\215\353\213\210\353\213\244|\355\225\240\353\236\230\354\232\224|\353\266\200\355\203\201\353\223\234\353\246\275\353\213\210\353\213\244", KO, "|")
   ne = split("should i|shall i|would you like|do you want|let me know which|let me know whether|want me to|please confirm|please choose|please select|please tell me", EN, "|")
   FWQ = "\357\274\237"; FWE = "\357\274\201"; IDEO = "\343\200\202"
+  nf = split("\352\270\260\353\213\244|\354\260\270\352\263\240|\354\260\270\354\241\260|\354\226\221\355\225\264|\354\235\264\355\225\264|\352\260\220\354\225\210|\354\234\240\354\235\230", FYI, "|")
+  REQ["\354\243\274\354\204\270\354\232\224"] = 1; REQ["\353\260\224\353\236\215\353\213\210\353\213\244"] = 1; REQ["\353\266\200\355\203\201\353\223\234\353\246\275\353\213\210\353\213\244"] = 1
+  nh = split("\354\243\274\354\213\234\352\270\260|\355\225\230\354\213\234\352\270\260|\354\213\234\352\270\260", HON, "|")
   nc = split("\343\200\215|\343\200\217|\342\200\235|\342\200\231|\357\274\211|" FWQ "|" FWE "|" IDEO, CL, "|")
 }
 function hexv(h,   k, v, c) {
@@ -1413,13 +1694,27 @@ function add(x, term,   y) {
   if (y ~ /^[0-9]+[.)]?$/) return
   m++; S[m] = y; T[m] = term
 }
-function asks(k,   x, cr, low, j) {
+# "Wait a moment", "for your reference", "bear with us" end like a request
+# but ask for nothing: the word before the ending (past a polite "juusigi" /
+# "hasigi") starts with one of those words. "Check it, then decide for me"
+# keeps asking: its last word is the thing asked.
+function fyi(cr, sl,   t, k, n, W, w) {
+  t = substr(cr, 1, length(cr) - sl)
+  sub(/ +$/, "", t)
+  for (k = 1; k <= nh; k++) if (ends(t, HON[k])) { t = substr(t, 1, length(t) - length(HON[k])); break }
+  sub(/ +$/, "", t)
+  n = split(t, W, " ")
+  w = (n > 0) ? W[n] : ""
+  for (k = 1; k <= nf; k++) if (index(w, FYI[k]) == 1) return 1
+  return 0
+}
+function asks(k,   x, cr, low, j, p) {
   x = S[k]
   if (T[k] == "?" || T[k] == FWQ) return 1
   cr = core(x)
-  for (j = 1; j <= nk; j++) if (ends(cr, KO[j])) return 1
+  for (j = 1; j <= nk; j++) if (ends(cr, KO[j])) { if ((KO[j] in REQ) && fyi(cr, length(KO[j]))) continue; return 1 }
   low = " " tolower(cr) " "
-  for (j = 1; j <= ne; j++) if (index(low, " " EN[j] " ")) return 1
+  for (j = 1; j <= ne; j++) { p = index(low, " " EN[j] " "); if (p > 6 && substr(low, p - 6, 6) == "if you") continue; if (p > 0) return 1 }
   return 0
 }
 NR == 1 {
@@ -1436,12 +1731,17 @@ NR == 1 {
     if (substr(tr, 1, 3) == "```") { fence = !fence; continue }
     if (!fence) txt = txt L[i] "\n"
   }
-  m = 0; cur = ""; tl = length(txt)
+  m = 0; cur = ""; tl = length(txt); code = 0; line = ""
   for (i = 1; i <= tl; i++) {
-    c = substr(txt, i, 1); cur = cur c; term = ""
-    if (c == "\n") { add(cur, ""); cur = "" }
-    else if (c == "?" || c == "!") { nx = substr(txt, i + 1, 1); if (!(nx ~ /[A-Za-z0-9]/)) term = c }
-    else if (c == ".") { nx = substr(txt, i + 1, 1); if (nx == "" || nx == " " || nx == "\n") term = c }
+    c = substr(txt, i, 1); cur = cur c; line = line c; term = ""
+    if (c == "\n") { add(cur, ""); cur = ""; line = ""; code = 0 }
+    else if (c == "`") code = !code
+    # No sentence ends inside inline code or in a table row; `a?.b` is not one either.
+    else if ((c == "?" || c == "!") && !code && line !~ /^[ \t]*\|/) {
+      nx = substr(txt, i + 1, 1)
+      if (!(nx ~ /[A-Za-z0-9]/) && !(c == "?" && nx == "." && substr(txt, i + 2, 1) ~ /[A-Za-z0-9_$]/)) term = c
+    }
+    else if (c == "." && !code) { nx = substr(txt, i + 1, 1); if (nx == "" || nx == " " || nx == "\n") term = c }
     else if (c >= "\200") {
       t3 = substr(txt, i, 3)
       if (t3 == FWQ || t3 == FWE || t3 == IDEO) { term = t3; cur = cur substr(txt, i + 1, 2); i += 2 }
@@ -1531,6 +1831,7 @@ while IFS= read -r kv; do
     source=*) SRC=${kv#*=} ;;
     stop_hook_active=*) STOPACT=${kv#*=} ;;
     is_interrupt=*) ISINT=${kv#*=} ;;
+    agent_id=*) AGENTID=${kv#*=} ;;
     # Grok sends both: hook_event_name has Claude's PascalCase names.
     hook_event_name=*) EVENT=${kv#*=} ;;
     hookEventName=*) [ -n "$EVENT" ] || EVENT=${kv#*=} ;;
@@ -1584,12 +1885,17 @@ CWD_BASE=$(json_trim "${CWD:-$EXTRA}" 64 256 base)
 FP=$(printf '%s\t%s' "$TOOL" "$(json_trim "$DETAIL" 200 800)" | cksum | awk '{ print $1 }')
 
 # A `done` waits done_delay seconds (done_later) in case another Stop hook
-# keeps the agent going; any later event of the session ends that wait. Only
-# the turn-end events that send a `done` themselves leave it be (a newer one
-# replaces it).
+# keeps the agent going; any later event of the main thread ends that wait.
+# Only the turn-end events that send a `done` themselves leave it be (a newer
+# one replaces it), and so do the events of a subagent (agent_id is set,
+# whether it runs in the foreground or the background): a background
+# subagent's tool calls carry the session id and are no sign of the main
+# thread going on.
 case $AGENT:$EVENT in
   claude:Stop | codex:Stop | grok:Stop | gemini:AfterAgent) ;;
-  *) [ -f "$RUN_DIR/$SID.pend" ] && rm -f "$RUN_DIR/$SID.pend" 2>/dev/null ;;
+  *)
+    if [ -z "$AGENTID" ] && [ -f "$RUN_DIR/$SID.pend" ]; then rm -f "$RUN_DIR/$SID.pend" 2>/dev/null; fi
+    ;;
 esac
 
 # Lets a waiting permission hook see that the agent moved on. A new turn
@@ -1598,7 +1904,7 @@ esac
 note() { # turn | tool fingerprint
   if [ "$1" = turn ]; then
     printf '%s turn -\n' "$(date +%s)" >"$RUN_DIR/$SID.res" 2>/dev/null
-    rm -f "$RUN_DIR/$SID.goal" 2>/dev/null
+    rm -f "$RUN_DIR/$SID.goal" "$RUN_DIR/$SID.done" 2>/dev/null
     if [ -f "$RUN_DIR/$SID.bg" ]; then
       [ "$(sed -n 2p "$RUN_DIR/$SID.bg" 2>/dev/null)" = 7501 ] &&
         BG_SEQ="\\u001b]7501;state=clear:id=$BG_ID\\u0007"
@@ -1698,7 +2004,10 @@ bg_pause() {
       BG_SEQ="\\u001b]7501;state=working:id=$BG_ID${e:+:msg=$e}\\u0007"
     fi
   fi
-  printf '%s\n%s\n%s\n' "$BG_M" "$flag" "$RID" >"$RUN_DIR/$SID.bg" 2>/dev/null
+  # Line 1: the badge's message (the question when asking), 2: the OSC 7501
+  # flag, 3: the pause's token, 4: `ask` while the badge says `waiting`.
+  if [ "${1:-}" = ask ]; then bm=$(json_trim "$LAST" 80 320); else bm=$BG_M; fi
+  printf '%s\n%s\n%s\n%s\n' "$bm" "$flag" "$RID" "${1:-}" >"$RUN_DIR/$SID.bg" 2>/dev/null
   if [ "${1:-}" = ask ]; then
     MSG=$(json_trim "$LAST" 200 800)
     send_bg question
@@ -1746,10 +2055,14 @@ done_msg() { # what
 # Sends `done` (text MSG) done_delay seconds from now (default 3; 0: at once)
 # unless something of the session happens first: another Stop hook may have
 # kept the agent going, and then its next event (or Stop) comes within
-# moments. The event is made then (fresh rid and time).
+# moments. The event is made then (fresh rid and time). Only where the agent
+# has such an event to send (Claude Code, Grok Build): Codex, Gemini CLI and
+# OpenCode register none that would come within moments, so their default is
+# 0 (a second Stop still replaces the first within the wait if one is set).
 done_later() {
   [ -n "$LINKS" ] || return 0
-  dw=$(conf_int done_delay 3)
+  case $AGENT in codex | gemini | opencode) dw=0 ;; *) dw=3 ;; esac
+  dw=$(conf_int done_delay $dw)
   if [ "$dw" -le 0 ] || ! printf '%s\n' "$RID" >"$RUN_DIR/$SID.pend" 2>/dev/null; then
     send_bg done
     return 0
@@ -1777,13 +2090,12 @@ later_send() { # ev
 # (transcript) records `thread_goal_updated` with the goal's status, and the
 # model ends a goal with an `update_goal` call; the turns between are not
 # done. Measured with Codex 0.165.0.
-codex_goal_active() {
-  f=$(input_file "$TPATH")
-  [ -n "$f" ] || return 1
+codex_goal_active() { # rollout file
+  [ -n "$1" ] || return 1
   awk '
     /"type":"thread_goal_updated"/ { active = ($0 ~ /"status":"active"/); called = 0; next }
     /"name":"update_goal"/ { called = 1 }
-    END { exit !(active && !called) }' "$f" 2>/dev/null
+    END { exit !(active && !called) }' "$1" 2>/dev/null
 }
 
 # A goal can also end without a trace in the rollout (blocked after an
@@ -1791,9 +2103,10 @@ codex_goal_active() {
 # turn starts. Measured: Codex starts a goal's next turn within milliseconds
 # (task_started). If none started codex_goal_check seconds (default 5) after
 # this Stop, the turn was the last: `done` goes then.
-codex_goal_later() {
+codex_goal_later() { # rollout file
   [ -n "$LINKS" ] || return 0
-  off=$(wc -c <"$f" 2>/dev/null | tr -d ' ')
+  gf=$1
+  off=$(wc -c <"$gf" 2>/dev/null | tr -d ' ')
   is_uint "$off" || return 0
   w=$(conf_int codex_goal_check 5)
   MSG=$(json_trim "$LAST" 200 800)
@@ -1802,17 +2115,19 @@ codex_goal_later() {
   (
     sleep "$w"
     [ "$(cat "$RUN_DIR/$SID.goal" 2>/dev/null)" = "$RID" ] || exit 0
-    tail -c +$((off + 1)) "$f" 2>/dev/null | awk '/"type":"task_started"/ { found = 1 } END { exit !found }' && exit 0
+    tail -c +$((off + 1)) "$gf" 2>/dev/null | awk '/"type":"task_started"/ { found = 1 } END { exit !found }' && exit 0
     rm -f "$RUN_DIR/$SID.goal" 2>/dev/null
     later_send done
   ) </dev/null >/dev/null 2>&1 &
 }
 
-# The status of a running turn: `background` while a paused session's
-# background subagents run tools, `running` otherwise.
+# The status of a running turn: while a paused session's background
+# subagents run tools, the pause's own badge (`waiting` when the turn paused
+# on a question, `background` otherwise); `running` otherwise.
 print_running() {
   if bg_paused; then
-    print_state background "$(head -c 400 "$RUN_DIR/$SID.bg" 2>/dev/null | head -n 1)"
+    bm=$(head -c 400 "$RUN_DIR/$SID.bg" 2>/dev/null | head -n 1)
+    if [ "$(sed -n 4p "$RUN_DIR/$SID.bg" 2>/dev/null)" = ask ]; then print_state waiting "$bm"; else print_state background "$bm"; fi
   else
     print_state running
   fi
@@ -1888,6 +2203,10 @@ stop_done() {
   if [ -n "${1:-}" ]; then MSG=$(done_msg "$1"); else MSG=$(json_trim "$LAST" 200 800); fi
   [ "$STOPACT" = true ] && XFLAGS=',"stop_hook_active":true'
   done_later
+  # The turn's done is sent (or pending): Claude Code's idle_prompt, 60 s
+  # later, repeats it (the next turn note takes the mark back).
+  # (printf, not `:`: a failed redirection of a special builtin ends the shell.)
+  printf '' 2>/dev/null >"$RUN_DIR/$SID.done"
   usage_report
   print_state done
   turn_end
@@ -1934,7 +2253,8 @@ stop_flow() {
     return 0
   fi
   usage_report
-  if ask_detect "$LAST"; then bg_pause ask; else bg_pause; fi
+  # OpenCode's LAST is the session's title, not a message to the person.
+  if [ "$AGENT" != opencode ] && ask_detect "$LAST"; then bg_pause ask; else bg_pause; fi
   turn_end
 }
 
@@ -1968,6 +2288,9 @@ case $AGENT:$EVENT in
         # Claude Code sends it 60 s after a turn while only background shells
         # or monitors run: the work is not waiting for the user.
         bg_paused && finish
+        # Already told by this turn's done: the prompt repeats it. Without a
+        # done (interrupt, StopFailure, no Stop hook) it stays the safety net.
+        [ -f "$RUN_DIR/$SID.done" ] && finish
         MSG=$(json_trim "$LAST" 200 800)
         send_bg question
         ;;
@@ -1992,8 +2315,10 @@ case $AGENT:$EVENT in
     print_state running
     ;;
   claude:PostToolUse | claude:PostToolUseFailure)
-    if [ "$EVENT" = PostToolUseFailure ] && [ "$ISINT" = true ]; then
-      # Esc during a tool call: the turn is over (no Stop follows).
+    if [ "$EVENT" = PostToolUseFailure ] && [ "$ISINT" = true ] && [ -z "$AGENTID" ]; then
+      # Esc during a tool call: the turn is over (no Stop follows). Not when
+      # a subagent's tool was interrupted (agent_id is set): the main
+      # session's wait goes on.
       note turn
       print_state idle
       finish
@@ -2015,9 +2340,11 @@ case $AGENT:$EVENT in
   claude:Stop | codex:Stop)
     note turn
     case $LAST in '{\"title\":'*) finish ;; esac
-    if [ "$AGENT" = codex ] && codex_goal_active; then
+    gf=''
+    [ "$AGENT" = codex ] && gf=$(input_file "$TPATH")
+    if [ "$AGENT" = codex ] && codex_goal_active "$gf"; then
       usage_report
-      codex_goal_later
+      codex_goal_later "$gf"
       turn_end
       finish
     fi
@@ -2118,7 +2445,7 @@ case $AGENT:$EVENT in
     # copy of one event.
     case $NTYPE in
       permission_prompt) ;;
-      idle_prompt) bg_paused && finish ;;
+      idle_prompt) bg_paused && finish; [ -f "$RUN_DIR/$SID.done" ] && finish ;;
       *) finish ;;
     esac
     once "$(printf '%s|%s|%s|%s|%s' "$EVENT" "$SID" "$NTYPE" "$GKEY" "$LAST" | cksum | awk '{ print $1 }')" || finish
@@ -2148,11 +2475,24 @@ case $AGENT:$EVENT in
     send_bg question
     ;;
   opencode:Stop)
-    MSG=$(json_trim "$LAST" 200 800)
-    send_bg done
-    turn_end
+    # The plugin lists the background shells still open (background_tasks):
+    # a dev server does not hold the done back, other work waits as for
+    # Claude Code. OpenCode does not say who started a turn (the plugin's
+    # UserPromptSubmit stands for every turn start): shells that were open at
+    # the last Stop do not hold this one back.
+    note turn
+    stop_flow
+    ;;
+  opencode:UserPromptSubmit)
+    # Sent by the plugin when a session's own turn starts (a person's, or the
+    # session taken up again by a background shell): ends a pause, and the
+    # shells open at the last Stop do not hold this turn's Stop back.
+    note turn
+    PROMPT_USER=1
+    turn_mark
     ;;
   opencode:StopFailure)
+    note turn
     ev=error
     case $ERR in ProviderAuthError | *[Aa]uth*) ev=auth ;; esac
     MSG=$(json_trim "$ERR: $LAST" 200 800)

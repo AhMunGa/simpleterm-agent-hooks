@@ -34,11 +34,18 @@ const seen = (globalThis.__simpletermSeen ??= new Set());
 // Which sessions are running and whose child each one is, as every instance
 // sees it (an event may be handled by any of them).
 const sessions = (globalThis.__simpletermSessions ??= { running: new Set(), parent: new Map() });
-// Background shells still running (shell id -> session id). A shell started
-// with `background: true` outlives the turn, and its exit starts the session
-// again (measured on 2.2.5: execution.succeeded 0.1 s after shell.created,
-// shell.exited 25 s later, then execution.started and .succeeded again).
+// Background shells still running (shell id -> {owner session id, command}).
+// A shell started with `background: true` outlives the turn, and its exit
+// starts the session again (measured on 2.2.5: execution.succeeded 0.1 s
+// after shell.created, shell.exited 25 s later, then execution.started and
+// .succeeded again). A shell that never exits (a dev server) must not hold
+// the done back for good: the hook gets the open shells with the Stop and
+// decides as it does for Claude Code's background_tasks (a service is not
+// waited for, other shells are, for a while).
 const shells = (globalThis.__simpletermShells ??= new Map());
+
+// Permission requests that were answered (bounded), for one still waiting on its session lane.
+const replied = (globalThis.__simpletermReplied ??= new Set());
 
 function firstSeen(id) {
   if (!id) return true;
@@ -61,7 +68,7 @@ function track(event) {
     const info = d.info || {};
     const owner = info.metadata && info.metadata.sessionID;
     if (info.id && owner && info.status !== "exited") {
-      shells.set(info.id, owner);
+      shells.set(info.id, { owner, command: String(info.command || "") });
       if (shells.size > 500) shells.delete(shells.keys().next().value);
     }
     return;
@@ -95,10 +102,14 @@ function track(event) {
 }
 
 // Runs the hook; resolves with the first JSON object it printed, or null.
-function runHook(event, cwd, waits, key) {
+function runHook(event, cwd, waits, key, job) {
   return new Promise((resolve) => {
     let out = "";
     let child;
+    if (job && job.abandoned) {
+      resolve(null);
+      return;
+    }
     try {
       child = spawn("sh", [HOOK, "opencode"], {
         cwd: cwd || process.cwd(),
@@ -110,6 +121,7 @@ function runHook(event, cwd, waits, key) {
       return;
     }
     if (key) waits.set(key, child);
+    if (job) job.child = child;
     child.on("error", () => resolve(null));
     child.stdout.on("data", (chunk) => {
       if (out.length < 65536) out += chunk;
@@ -145,14 +157,17 @@ async function parentOf(ctx, sessionID) {
   return parent;
 }
 
-// True if a background shell of the session or of a direct child was still
-// running (`open`, the owners taken when the event arrived): its exit wakes
-// that session again.
-async function hasOpenShell(ctx, sessionID, open) {
-  for (const owner of open) {
-    if (owner === sessionID || (await parentOf(ctx, owner)) === sessionID) return true;
+// The background shells of the session or of a direct child that were still
+// running (`open`, taken when the event arrived), as the hook's
+// background_tasks: the exit of one wakes that session again.
+async function openShellsOf(ctx, sessionID, open) {
+  const mine = [];
+  for (const sh of open) {
+    if (sh.owner === sessionID || (await parentOf(ctx, sh.owner)) === sessionID) {
+      mine.push({ id: sh.id, type: "shell", command: sh.command });
+    }
   }
-  return false;
+  return mine.slice(0, 10);
 }
 
 // True if a direct child of the session was running (`running`, taken when
@@ -166,6 +181,38 @@ async function hasRunningChild(ctx, sessionID, running) {
   return false;
 }
 
+// The turn events of one session run one after the other: a start must reach
+// the hook before the end of the turn it belongs to, or it would undo the
+// pause that end made.
+const lanes = (globalThis.__simpletermLanes ??= new Map());
+// A job that hangs (a session lookup, the hook) must not hold the session's
+// later events for good: after this long the lane goes on without it.
+const LANE_TIMEOUT_MS = Number(process.env.SIMPLETERM_LANE_TIMEOUT_MS) > 0 ? Number(process.env.SIMPLETERM_LANE_TIMEOUT_MS) : 15000;
+// A lane job gets `job`: when the lane gives up on it (`abandoned`) it must not
+// start a hook any more (a late start would undo the pause of a later Stop, a
+// late Stop would write one during the next turn), and a hook it has running
+// is stopped.
+function inLane(sessionID, work) {
+  const job = { abandoned: false, child: null };
+  const run = (lanes.get(sessionID) || Promise.resolve()).then(() => {
+    let timer;
+    const limit = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        job.abandoned = true;
+        if (job.child) job.child.kill("SIGTERM");
+        resolve();
+      }, LANE_TIMEOUT_MS);
+    });
+    return Promise.race([work(job), limit]).finally(() => clearTimeout(timer));
+  });
+  const tail = run.catch(() => {});
+  lanes.set(sessionID, tail);
+  tail.then(() => {
+    if (lanes.get(sessionID) === tail) lanes.delete(sessionID);
+  });
+  return run;
+}
+
 export default {
   id: "simpleterm",
   setup(ctx) {
@@ -177,13 +224,14 @@ export default {
       track(event);
       const done = event.type === "session.execution.succeeded";
       const running = done ? [...sessions.running] : [];
-      const open = done ? [...new Set(shells.values())] : [];
+      const open = done ? [...shells].map(([id, v]) => ({ id, owner: v.owner, command: v.command })) : [];
       const d = event.data || {};
       if (event.type === "permission.replied") {
         // Answered (in the terminal, or by us): stop waiting for a device.
         // Every instance looks; the waiting one may not see this event first.
         const child = waits.get(d.requestID);
         if (child) child.kill("SIGTERM");
+        remember(replied, d.requestID, 500); // a request still waiting on the session lane is dropped
         return;
       }
       const where = event.location?.directory;
@@ -192,6 +240,10 @@ export default {
       const cwd = where || home;
       switch (event.type) {
         case "permission.asked": {
+          // After the turn events of the session that came before it: a late
+          // turn start would otherwise end this wait as "answered locally".
+          await (lanes.get(d.sessionID) || Promise.resolve());
+          if (replied.has(d.id)) return;
           const detail = Array.isArray(d.resources) ? d.resources.join(" ") : String(d.message || "");
           const out = await runHook(
             {
@@ -217,34 +269,18 @@ export default {
             .catch(() => {}); // answered in the terminal first
           return;
         }
+        case "session.execution.started":
+          // A turn of the session's own starts (a person's prompt, or the
+          // session taken up again): the hook ends the pause of the last
+          // Stop, so a long turn is not announced done by that pause's timer.
+          return inLane(d.sessionID, async (job) => {
+            const info = await sessionInfo(ctx, d.sessionID);
+            if (job.abandoned || info.parentID) return; // given up on, or a subagent's session
+            await runHook({ hook_event_name: "UserPromptSubmit", session_id: d.sessionID, cwd }, cwd, undefined, undefined, job);
+          });
         case "session.execution.succeeded":
-        case "session.execution.failed": {
-          const info = await sessionInfo(ctx, d.sessionID);
-          sessions.parent.set(d.sessionID, info.parentID || "");
-          if (info.parentID) return; // a subagent's session
-          const failed = event.type === "session.execution.failed";
-          if (!failed && (await hasRunningChild(ctx, d.sessionID, running))) return;
-          if (!failed && (await hasOpenShell(ctx, d.sessionID, open))) return;
-          const err = d.error || {};
-          await runHook(
-            failed
-              ? {
-                  hook_event_name: "StopFailure",
-                  session_id: d.sessionID,
-                  cwd,
-                  error: String(err.type || "error"),
-                  last_assistant_message: String(err.message || ""),
-                }
-              : {
-                  hook_event_name: "Stop",
-                  session_id: d.sessionID,
-                  cwd,
-                  last_assistant_message: String(info.title || ""),
-                },
-            cwd,
-          );
-          return;
-        }
+        case "session.execution.failed":
+          return inLane(d.sessionID, (job) => turnEnd(event, d, cwd, running, open, job));
         case "form.created": {
           // data: { form: { id, sessionID, title, fields, ... } }
           const form = d.form || d;
@@ -260,6 +296,38 @@ export default {
           return;
         }
       }
+    }
+
+    async function turnEnd(event, d, cwd, running, open, job) {
+      const info = await sessionInfo(ctx, d.sessionID);
+      sessions.parent.set(d.sessionID, info.parentID || "");
+      if (info.parentID) return; // a subagent's session
+      const failed = event.type === "session.execution.failed";
+      if (!failed && (await hasRunningChild(ctx, d.sessionID, running))) return;
+      const background = failed ? [] : await openShellsOf(ctx, d.sessionID, open);
+      const err = d.error || {};
+      if (job.abandoned) return;
+      await runHook(
+        failed
+          ? {
+              hook_event_name: "StopFailure",
+              session_id: d.sessionID,
+              cwd,
+              error: String(err.type || "error"),
+              last_assistant_message: String(err.message || ""),
+            }
+          : {
+              hook_event_name: "Stop",
+              session_id: d.sessionID,
+              cwd,
+              last_assistant_message: String(info.title || ""),
+              ...(background.length ? { background_tasks: background } : {}),
+            },
+        cwd,
+        undefined,
+        undefined,
+        job,
+      );
     }
 
     (async () => {

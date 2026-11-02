@@ -131,6 +131,9 @@ export const SimpleTermAgentHooks = async ({ client, directory }) => {
         return;
       }
       case "session.error": {
+        // An errored session is no longer busy: a stuck entry would hold
+        // its parent's done back for good.
+        busy.delete(p.sessionID);
         const e = p.error || {};
         if (e.name === "MessageAbortedError") return; // stopped by the user
         await runHook(
