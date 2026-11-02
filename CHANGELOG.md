@@ -52,19 +52,19 @@
     `bg_done_after`; the note is kept whole when the message is long. When in doubt it is not one (a
     wrong service sends an early `done`, a missed one only delays it). The command is cut at `;`,
     `&&`, `||`, `&` and line breaks and only the last element counts (any command of its pipeline
-    may be the service); continuation lines are joined, heredoc bodies dropped, quoted text
-    ignored; at the command position (after `VAR=val`, `npx`, `pnpm exec|dlx`, `yarn dlx`, `bunx`,
+    may be the service); comments dropped (`# ... & ...`), continuation lines joined, heredoc bodies dropped, quoted text
+    ignored, a pipeline whose last command ends early (`head`, `grep -q|-m`) is no service; at the command position (after `VAR=val`, `npx`, `pnpm exec|dlx`, `yarn dlx`, `bunx`,
     `uv|poetry run`, `bundle exec`, `env`, `nohup`, `exec`, `sudo`) an explicit (tool, subcommand)
     table decides, with only known options between the two: `npm|pnpm|yarn|bun [run]
     dev|start|serve|preview|watch` (also `dev:web`, `--filter web`; `dev:setup`, `start:db` and
     other finite suffixes are jobs), `turbo`, `nx`, `next`, `ng`, `astro|nuxt`, `expo`, `storybook`,
-    `vite` (not `vite build`), `vitest -w|dev|watch` (a plain `vitest` runs once under an agent),
+    `vite` (not `vite build`), `parcel <entry>|serve|watch`, `vitest -w|dev|watch` (a plain `vitest` runs once under an agent),
     `webpack serve`, `live-server`, `nodemon`, `uvicorn`, `gunicorn`, `python -m http.server`,
     `manage.py runserver`, `rails s`, `flask run`, `php artisan serve`, `hugo serve`, `jekyll
     serve`, `node|deno --watch`, `bun --watch`, `docker compose up` (not with `-d`, `--wait`,
     `--abort-on-container-exit`, `--exit-code-from`, ...), `docker|kubectl logs -f` (not `job/`),
     `kubectl port-forward|get -w`, `tail -f` (not `--pid`), `journalctl -f`, `watch`, and watchers by
-    their own flag (`tsc|webpack|rollup|swc|mocha -w`, `jest --watch|--watchAll`, `sass|esbuild
+    their own flag (`tsc|webpack|rollup|swc|mocha|sass -w|--watch`, `jest --watch|--watchAll`, `esbuild
     --watch`, `tailwindcss -w`, `cargo watch`, `tsx watch`, `watchexec`). `-w` is never global
     (`make -w`, `curl -w`, `docker exec -w`, `jest -w` are not services).
   - **A prompt you typed is answered**: every `Stop` records the ids of the running tasks; when a

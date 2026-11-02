@@ -858,9 +858,11 @@ def t_service_shells(s):
     def shell(cmd, desc="Start the dev server"):
         return dict(SHELL, id="s" + str(abs(hash(cmd)) % 10**8), description=desc, command=cmd)
 
-    def stop(sid, tasks, last="Server started.", extra=None, env=None):
+    def stop(sid, tasks, last="Server started.", extra=None, env=None, amp=False):
         ev = cc_event(sid, "Stop", stop_hook_active=False, last_assistant_message=last, background_tasks=tasks, session_crons=[],
                       **(extra or {}))
+        if amp:
+            ev = ev.replace("&", "\u0026").replace("<", "\u003c").replace(">", "\u003e")
         return s.run("claude", ev, dict(st, **(env or {})))[1]
 
     out = stop("sv1", [shell("npm run dev")])
@@ -878,8 +880,9 @@ def t_service_shells(s):
     # The commands the table knows, and some it must leave alone.
     s.ctl("/_ctl/reset", {})
     # One table (SVC_AWK): a command is a service only at the command position of the last list element and when
-    # (tool, subcommand) is known; when in doubt it is not one (a wrong service sends an early done).
-    for cmd, service in (
+    # (tool, subcommand) is known; when in doubt it is not one (a wrong service sends an early done). A third
+    # field 'amp' sends the command the way Go writes JSON (& as \u0026).
+    for cmd, service, *flag in (
             ('npm run dev -- --port 3000', True), ('pnpm run watch', True), ('next dev', True),
             ('python3 -m http.server 8000', True), ('python manage.py runserver 0.0.0.0:8000', True), ('bin/rails server', True),
             ('flask --app app run', True), ('uvicorn app:app --reload', True), ('docker compose up', True),
@@ -915,7 +918,7 @@ def t_service_shells(s):
             ('npm --prefix web run dev', True), ('sudo npm run dev', True), ('env FOO=1 npm run dev', True),
             ('./node_modules/.bin/vite', True), ('npx -y vite', True), ('uv run flask run', True), ('pnpm dlx serve', True),
             ('pnpm exec vite', True), ('npm run -- dev', False), ('tsc --noEmit -- -w', False),
-            ('sass --watch a.scss b.css', True), ('sass -w a.scss b.css', False), ('npx jest -w 4', False),
+            ('sass --watch a.scss b.css', True), ('sass -w a.scss b.css', True), ('npx jest -w 4', False),
             ('jest -w 2 --ci', False), ('npx jest --maxWorkers=2', False), ('npx jest --watchAll=false -w 2', False),
             ('jest --watchAll', True), ('tsx scripts/gen.ts -w', False), ('tsx watch src/index.ts', True),
             ('node scripts/gen.js --watch', False), ('python script.py -m http.server', False),
@@ -951,9 +954,35 @@ def t_service_shells(s):
             ('./gradlew bootRun', False), ('go run ./cmd/server', False), ('mocha -w', True), ('cargo watch -x test', True),
             ('nx run web:serve-static', False), ('npx vite --open', True), ('python -m pytest tests -m uvicorn', False),
             ('npm test -- -w 4', False), ('npx jest --watch', True), ("cat <<EOF > notes\ndon't stop\nEOF\nnpm run dev", True),
-            ('npm run dev \\\n  -- --port 3000', True)):
+            ('npm run dev \\\n  -- --port 3000', True), ('npm run build  # build & watch for type errors', False),
+            ('npm run build  # then: preview & serve', False), ('pnpm test  # unit tests; npm run dev is separate', False),
+            ('npm run lint\n# next: start dev & watch', False), ('curl http://x/#/a && npm test', False),
+            ('npm run dev -- --name "<<web>>" &\nsleep 5 && npm run test:e2e', False),
+            ("npm run dev  # it's the dev server", True), ('echo ${#a[@]}; npm run dev', True),
+            ("npm run dev &  # it's the dev server\nnpx playwright test", False), ('npm run dev # comment \\\nsleep 1', False),
+            ('echo a#b; npm run dev', True), ('tail -n 50 -f server.log | grep -m1 "ready"', False),
+            ('docker compose logs -f api | grep -q "listening"', False), ('tail -f build.log | head -n 20', False),
+            ('tail -f build.log | grep error', True), ('tail -f build.log | tee out.log', True), ('npm run dev | cat', True),
+            ("printf $'don\\'t; npm run dev\\n' > notes.txt", False), ("echo 'it'\\''s; npm run dev'", False),
+            ('cat <<-EOF > x\n\tnpm run dev\n\tEOF\nnpm test', False), ('cat <<"EOF" > x\nnpm run dev\nEOF\nnpm test', False),
+            ("cat << 'EOF' > x\nnpm run dev\nEOF\nnpm test", False), ('cat <<\\EOF > x\nnpm run dev\nEOF\nnpm test', False),
+            ('cat <<END-OF-FILE > x\nnpm run dev\nEND-OF-FILE\nnpm test', False),
+            ('npm run dev > dev.log 2>&1 &\necho "waiting for <<READY>> marker"\nnpx wait-on http://localhost:3000 && npm run test:e2e', False),
+            ('python3 -c "print(1 << SHIFT)"\nnpm test', False), ('( cd web && npm run dev ) &', True),
+            ('{ npm run dev; } &', True), ('nohup npm run dev > /dev/null 2>&1 &', True), ('exec npm run dev', True),
+            ('time npm run dev', True), ('time npm run build', False), ('npm run dev 2>&1 | tee dev.log', True),
+            ('npm test 2>&1 | tee test.log', False), ('npm run dev |& tee dev.log', True), ('npm run dev &> dev.log &', True),
+            ('vite --host', True), ('npx vite --host', True), ('vite --host 0.0.0.0', True), ('vite --host --port 3000', True),
+            ('deno run -A --watch main.ts', True), ('webpack w', True), ('webpack server', True), ('webpack s', True),
+            ('parcel src/index.html', True), ('parcel serve src/index.html', True), ('parcel watch src/index.html', True),
+            ('parcel build src/index.html', False), ('npm run dev:deploy', False), ('npm run dev:typecheck', False),
+            ('npm run dev:format', False), ('docker compose up -dV', False), ('docker compose up --detach=true', False),
+            ('kubectl logs -f job.batch/migrate', False), ('kubectl logs -f -l job-name=migrate', False),
+            ('gunicorn --check-config app:app', False), ('node run --watch', False), ('flask -A app run', False),
+            ('npm run dev & npx wait-on http://localhost:3000 && npx playwright test', False, 'amp'),
+            ('npm run dev &', True, 'amp'), ('cd web && npm run dev', True, 'amp'), ("printf $'it\\'s'; npm run dev", True)):
         s.ctl("/_ctl/reset", {})
-        out = stop("sv3-%d" % abs(hash(cmd)), [shell(cmd, "Run it")])
+        out = stop("sv3-%d" % abs(hash(cmd)), [shell(cmd, "Run it")], amp=bool(flag))
         got = seqs(out).startswith("\x1b]9;simpleterm:state=done")
         s.check("service shell: %r -> %s" % (cmd, "service" if service else "waits"), got == service, repr(out))
     time.sleep(1)
@@ -1425,6 +1454,8 @@ def t_events(s):
         j = json.dumps({"type": "agent-turn-complete", "thread-id": "x", "turn-id": "y", "cwd": "/r",
                         "client": "codex-tui", "input-messages": [first], "last-assistant-message": "done"})
         s.run("codex-notify", "", args=(j,))
+        if expect:
+            wait_for(lambda: s.records("/v1/ingest"), 20)
         time.sleep(1.5)
         s.check("events: codex notify %s" % ("filtered" if expect == 0 else "sent"),
                 len(s.records("/v1/ingest")) == expect, str(s.records("/v1/ingest"))[:200])
@@ -1959,6 +1990,7 @@ def t_usage_codex(s):
         tun.wait(5)
     s.ctl("/_ctl/reset", {})
     s.run("codex", json.dumps(dict(inp, transcript_path=None, session_id="cx2")))
+    wait_for(lambda: ingests(s, "done"), 20)
     time.sleep(1.5)
     s.check("usage codex: null transcript_path -> no usage", not ingests(s, "usage") and ingests(s, "done"))
 
@@ -2691,7 +2723,8 @@ def t_opencode_js(s):
     node_plugin(s, "v2", {"directory": d, "sessions": {"ses_h": {"title": "Late"}}, "wait": 5000,
                           "env": {"SIMPLETERM_LANE_TIMEOUT_MS": "600"}, "getDelay": {"ses_h": {"ms": 2500, "times": 1}},
                           "steps": [ev(82, "session.execution.started", "ses_h"), ev(83, "session.execution.succeeded", "ses_h")]})
-    rec = ingests(s, "done")
+    rec = wait_for(lambda: ingests(s, "done"), 20)
+    time.sleep(1)
     s.check("opencode 2.x: the start the lane gave up on sends nothing when its lookup returns late",
             len(rec) == 1 and not (run_dir / "ses_h.turn").exists(), str(rec)[:200] + str(list(run_dir.glob("ses_h*"))))
     s.setup([(LINK_A, {"push": "disabled"})])

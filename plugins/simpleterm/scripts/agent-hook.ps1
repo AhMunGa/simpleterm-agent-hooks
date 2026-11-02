@@ -1528,9 +1528,10 @@ function Test-AskText([string]$raw) {
 # the inside of quotes emptied, then cut at ; && || & and line breaks into list
 # elements: only the last one counts, and any command of its pipeline may be
 # the service.
-$SvcValueFlags = ' --filter -F -C --cwd --prefix --dir -p --project --workspace -w --app -A --namespace -n --context --kubeconfig -f --file --env-file --project-name --profile --port --host --config -c --mode -m --base --logLevel -l --outDir '
-$SvcBoolFlags = ' -r --recursive -s --silent -q --quiet --if-present --workspaces -ws --include-workspace-root --stream --parallel --no-bail --open --force --strictPort --debug --verbose -v --no-color --offline --prefer-offline --ignore-scripts '
-$SvcDoneWords = ' setup migrate migration db seed build init prepare install reset clean test lint check generate gen codegen '
+$SvcValueFlags = ' --filter -F -C --cwd --prefix --dir -p --project --workspace -w --app --namespace -n --context --kubeconfig -f --file --env-file --project-name --profile --port --host --config -c --mode -m --base --logLevel -l --outDir '
+$SvcBoolFlags = ' -r --recursive -s --silent -q --quiet --if-present --workspaces -ws --include-workspace-root --stream --parallel --no-bail --open --force --strictPort --debug --verbose -v --no-color --offline --prefer-offline --ignore-scripts -A '
+$SvcDoneWords = ' setup migrate migration db seed build init prepare install reset clean test lint check generate gen codegen deploy publish release typecheck format once '
+$SvcUnk = 1000000
 $SvcWords = @()
 $SvcN = 0
 
@@ -1541,15 +1542,18 @@ function Get-SvcWord([int]$j) {
     return ''
 }
 
-# The index of the first word from j on that is not an option (or an option
-# value); N for a lone --, N + 1 when an option is not known.
+# The index of the first word from j on that is not an option (or an option value); N at
+# the end or a lone --, $SvcUnk when an option is not known. A value flag takes the next
+# word only when that is no option.
 function Skip-SvcOpts([int]$j) {
     while ($j -lt $Script:SvcN -and (Get-SvcWord $j).StartsWith('-')) {
         $x = Get-SvcWord $j
         if ($x -ceq '--') { return $Script:SvcN }
         if ($x.IndexOf('=') -ge 0 -or $SvcBoolFlags.Contains(' ' + $x + ' ')) { $j++ }
-        elseif ($SvcValueFlags.Contains(' ' + $x + ' ')) { $j += 2 }
-        else { return ($Script:SvcN + 1) }
+        elseif ($SvcValueFlags.Contains(' ' + $x + ' ')) {
+            if (($j + 1) -lt $Script:SvcN -and -not (Get-SvcWord ($j + 1)).StartsWith('-')) { $j += 2 } else { $j++ }
+        }
+        else { return $SvcUnk }
     }
     return $j
 }
@@ -1564,15 +1568,15 @@ function Test-SvcAnyOpt([int]$j, [string]$re) {
     return $false
 }
 
-# Leading options only (tools that run a script: the script ends them); `run` may come between.
-function Test-SvcLeadOpt([int]$j, [string]$re) {
+# Leading options only (tools that run a script: the script ends them); `run` may come between when allowed.
+function Test-SvcLeadOpt([int]$j, [string]$re, [bool]$allowRun) {
     while ($j -lt $Script:SvcN) {
         $x = Get-SvcWord $j
         if ($x -ceq '--') { return $false }
-        if ($x -ceq 'run') { $j++; continue }
+        if ($allowRun -and $x -ceq 'run') { $j++; continue }
         if (-not $x.StartsWith('-')) { return $false }
         if ($x -cmatch $re) { return $true }
-        if ($x.IndexOf('=') -lt 0 -and $SvcValueFlags.Contains(' ' + $x + ' ')) { $j += 2 } else { $j++ }
+        if ($x.IndexOf('=') -lt 0 -and $SvcValueFlags.Contains(' ' + $x + ' ') -and ($j + 1) -lt $Script:SvcN -and -not (Get-SvcWord ($j + 1)).StartsWith('-')) { $j += 2 } else { $j++ }
     }
     return $false
 }
@@ -1597,7 +1601,7 @@ function Test-ServiceSegment([string]$seg) {
         $w = Get-SvcWord $i
         if ($w -cmatch '^[A-Za-z_][A-Za-z0-9_]*=') { $i++; continue }
         $lw = Get-SvcBase $w
-        if ($lw -cmatch '^(do|then|else|elif|if|while|until|time|nohup|exec|bunx|!)$') { $i++; continue }
+        if ($lw -cmatch '^(do|then|else|elif|if|while|until|time|nohup|exec|bunx|!|[{}])$') { $i++; continue }
         if ($lw -ceq 'npx') {
             $i++
             while ($i -lt $n -and (Get-SvcWord $i).StartsWith('-')) {
@@ -1619,7 +1623,7 @@ function Test-ServiceSegment([string]$seg) {
     $c = Get-SvcBase (Get-SvcWord $i)
     $j = $i + 1
     if ($c -cmatch '^(npm|pnpm|yarn|bun)$') {
-        if ($c -ceq 'bun' -and (Test-SvcLeadOpt $j '^--(watch|hot)$')) { return $true }
+        if ($c -ceq 'bun' -and (Test-SvcLeadOpt $j '^--(watch|hot)$' $true)) { return $true }
         $j = Skip-SvcOpts $j
         if ($c -ceq 'yarn' -and (Get-SvcWord $j) -ceq 'workspace') { $j = Skip-SvcOpts ($j + 2) }
         if ((Get-SvcWord $j) -ceq 'run' -or (Get-SvcWord $j) -ceq 'run-script') { $j = Skip-SvcOpts ($j + 1) }
@@ -1630,7 +1634,7 @@ function Test-ServiceSegment([string]$seg) {
     if ($c -ceq 'vite') {
         if (Test-SvcAnyOpt $j '^(-v|-h|--version|--help)$') { return $false }
         $j = Skip-SvcOpts $j
-        if ($j -gt $n) { return $false }
+        if ($j -ge $SvcUnk) { return $false }
         $x = Get-SvcWord $j
         return ($j -ge $n -or $x -cmatch '^(dev|serve|preview)$' -or $x -cmatch '^[0-9]*[<>]' -or $x.Contains('/') -or $x.Contains('.'))
     }
@@ -1638,9 +1642,11 @@ function Test-ServiceSegment([string]$seg) {
         return ((Test-SvcAnyOpt $j '^(-w|--watch|--watch=true|--watch=1)$') -or (Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(dev|watch)$')
     }
     if ($c -ceq 'watch') { return (-not (Test-SvcAnyOpt $j '^(-[a-zA-Z]*[ge][a-zA-Z]*|--chgexit|--errexit)$')) }
-    if ($c -cmatch '^(nodemon|uvicorn|gunicorn|watchexec|serve|http-server|live-server|webpack-dev-server)$') { return $true }
-    if ($c -ceq 'node') { return (Test-SvcLeadOpt $j '^--watch(-path(=.*)?)?$') }
-    if ($c -ceq 'deno') { return (Test-SvcLeadOpt $j '^--watch(=.*)?$') }
+    if ($c -ceq 'gunicorn') { return (-not (Test-SvcAnyOpt $j '^--check-config$')) }
+    if ($c -cmatch '^(nodemon|uvicorn|watchexec|serve|http-server|live-server|webpack-dev-server)$') { return $true }
+    if ($c -ceq 'parcel') { $j = Skip-SvcOpts $j; return ($j -lt $n -and (Get-SvcWord $j) -cne 'build') }
+    if ($c -ceq 'node') { return (Test-SvcLeadOpt $j '^--watch(-path(=.*)?)?$' $false) }
+    if ($c -ceq 'deno') { return (Test-SvcLeadOpt $j '^--watch(=.*)?$' $true) }
     if ($c -cmatch '^python[0-9.]*$') {
         for ($k = $j; $k -lt $n; $k++) {
             $x = Get-SvcWord $k
@@ -1662,7 +1668,7 @@ function Test-ServiceSegment([string]$seg) {
         if ($c -ceq 'docker' -and (Get-SvcWord $j) -ceq 'compose') { $j = Skip-SvcOpts ($j + 1) }
         elseif ($c -ceq 'docker') { if ((Get-SvcWord $j) -cne 'logs') { return $false } }
         if ((Get-SvcWord $j) -ceq 'up') {
-            return (-not (Test-SvcAnyOpt ($j + 1) '^(-d|--detach|--wait|--abort-on-container-exit|--abort-on-container-failure|--exit-code-from(=.*)?|--no-start|--dry-run)$'))
+            return (-not (Test-SvcAnyOpt ($j + 1) '^(-[a-zA-Z]*d[a-zA-Z]*|--detach(=.*)?|--wait|--abort-on-container-exit|--abort-on-container-failure|--exit-code-from(=.*)?|--no-start|--dry-run)$'))
         }
         if ((Get-SvcWord $j) -ceq 'logs') { return (Test-SvcAnyOpt ($j + 1) '^(-[a-zA-Z]*f[a-zA-Z]*|--follow)$') }
         return $false
@@ -1672,7 +1678,7 @@ function Test-ServiceSegment([string]$seg) {
         $sub = Get-SvcWord $j
         if ($sub -ceq 'port-forward') { return $true }
         if ($sub -ceq 'logs') {
-            for ($k = $j + 1; $k -lt $n; $k++) { if ((Get-SvcWord $k) -cmatch '^jobs?(/|$)') { return $false } }
+            for ($k = $j + 1; $k -lt $n; $k++) { $w2 = Get-SvcWord $k; if ($w2 -cmatch '^jobs?(\.[a-z]+)*(/|$)' -or $w2.Contains('job-name=')) { return $false } }
             return (Test-SvcAnyOpt ($j + 1) '^(-[a-zA-Z]*f[a-zA-Z]*|--follow)$')
         }
         if ($sub -ceq 'get') { return (Test-SvcAnyOpt ($j + 1) '^(-w|--watch|--watch-only)$') }
@@ -1706,17 +1712,18 @@ function Test-ServiceSegment([string]$seg) {
     if ($c -ceq 'cargo') { return ((Get-SvcWord (Skip-SvcOpts $j)) -ceq 'watch') }
     if ($c -ceq 'tsx') { return ((Get-SvcWord (Skip-SvcOpts $j)) -ceq 'watch') }
     if ($c -ceq 'tsc' -or $c -ceq 'rollup' -or $c -ceq 'swc' -or $c -ceq 'mocha') { return (Test-SvcAnyOpt $j '^(-w|--watch)$') }
-    if ($c -ceq 'webpack') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(serve|watch)$' -or (Test-SvcAnyOpt $j '^(-w|--watch)$')) }
+    if ($c -ceq 'webpack') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(serve|server|s|watch|w)$' -or (Test-SvcAnyOpt $j '^(-w|--watch)$')) }
     if ($c -ceq 'tailwindcss') { return (Test-SvcAnyOpt $j '^(-w|--watch(=always)?)$') }
-    if ($c -ceq 'sass') { return (Test-SvcAnyOpt $j '^--watch$') }
+    if ($c -ceq 'sass') { return (Test-SvcAnyOpt $j '^(-w|--watch)$') }
     if ($c -ceq 'esbuild') { return (Test-SvcAnyOpt $j '^--watch(=forever)?$') }
     if ($c -ceq 'jest') { return (Test-SvcAnyOpt $j '^--(watch|watchAll)$') }
     return $false
 }
 
-# The JSON string body as the text of the command, heredoc bodies and the inside of
-# quotes dropped, every list separator a ; and a pipe kept as |.
-function Get-SvcClean([string]$raw) {
+# The JSON string body as the text of the command: real characters, line breaks kept. A
+# \u00XX in the ASCII range is that character (Go writes & as &), any other \u escape
+# a space.
+function Get-SvcUnescape([string]$raw) {
     $sb = New-Object System.Text.StringBuilder
     for ($i = 0; $i -lt $raw.Length; $i++) {
         $c = $raw[$i]
@@ -1726,53 +1733,120 @@ function Get-SvcClean([string]$raw) {
         $i++
         if ($e -eq 'n') { [void]$sb.Append("`n") }
         elseif ($e -eq 'r' -or $e -eq 't') { [void]$sb.Append(' ') }
-        elseif ($e -eq 'u') { [void]$sb.Append(' '); $i += 4 }
+        elseif ($e -eq 'u') {
+            $hex = ''
+            if ($i + 4 -lt $raw.Length) { $hex = $raw.Substring($i + 1, 4) }
+            $ch = ' '
+            if ($hex -match '^[0-9A-Fa-f]{4}$') {
+                $v = [Convert]::ToInt32($hex, 16)
+                if ($v -ge 32 -and $v -le 127) { $ch = [string][char]$v }
+            }
+            [void]$sb.Append($ch)
+            $i += 4
+        }
         else { [void]$sb.Append($e) }
     }
-    $s = $sb.ToString().Replace("\`n", ' ')
-    $out = New-Object System.Text.StringBuilder
-    $hd = ''
-    foreach ($line in ($s -split "`n")) {
-        if ($hd -ne '') {
-            if ($line.TrimStart(' ', "`t") -ceq $hd) { $hd = '' }
-            continue
-        }
-        $m = [regex]::Match($line, "<<-?[ `t]*['`"]?[A-Za-z_][A-Za-z0-9_]*")
-        if ($m.Success -and -not ($m.Index -gt 0 -and $line[$m.Index - 1] -eq '<')) {
-            $t = [regex]::Replace($m.Value, "^<<-?[ `t]*", '')
-            $hd = [regex]::Replace($t, "^['`"]", '')
-        }
-        [void]$out.Append($line + "`n")
-    }
-    $s = $out.ToString()
+    return $sb.ToString()
+}
+
+# The text of the command in one pass: comments (a # that starts a word, outside quotes, up
+# to the line break) and heredoc bodies dropped, line continuations joined, the inside of
+# quotes emptied (one word _ is left), redirections with & removed, then every list
+# separator is a ; and a pipe stays a |.
+function Get-SvcClean([string]$s) {
     $out = New-Object System.Text.StringBuilder
     $q = ''
-    for ($i = 0; $i -lt $s.Length; $i++) {
+    $hd = ''
+    $len = $s.Length
+    for ($i = 0; $i -lt $len; $i++) {
         $ch = [string]$s[$i]
         if ($q -eq '') {
-            if ($ch -eq "'" -or $ch -eq '"') { $q = $ch; [void]$out.Append('_') }
-            elseif ($ch -eq '\') { [void]$out.Append('_'); $i++ }
-            else { [void]$out.Append($ch) }
+            $pv = ''
+            if ($i -gt 0) { $pv = [string]$s[$i - 1] }
+            if ($ch -eq '#' -and ($pv -eq '' -or " `t`n;&|()".IndexOf([char]$pv) -ge 0)) {
+                while (($i + 1) -lt $len -and $s[$i + 1] -ne "`n") { $i++ }
+                continue
+            }
+            if ($ch -eq "`n") {
+                [void]$out.Append("`n")
+                if ($hd -ne '') {
+                    while (($i + 1) -lt $len) {
+                        $nl = $s.IndexOf("`n", $i + 1)
+                        if ($nl -lt 0) { $ln = $s.Substring($i + 1); $i = $len } else { $ln = $s.Substring($i + 1, $nl - $i - 1); $i = $nl }
+                        if ($ln.TrimStart(' ', "`t") -ceq $hd) { break }
+                    }
+                    $hd = ''
+                }
+                continue
+            }
+            if ($ch -eq '\') {
+                if (($i + 1) -lt $len -and $s[$i + 1] -eq "`n") { [void]$out.Append(' ') } else { [void]$out.Append('_') }
+                $i++
+                continue
+            }
+            if ($ch -eq "'" -or $ch -eq '"') { $q = $ch; [void]$out.Append('_'); continue }
+            if ($ch -eq '$' -and ($i + 1) -lt $len -and $s[$i + 1] -eq "'") { $q = 'a'; [void]$out.Append('_'); $i++; continue }
+            if ($ch -eq '<' -and ($i + 1) -lt $len -and $s[$i + 1] -eq '<') {
+                if (($i + 2) -lt $len -and $s[$i + 2] -eq '<') { [void]$out.Append('<<<'); $i += 2; continue }
+                $e = $i + 2
+                if ($e -lt $len -and $s[$e] -eq '-') { $e++ }
+                while ($e -lt $len -and ($s[$e] -eq ' ' -or $s[$e] -eq "`t")) { $e++ }
+                $bq = ''
+                if ($e -lt $len -and ($s[$e] -eq "'" -or $s[$e] -eq '"' -or $s[$e] -eq '\')) { $bq = [string]$s[$e]; $e++ }
+                $de = $e
+                while ($de -lt $len -and " `t`n;&|()<>'`"".IndexOf($s[$de]) -lt 0) { $de++ }
+                if ($de -gt $e) {
+                    $hd = $s.Substring($e, $de - $e)
+                    if ($bq -eq "'" -or $bq -eq '"') { $de++ }
+                    $i = $de - 1
+                    [void]$out.Append(' ')
+                    continue
+                }
+            }
+            [void]$out.Append($ch)
         }
         elseif ($q -eq "'") { if ($ch -eq "'") { $q = '' } }
+        elseif ($q -eq 'a') {
+            if ($ch -eq '\') { $i++ }
+            elseif ($ch -eq "'") { $q = '' }
+        }
         else {
             if ($ch -eq '\') { $i++ }
             elseif ($ch -eq '"') { $q = '' }
         }
     }
-    $s = $out.ToString()
-    $s = [regex]::Replace($s, '[0-9]*[<>]&[0-9-]*', ' ')
-    $s = [regex]::Replace($s, '&>>?', ' > ')
-    $s = $s.Replace('||', ';').Replace('&&', ';').Replace('&', ';').Replace("`n", ';')
-    return $s
+    $t = $out.ToString()
+    $t = $t.Replace('|&', '|')
+    $t = [regex]::Replace($t, '[0-9]*[<>]&[0-9-]*', ' ')
+    $t = [regex]::Replace($t, '&>>?', ' > ')
+    return $t.Replace('||', ';').Replace('&&', ';').Replace('&', ';').Replace("`n", ';')
+}
+
+# A last pipeline command that ends early (head, grep -q|-l|-m N) ends the pipeline too.
+function Test-SvcConsumer([string]$seg) {
+    $x = @([regex]::Replace($seg, '[()\t]', ' ') -split ' +' | Where-Object { $_ -ne '' })
+    $k = 0
+    while ($k -lt $x.Count -and $x[$k] -cmatch '^[A-Za-z_][A-Za-z0-9_]*=') { $k++ }
+    if ($k -ge $x.Count) { return $false }
+    $c = Get-SvcBase ([string]$x[$k])
+    if ($c -ceq 'head') { return $true }
+    if ($c -cmatch '^(grep|egrep|fgrep)$') {
+        for ($k = $k + 1; $k -lt $x.Count; $k++) {
+            if ([string]$x[$k] -cmatch '^(-[a-zA-Z]*[qlm][a-zA-Z0-9]*|--quiet|--silent|--max-count(=.*)?|--files-with-matches)$') { return $true }
+        }
+    }
+    return $false
 }
 
 function Test-ServiceCmd([string]$cmd) {
     $last = ''
-    foreach ($el in ((Get-SvcClean $cmd) -split ';')) {
-        if (($el -replace '[ \t]', '') -ne '') { $last = $el }
+    foreach ($el in ((Get-SvcClean (Get-SvcUnescape $cmd)) -split ';')) {
+        $t = $el -replace '[ \t]', ''
+        if ($t -ne '' -and $t -ne '}') { $last = $el }
     }
-    foreach ($part in ($last -split '\|')) {
+    $parts = @($last -split '\|')
+    if ($parts.Count -gt 1 -and (Test-SvcConsumer $parts[$parts.Count - 1])) { return $false }
+    foreach ($part in $parts) {
         if (Test-ServiceSegment $part) { return $true }
     }
     return $false

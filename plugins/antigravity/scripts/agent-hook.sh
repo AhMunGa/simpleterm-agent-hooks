@@ -1335,19 +1335,21 @@ CRON_N=0 CRON_SCHED='' CRON_SUMS=''
 #    at the script.
 SVC_AWK='
 BEGIN {
-  VF = " --filter -F -C --cwd --prefix --dir -p --project --workspace -w --app -A --namespace -n --context --kubeconfig -f --file --env-file --project-name --profile --port --host --config -c --mode -m --base --logLevel -l --outDir "
-  BOOL = " -r --recursive -s --silent -q --quiet --if-present --workspaces -ws --include-workspace-root --stream --parallel --no-bail --open --force --strictPort --debug --verbose -v --no-color --offline --prefer-offline --ignore-scripts "
-  DONE = " setup migrate migration db seed build init prepare install reset clean test lint check generate gen codegen "
+  VF = " --filter -F -C --cwd --prefix --dir -p --project --workspace -w --app --namespace -n --context --kubeconfig -f --file --env-file --project-name --profile --port --host --config -c --mode -m --base --logLevel -l --outDir "
+  BOOL = " -r --recursive -s --silent -q --quiet --if-present --workspaces -ws --include-workspace-root --stream --parallel --no-bail --open --force --strictPort --debug --verbose -v --no-color --offline --prefer-offline --ignore-scripts -A "
+  UNK = 1000000
+  DONE = " setup migrate migration db seed build init prepare install reset clean test lint check generate gen codegen deploy publish release typecheck format once "
 }
 function base(w) { sub(/^.*\//, "", w); return tolower(w) }
 function isopt(w) { return substr(w, 1, 1) == "-" }
-# The first word from j on that is not an option (or an option value); n + 2 when an option is not known.
+# The first word from j on that is not an option (or an option value); n + 1 at the end or a lone --,
+# UNK when an option is not known. A value flag takes the next word only when that is no option.
 function nxt(j) {
   while (j <= n && isopt(W[j])) {
     if (W[j] == "--") return n + 1
     if (index(W[j], "=") > 0 || index(BOOL, " " W[j] " ") > 0) j++
-    else if (index(VF, " " W[j] " ") > 0) j += 2
-    else return n + 2
+    else if (index(VF, " " W[j] " ") > 0) { if (j < n && !isopt(W[j + 1])) j += 2; else j++ }
+    else return UNK
   }
   return j
 }
@@ -1356,14 +1358,14 @@ function anyopt(j, re,   k) {
   for (k = j; k <= n; k++) { if (W[k] == "--") return 0; if (W[k] ~ re) return 1 }
   return 0
 }
-# Leading options only (tools that run a script: the script ends them); `run` may come between.
-function leadopt(j, re) {
+# Leading options only (tools that run a script: the script ends them); `run` may come between when allowed.
+function leadopt(j, re, allowrun) {
   while (j <= n) {
     if (W[j] == "--") return 0
-    if (W[j] == "run") { j++; continue }
+    if (allowrun && W[j] == "run") { j++; continue }
     if (!isopt(W[j])) return 0
     if (W[j] ~ re) return 1
-    if (index(W[j], "=") == 0 && index(VF, " " W[j] " ") > 0) j += 2; else j++
+    if (index(W[j], "=") == 0 && index(VF, " " W[j] " ") > 0 && j < n && !isopt(W[j + 1])) j += 2; else j++
   }
   return 0
 }
@@ -1383,7 +1385,7 @@ function svcseg(seg,   i, w, lw, c, j, k, t) {
     w = W[i]
     if (w ~ /^[A-Za-z_][A-Za-z0-9_]*=/) { i++; continue }
     lw = base(w)
-    if (lw ~ /^(do|then|else|elif|if|while|until|time|nohup|exec|bunx|!)$/) { i++; continue }
+    if (lw ~ /^(do|then|else|elif|if|while|until|time|nohup|exec|bunx|!|[{}])$/) { i++; continue }
     if (lw == "npx") {
       i++
       while (i <= n && isopt(W[i])) { if (W[i] ~ /^(-y|--yes|--no-install|--no|-q|--quiet)$/) i++; else return 0 }
@@ -1400,7 +1402,7 @@ function svcseg(seg,   i, w, lw, c, j, k, t) {
   if (i > n) return 0
   c = base(W[i]); j = i + 1
   if (c ~ /^(npm|pnpm|yarn|bun)$/) {
-    if (c == "bun" && leadopt(j, "^--(watch|hot)$")) return 1
+    if (c == "bun" && leadopt(j, "^--(watch|hot)$", 1)) return 1
     j = nxt(j)
     if (c == "yarn" && W[j] == "workspace") j = nxt(j + 2)
     if (W[j] == "run" || W[j] == "run-script") j = nxt(j + 1)
@@ -1411,14 +1413,16 @@ function svcseg(seg,   i, w, lw, c, j, k, t) {
   if (c == "vite") {
     if (anyopt(j, "^(-v|-h|--version|--help)$")) return 0
     j = nxt(j)
-    if (j > n + 1) return 0
+    if (j >= UNK) return 0
     return (j > n || W[j] ~ /^(dev|serve|preview)$/ || W[j] ~ /^[0-9]*[<>]/ || index(W[j], "/") > 0 || index(W[j], ".") > 0)
   }
   if (c == "vitest") return (anyopt(j, "^(-w|--watch|--watch=true|--watch=1)$") || W[nxt(j)] ~ /^(dev|watch)$/)
   if (c == "watch") return !anyopt(j, "^(-[a-zA-Z]*[ge][a-zA-Z]*|--chgexit|--errexit)$")
-  if (c ~ /^(nodemon|uvicorn|gunicorn|watchexec|serve|http-server|live-server|webpack-dev-server)$/) return 1
-  if (c == "node") return leadopt(j, "^--watch(-path(=.*)?)?$")
-  if (c == "deno") return leadopt(j, "^--watch(=.*)?$")
+  if (c == "gunicorn") return !anyopt(j, "^--check-config$")
+  if (c ~ /^(nodemon|uvicorn|watchexec|serve|http-server|live-server|webpack-dev-server)$/) return 1
+  if (c == "parcel") { j = nxt(j); return (j <= n && W[j] != "build") }
+  if (c == "node") return leadopt(j, "^--watch(-path(=.*)?)?$", 0)
+  if (c == "deno") return leadopt(j, "^--watch(=.*)?$", 1)
   if (c ~ /^python[0-9.]*$/) {
     for (k = j; k <= n; k++) {
       if (W[k] == "-m") {
@@ -1437,7 +1441,7 @@ function svcseg(seg,   i, w, lw, c, j, k, t) {
     j = nxt(j)
     if (c == "docker" && W[j] == "compose") j = nxt(j + 1)
     else if (c == "docker") { if (W[j] != "logs") return 0 }
-    if (W[j] == "up") return !anyopt(j + 1, "^(-d|--detach|--wait|--abort-on-container-exit|--abort-on-container-failure|--exit-code-from(=.*)?|--no-start|--dry-run)$")
+    if (W[j] == "up") return !anyopt(j + 1, "^(-[a-zA-Z]*d[a-zA-Z]*|--detach(=.*)?|--wait|--abort-on-container-exit|--abort-on-container-failure|--exit-code-from(=.*)?|--no-start|--dry-run)$")
     if (W[j] == "logs") return anyopt(j + 1, "^(-[a-zA-Z]*f[a-zA-Z]*|--follow)$")
     return 0
   }
@@ -1445,7 +1449,7 @@ function svcseg(seg,   i, w, lw, c, j, k, t) {
     j = nxt(j)
     if (W[j] == "port-forward") return 1
     if (W[j] == "logs") {
-      for (k = j + 1; k <= n; k++) if (W[k] ~ /^jobs?(\/|$)/) return 0
+      for (k = j + 1; k <= n; k++) if (W[k] ~ /^jobs?(\.[a-z]+)*(\/|$)/ || index(W[k], "job-name=") > 0) return 0
       return anyopt(j + 1, "^(-[a-zA-Z]*f[a-zA-Z]*|--follow)$")
     }
     if (W[j] == "get") return anyopt(j + 1, "^(-w|--watch|--watch-only)$")
@@ -1476,54 +1480,92 @@ function svcseg(seg,   i, w, lw, c, j, k, t) {
   if (c == "cargo") return (W[nxt(j)] == "watch")
   if (c == "tsx") return (W[nxt(j)] == "watch")
   if (c == "tsc" || c == "rollup" || c == "swc" || c == "mocha") return anyopt(j, "^(-w|--watch)$")
-  if (c == "webpack") return (W[nxt(j)] ~ /^(serve|watch)$/ || anyopt(j, "^(-w|--watch)$"))
+  if (c == "webpack") return (W[nxt(j)] ~ /^(serve|server|s|watch|w)$/ || anyopt(j, "^(-w|--watch)$"))
   if (c == "tailwindcss") return anyopt(j, "^(-w|--watch(=always)?)$")
-  if (c == "sass") return anyopt(j, "^--watch$")
+  if (c == "sass") return anyopt(j, "^(-w|--watch)$")
   if (c == "esbuild") return anyopt(j, "^--watch(=forever)?$")
   if (c == "jest") return anyopt(j, "^--(watch|watchAll)$")
   return 0
 }
-# JSON string body to the text of the command: real characters, line breaks kept.
-function unesc(s,   out, p, c) {
+# One hex digit, -1 if it is none.
+function hexd(c) { return index("0123456789abcdef", tolower(c)) - 1 }
+# JSON string body to the text of the command: real characters, line breaks kept. A \u00XX
+# in the ASCII range is that character (Go writes & as &), any other \u escape a space.
+function unesc(s,   out, p, c, d1, d2, d3, d4, v) {
   out = ""
   while ((p = index(s, "\\")) > 0) {
     out = out substr(s, 1, p - 1)
     c = substr(s, p + 1, 1)
     if (c == "n") { out = out "\n"; s = substr(s, p + 2) }
     else if (c == "r" || c == "t") { out = out " "; s = substr(s, p + 2) }
-    else if (c == "u") { out = out " "; s = substr(s, p + 6) }
+    else if (c == "u") {
+      d1 = hexd(substr(s, p + 2, 1)); d2 = hexd(substr(s, p + 3, 1)); d3 = hexd(substr(s, p + 4, 1)); d4 = hexd(substr(s, p + 5, 1))
+      v = d1 * 4096 + d2 * 256 + d3 * 16 + d4
+      if (d1 == 0 && d2 == 0 && d3 >= 2 && d3 <= 7) out = out sprintf("%c", v); else out = out " "
+      s = substr(s, p + 6)
+    }
     else { out = out c; s = substr(s, p + 2) }
   }
   return out s
 }
-# Heredoc bodies dropped, the inside of quotes emptied (one word is left), redirections
-# with & removed, then every list separator is a ; and a pipe stays a |.
-function clean(s,   m, L, i, line, t, hd, out, re, ch, q, len, sq, dq) {
+# The text of the command in one pass: comments (a # that starts a word, outside quotes, up to
+# the line break) and heredoc bodies dropped, line continuations joined, the inside of quotes
+# emptied (one word `_` is left), redirections with & removed, then every list separator is a ;
+# and a pipe stays a |.
+function clean(s,   out, i, len, ch, pv, q, hd, e, de, bq, nl, ln, t, sq, dq, k) {
   sq = "\047"; dq = "\""
-  gsub(/\\\n/, " ", s)
-  m = split(s, L, "\n")
-  hd = ""; out = ""
-  re = "<<-?[ \t]*[" sq dq "]?[A-Za-z_][A-Za-z0-9_]*"
-  for (i = 1; i <= m; i++) {
-    line = L[i]
-    if (hd != "") { t = line; sub(/^[ \t]+/, "", t); if (t == hd) hd = ""; continue }
-    if (match(line, re) && substr(line, RSTART - 1, 1) != "<") {
-      t = substr(line, RSTART, RLENGTH)
-      sub(/^<<-?[ \t]*/, "", t); sub("^[" sq dq "]", "", t)
-      hd = t
-    }
-    out = out line "\n"
-  }
-  s = out; out = ""; q = ""; len = length(s)
+  out = ""; q = ""; hd = ""; len = length(s)
   for (i = 1; i <= len; i++) {
     ch = substr(s, i, 1)
     if (q == "") {
-      if (ch == sq || ch == dq) { q = ch; out = out "_" }
-      else if (ch == "\\") { out = out "_"; i++ }
-      else out = out ch
+      pv = (i > 1) ? substr(s, i - 1, 1) : ""
+      if (ch == "#" && (pv == "" || index(" \t\n;&|()", pv) > 0)) {
+        while (i < len && substr(s, i + 1, 1) != "\n") i++
+        continue
+      }
+      if (ch == "\n") {
+        out = out "\n"
+        if (hd != "") {
+          while (i < len) {
+            nl = index(substr(s, i + 1), "\n")
+            if (nl == 0) { ln = substr(s, i + 1); i = len } else { ln = substr(s, i + 1, nl - 1); i += nl }
+            t = ln; sub(/^[ \t]+/, "", t)
+            if (t == hd) break
+          }
+          hd = ""
+        }
+        continue
+      }
+      if (ch == "\\") {
+        if (substr(s, i + 1, 1) == "\n") out = out " "; else out = out "_"
+        i++
+        continue
+      }
+      if (ch == sq || ch == dq) { q = ch; out = out "_"; continue }
+      if (ch == "$" && substr(s, i + 1, 1) == sq) { q = "a"; out = out "_"; i++; continue }
+      if (ch == "<" && substr(s, i + 1, 1) == "<") {
+        if (substr(s, i + 2, 1) == "<") { out = out "<<<"; i += 2; continue }
+        e = i + 2
+        if (substr(s, e, 1) == "-") e++
+        while (substr(s, e, 1) == " " || substr(s, e, 1) == "\t") e++
+        bq = substr(s, e, 1)
+        if (bq == sq || bq == dq || bq == "\\") e++; else bq = ""
+        de = e
+        while (de <= len && index(" \t\n;&|()<>" sq dq, substr(s, de, 1)) == 0) de++
+        if (de > e) {
+          hd = substr(s, e, de - e)
+          if (bq == sq || bq == dq) de++
+          i = de - 1
+          out = out " "
+          continue
+        }
+      }
+      out = out ch
     } else if (q == sq) { if (ch == sq) q = "" }
+    else if (q == "a") { if (ch == "\\") i++; else if (ch == sq) q = "" }
     else { if (ch == "\\") i++; else if (ch == dq) q = "" }
   }
+  gsub(/\|&/, "|", out)
   gsub(/[0-9]*[<>]&[0-9-]*/, " ", out)
   gsub(/&>>?/, " > ", out)
   gsub(/\|\|/, ";", out)
@@ -1532,13 +1574,26 @@ function clean(s,   m, L, i, line, t, hd, out, re, ch, q, len, sq, dq) {
   gsub(/\n/, ";", out)
   return out
 }
+# A last pipeline command that ends early (head, grep -q|-l|-m N) ends the pipeline too.
+function consumer(seg,   m, X, k, c) {
+  gsub(/[()\t]/, " ", seg)
+  m = split(seg, X, " ")
+  k = 1
+  while (k <= m && X[k] ~ /^[A-Za-z_][A-Za-z0-9_]*=/) k++
+  c = base(X[k])
+  if (c == "head") return 1
+  if (c ~ /^(grep|egrep|fgrep)$/) {
+    for (k++; k <= m; k++) if (X[k] ~ /^(-[a-zA-Z]*[qlm][a-zA-Z0-9]*|--quiet|--silent|--max-count(=.*)?|--files-with-matches)$/) return 1
+  }
+  return 0
+}
 {
   s = clean(unesc($0))
   ne = split(s, E, ";")
   last = ""
-  for (q = ne; q >= 1; q--) { t = E[q]; gsub(/[ \t]/, "", t); if (t != "") { last = E[q]; break } }
+  for (q = ne; q >= 1; q--) { t = E[q]; gsub(/[ \t]/, "", t); if (t != "" && t != "}") { last = E[q]; break } }
   np = split(last, part, "|")
-  for (q = 1; q <= np; q++) if (svcseg(part[q])) found = 1
+  if (!(np > 1 && consumer(part[np]))) for (q = 1; q <= np; q++) if (svcseg(part[q])) found = 1
 }
 END { exit !found }'
 

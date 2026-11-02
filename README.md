@@ -249,27 +249,32 @@ there):
   rules (`SVC_AWK`, one table):
   - The command is cut at `;`, `&&`, `||`, `&` and line breaks; only the **last** element counts
     (`cd web && npm run dev` and `npm run dev &` are services, `npm run dev & npx wait-on ... && npx
-    playwright test` is not), and any command of its `|` pipeline may be the service. Backslash line
-    continuations are joined, heredoc bodies are dropped and the inside of `"..."` and `'...'` is
-    ignored (`git commit -m "npm run dev"`, `sh -c "..."` are not services).
+    playwright test` is not), and any command of its `|` pipeline may be the service, unless the
+    last command of the pipeline ends early (`head`, `grep -q|-l|-m N`: `tail -f x | grep -m1 ready`).
+    One pass over the text drops comments (a `#` that starts a word, outside quotes, to the end of the
+    line: `npm run build  # then: preview & serve`), heredoc bodies and the inside of `"..."`, `'...'`
+    and `$'...'`, and joins backslash line continuations (`git commit -m "npm run dev"`, `sh -c
+    "..."` are not services). `\u00XX` escapes in the JSON are decoded (Go writes `&` as `\u0026`).
   - Leading `VAR=val` words and the launchers `npx`, `bunx`, `pnpm exec|dlx`, `yarn dlx`, `uv|poetry
     run`, `bundle exec`, `env`, `nohup`, `exec`, `sudo` are skipped (an option we cannot read gives up).
     Between the tool and its subcommand only options are allowed: ones that take a value
-    (`--filter -F -C --cwd --prefix --dir -p --project --workspace -w --app -A --namespace -n
+    (`--filter -F -C --cwd --prefix --dir -p --project --workspace -w --app --namespace -n
     --context --kubeconfig -f --file --env-file --project-name --profile --port --host --config -c
     --mode -m --base --logLevel -l --outDir`), a few flags without one (`-r --recursive -s --silent
     -q --quiet --if-present --workspaces -ws --include-workspace-root --stream --parallel --no-bail
     --open --force --strictPort --debug --verbose -v --no-color --offline --prefer-offline
-    --ignore-scripts`), `--name=value`, and `run`; any other option gives up. Words after a lone
+    --ignore-scripts -A`), `--name=value`, and `run`; any other option gives up. Words after a lone
     `--` belong to another command; tools that run a script (`node`, `python`, `tsx`) stop at it.
   - Package managers `npm|pnpm|yarn|bun [run]` `dev|start|serve|preview|watch`, also `dev:web`
     style names, `pnpm --filter web dev`, `yarn workspace web dev`, `bun --watch|--hot`; a name whose
     suffix is a finite task (`setup migrate migration db seed build init prepare install reset
-    clean test lint check generate gen codegen`: `dev:setup`, `start:db`) is a job, not a server.
+    clean test lint check generate gen codegen deploy publish release typecheck format once`: `dev:setup`,
+    `start:db`) is a job, not a server.
     Likewise `turbo [run] dev`, `nx serve|dev|start` and `nx run proj:serve`, `next dev|start`, `ng
     serve`, `astro|nuxt dev|preview`, `expo start`, `storybook dev|start`, `browser-sync start`,
-    `vite` (not `vite build|optimize`), `vitest -w|--watch|dev|watch` (a plain `vitest` runs once under
-    an agent), `webpack serve|watch`, `webpack-dev-server`, `live-server`.
+    `vite` (also `vite --host`; not `vite build|optimize`), `parcel <entry>|serve|watch` (not `parcel
+    build`; the Parcel CLI docs: `parcel <entry>` is `serve`, `watch` keeps running), `vitest -w|--watch|dev|watch` (a plain `vitest` runs once under
+    an agent), `webpack serve|server|s|watch|w`, `webpack-dev-server`, `live-server`.
   - `nodemon`, `uvicorn`, `gunicorn`, `python -m http.server|uvicorn|gunicorn|flask run`, `manage.py
     runserver`, `rails s` (not with `-d`), `flask run`, `php artisan serve`, `hugo server|serve`, `jekyll
     serve`, `serve`, `http-server`, `node --watch`, `deno run --watch`.
@@ -277,8 +282,8 @@ there):
     `--abort-on-container-exit|failure`, `--exit-code-from`, `--no-start`, `--dry-run`), `docker|
     kubectl logs -f` (not for a `job/`), `kubectl port-forward`, `kubectl get ... -w`, `tail -f|-F|
     --follow` (not with `--pid`), `journalctl -f`, `watch` (not with `-g`/`-e`).
-  - Watchers by their own flag: `tsc|webpack|rollup|swc|mocha -w|--watch`, `tailwindcss -w`, `sass|
-    esbuild --watch`, `jest --watch|--watchAll`, `cargo watch`, `tsx watch`, `watchexec`.
+  - Watchers by their own flag: `tsc|webpack|rollup|swc|mocha|sass -w|--watch` (`-w` is the short form of
+    `--watch` in Dart Sass), `tailwindcss -w`, `esbuild --watch`, `jest --watch|--watchAll`, `cargo watch`, `tsx watch`, `watchexec`.
 
   `-w` counts only for those tools (`make -w`, `curl -w`, `docker exec -w`, `jest -w` (that is
   `--maxWorkers`), `kubectl rollout status -w` are not services), and so are not `--watch=false`,
@@ -510,6 +515,9 @@ Not tested on Windows yet.
   (a turn you type while it still runs is `done` at once). This holds on OpenCode 2.x too: an
   open shell no longer blocks the dones of later turns. Known services (`npm run dev`,
   `tail -f`, ...) get their `done` at once.
+- **Watch modes that read stdin.** `esbuild --watch` and `tailwindcss --watch` may end when stdin is
+  closed (a hypothesis, not measured); a background shell started that way is still treated as a
+  service, so its `done` can come at once while it has in fact already ended.
 - **A turn that ends with a question is a `done`.** Its `done` carries the question (the last
   message) and no `question` follows when Claude Code's `idle_prompt` comes 60 s later, so the
   alert does not change into "response needed". The lock-screen reply action that the old 60 s
