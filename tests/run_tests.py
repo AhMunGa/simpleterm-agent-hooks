@@ -799,7 +799,13 @@ def t_question_while_background(s):
                        ("question mark in inline code", "The helper returns `user?.name` while the reviewer runs."),
                        ("question mark in inline code at the end", "The reviewer is running. Is it `a ?`"),
                        ("question mark in a table cell", "Results so far:\n| check | ok? |\n| lint | yes |"),
-                       ("optional chaining", "The reviewer checks a?.b for me.")):
+                       ("optional chaining", "The reviewer checks a?.b for me."),
+                       ("Korean polite FYI 1", "자세한 내용은 README를 참고하시기 바랍니다."),
+                       ("Korean polite FYI 2", "결과는 로그를 참고해 주시기 바랍니다."),
+                       ("Korean polite wait", "잠시 기다려 주시기 바랍니다."),
+                       ("Korean polite pardon", "양해해 주시기 바랍니다."),
+                       ("Korean polite note", "배포 전에 이 점 유의하시기 바랍니다."),
+                       ("Korean pardon request", "작업이 길어지고 있습니다. 양해 부탁드립니다.")):
         out = stop("qb3", last)
         s.check("question while waiting: %s -> background" % name,
                 seqs(out).startswith("\x1b]9;simpleterm:state=background subagent: Review the diff"), repr(out))
@@ -814,7 +820,9 @@ def t_question_while_background(s):
             ("Korean polite ask without a mark", "진행하시겠습니까", False),
             ("English let me know", "The reviewer is running. Let me know which option you prefer.", True),
             ("English would you like", "Part one is done. Would you like part two now", True),
-            ("full-width question mark", "리뷰가 돌고 있습니다？", True)):
+            ("full-width question mark", "리뷰가 돌고 있습니다？", True),
+            ("Korean real request after an FYI word", "리뷰가 돌고 있습니다. 참고해서 결정해 주세요.", True),
+            ("Korean butakdeurimnida", "리뷰가 돌고 있습니다. 선택 부탁드립니다.", True)):
         s.ctl("/_ctl/reset", {})
         out = stop("qb4", last, ascii_json=ascii_json)
         rec = wait_for(lambda: ingests(s, "question"), 20)
@@ -877,7 +885,11 @@ def t_service_shells(s):
                          ("npm install && npm run dev", True), ("tsc -w", True),
                          ("npm test -- --watchAll=false", False), ("npx jest --watch=false", False), ("npm test -- --no-watch", False),
                          ("python -W ignore -m pytest", False), ("make -w all", False), ("docker exec -w /app api pytest", False),
-                         ("pip install flask && npm run build", False), ("tail -n 50 build.log | cut -f 2", False)):
+                         ("pip install flask && npm run build", False), ("tail -n 50 build.log | cut -f 2", False),
+                         ("kubectl get pods -w", True), ("vite &", True), ("npx vite &", True), ("npx vite | tee vite.log", True),
+                         ("npx tsc -w", True), ("npx webpack -w", True), ("npx tailwindcss -i a.css -o b.css -w", True),
+                         ("vitest", True), ("docker logs -f api", True), ("kubectl logs -f web-1", True), ("journalctl -f", True),
+                         ("vitest run", False), ("npx vitest --run", False), ("docker logs api", False)):
         s.ctl("/_ctl/reset", {})
         out = stop("sv3-%d" % abs(hash(cmd)), [shell(cmd, "Run it")])
         got = seqs(out).startswith("\x1b]9;simpleterm:state=done")
@@ -1140,8 +1152,8 @@ def t_background_events_and_badges(s):
     def stop(sid, tasks, last="Report."):
         return run(sid, "Stop", stop_hook_active=False, last_assistant_message=last, background_tasks=tasks, session_crons=[])
 
-    # H1: the shipped 3 s done_delay; a typed turn with only older tasks left sends its done at once, so the
-    # tool call of the old subagent (same session id) that follows cannot cancel it.
+    # H1: the shipped 3 s done_delay; the tool call of the old subagent (same session id, agent_id set) that
+    # follows a typed turn's done must not cancel it.
     s.setup([(LINK_A, {})], conf={"done_delay": None})
     run("bev1", "UserPromptSubmit", prompt="review the diff in the background")
     stop("bev1", [old])
@@ -1153,8 +1165,23 @@ def t_background_events_and_badges(s):
     time.sleep(4)
     d = ingests(s, "done")
     s.check("typed turn, old task left: a background subagent's tool call does not cancel the done",
-            len(d) == 1 and d[0]["received"] - t0 < 2.5 and "still running in the background" in d[0]["plain_json"].get("msg", ""),
+            len(d) == 1 and d[0]["received"] - t0 < 8 and "still running in the background" in d[0]["plain_json"].get("msg", ""),
             str([(r["plain_json"].get("msg"), round(r["received"] - t0, 2)) for r in d]))
+
+    # A Stop another Stop hook blocks (the agent goes on) while an old task is left: the main thread's next
+    # event cancels the done, the next Stop sends it once (no done before and another after).
+    s.setup([(LINK_A, {})], conf={"done_delay": None})
+    run("bev4", "UserPromptSubmit", prompt="start")
+    stop("bev4", [old])
+    run("bev4", "UserPromptSubmit", prompt="status?")
+    stop("bev4", [old], last="First.")
+    run("bev4", "PostToolUse", tool_name="Bash", tool_input={"command": "npm test"})
+    run("bev4", "Stop", stop_hook_active=True, last_assistant_message="Second.", background_tasks=[old], session_crons=[])
+    wait_for(lambda: ingests(s, "done"), 20)
+    time.sleep(4)
+    d = ingests(s, "done")
+    s.check("blocked Stop with an old task left: one done, for the real end",
+            len(d) == 1 and d[0]["plain_json"].get("msg", "").startswith("Second."), str([r["plain_json"].get("msg") for r in d]))
 
     # nit 1: the turn paused on a question; a subagent's tool call keeps the badge `waiting`.
     s.setup([(LINK_A, {"push": "disabled"})])
@@ -2292,6 +2319,15 @@ def t_opencode_sh(s):
         rec = ingests(s, "permission")
         s.check("opencode sh: %s request" % verdict, rec and rec[0]["plain_json"].get("app") == "opencode"
                 and rec[0]["plain_json"].get("msg") == "approve bash: rm -rf dist", str(rec)[:200])
+    # A failed turn ends the pause of the Stop before it: an error, and no done from the pause's timer.
+    s.setup([(LINK_A, {"push": "disabled"})], conf={"bg_done_after": 2})
+    s.run("opencode", json.dumps({"hook_event_name": "Stop", "session_id": "oc-2", "cwd": "/w/ocproj", "last_assistant_message": "t",
+                                  "background_tasks": [{"id": "sh_1", "type": "shell", "command": "node worker.js"}]}))
+    s.run("opencode", json.dumps({"hook_event_name": "StopFailure", "session_id": "oc-2", "cwd": "/w/ocproj",
+                                  "error": "APIError", "last_assistant_message": "boom"}))
+    time.sleep(3.5)
+    evs = [r["body"]["ev"] for r in ingests(s)]
+    s.check("opencode sh: a failed turn ends the pause (error, no later done)", evs == ["error"], str(evs))
     s.setup([(LINK_A, {"push": "disabled"})])
     s.run("opencode", json.dumps({"hook_event_name": "StopFailure", "session_id": "oc-1", "cwd": "/w/ocproj",
                                   "error": "ProviderAuthError", "last_assistant_message": "API key invalid"}))
@@ -2492,6 +2528,19 @@ def t_opencode_js(s):
             rec and rec[0]["received"] - t0 > 1.5
             and rec[0]["plain_json"].get("msg") == "Ship it (still running in the background: shell: node worker.js)",
             str([(r["plain_json"].get("msg"), round(r["received"] - t0, 2)) for r in ingests(s, "done")]))
+    # A turn that starts after the pause and runs longer than bg_done_after is not announced done meanwhile.
+    s.setup([(LINK_A, {"push": "disabled"})], conf={"bg_done_after": 2})
+    t0 = time.time()
+    node_plugin(s, "v2", {"directory": d, "sessions": sess, "wait": 3000, "steps": [
+        ev(70, "session.execution.started", "ses_r"),
+        shell_ev(71, "shell.created", info={"id": "sh_7", "status": "running", "command": "node worker.js", "metadata": {"sessionID": "ses_r"}}),
+        ev(72, "session.execution.succeeded", "ses_r"), {"sleep": 500},
+        ev(73, "session.execution.started", "ses_r"), {"sleep": 3500}, ev(74, "session.execution.succeeded", "ses_r")]})
+    wait_for(lambda: ingests(s, "done"), 20)
+    time.sleep(2.5)
+    done = ingests(s, "done")
+    s.check("opencode 2.x: a long turn after a pause gets no done before its own end",
+            len(done) == 1 and done[0]["received"] - t0 > 3.5, str([(r["plain_json"].get("msg"), round(r["received"] - t0, 2)) for r in done]))
     t0 = running_turns("unknown shell, second turn", "node worker.js", 2, conf={"bg_done_after": 2})
     wait_for(lambda: ingests(s, "done"), 20)
     time.sleep(3)

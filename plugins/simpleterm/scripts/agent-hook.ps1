@@ -1366,12 +1366,17 @@ function Write-TurnMark([bool]$user) {
 $AskKo = @([regex]::Unescape('\uAE4C\uC694'), [regex]::Unescape('\uB2C8\uAE4C'), [regex]::Unescape('\uD558\uC2DC\uACA0\uC5B4\uC694'),
     [regex]::Unescape('\uC8FC\uC138\uC694'), [regex]::Unescape('\uC8FC\uC2DC\uACA0\uC5B4\uC694'), [regex]::Unescape('\uC8FC\uC2E4\uB798\uC694'),
     [regex]::Unescape('\uB098\uC694'), [regex]::Unescape('\uC778\uAC00\uC694'), [regex]::Unescape('\uBC14\uB78D\uB2C8\uB2E4'),
-    [regex]::Unescape('\uD560\uB798\uC694'))
+    [regex]::Unescape('\uD560\uB798\uC694'), [regex]::Unescape('\uBD80\uD0C1\uB4DC\uB9BD\uB2C8\uB2E4'))
+# Endings that can be a plain request or a wait / FYI note (juseyo, baramnida,
+# butakdeurimnida), and the polite forms before them (juusigi, hasigi, sigi).
+$AskReq = @([regex]::Unescape('\uC8FC\uC138\uC694'), [regex]::Unescape('\uBC14\uB78D\uB2C8\uB2E4'),
+    [regex]::Unescape('\uBD80\uD0C1\uB4DC\uB9BD\uB2C8\uB2E4'))
+$AskHon = @([regex]::Unescape('\uC8FC\uC2DC\uAE30'), [regex]::Unescape('\uD558\uC2DC\uAE30'), [regex]::Unescape('\uC2DC\uAE30'))
 # Words just before a request ending that make it no ask ("wait a moment",
 # "for your reference", "bear with us"): kidari, chamgo, chamjo, yanghae,
-# ihaehae, gamangan, yuui.
+# ihae, gamangan, yuui: the last word before the ending starts with one.
 $AskFyi = @([regex]::Unescape('\uAE30\uB2E4'), [regex]::Unescape('\uCC38\uACE0'), [regex]::Unescape('\uCC38\uC870'),
-    [regex]::Unescape('\uC591\uD574'), [regex]::Unescape('\uC774\uD574\uD574'), [regex]::Unescape('\uAC10\uC548'),
+    [regex]::Unescape('\uC591\uD574'), [regex]::Unescape('\uC774\uD574'), [regex]::Unescape('\uAC10\uC548'),
     [regex]::Unescape('\uC720\uC758'))
 $AskEn = @('should i', 'shall i', 'would you like', 'do you want', 'let me know which', 'let me know whether', 'want me to', 'please confirm',
     'please choose', 'please select', 'please tell me')
@@ -1482,12 +1487,18 @@ function Test-AskText([string]$raw) {
         for ($j = 0; $j -lt $AskKo.Count; $j++) {
             $ko = $AskKo[$j]
             if (-not $core.EndsWith($ko, [StringComparison]::Ordinal)) { continue }
-            # juseyo (index 3) and baramnida (index 8) after a wait / FYI word are no ask.
-            if ($j -eq 3 -or $j -eq 8) {
-                $tail = $core.Substring(0, $core.Length - $ko.Length)
-                if ($tail.Length -gt 4) { $tail = $tail.Substring($tail.Length - 4) }
+            # A request ending after a wait / FYI word is no ask; "check it, then
+            # decide for me" keeps asking (its last word is the thing asked).
+            if ($AskReq -contains $ko) {
+                $tail = $core.Substring(0, $core.Length - $ko.Length).TrimEnd(' ')
+                foreach ($h in $AskHon) {
+                    if ($tail.EndsWith($h, [StringComparison]::Ordinal)) { $tail = $tail.Substring(0, $tail.Length - $h.Length).TrimEnd(' '); break }
+                }
+                $lastWord = $tail
+                $sp = $tail.LastIndexOf(' ')
+                if ($sp -ge 0) { $lastWord = $tail.Substring($sp + 1) }
                 $fyi = $false
-                foreach ($w in $AskFyi) { if ($tail.Contains($w)) { $fyi = $true } }
+                foreach ($w in $AskFyi) { if ($lastWord.StartsWith($w, [StringComparison]::Ordinal)) { $fyi = $true } }
                 if ($fyi) { continue }
             }
             return $true
@@ -1523,9 +1534,12 @@ $ServiceCmds = @(
     @('docker[ -]compose ([^ ]+ )*up ', ' (-d|--detach) '),
     @(' tail ([^ ]+ )*(-[a-z]*f[a-z]*|--follow[^ ]*) ', ''),
     @(' --watch[a-z-]*(=[^ ]*)? ', ' --watch[a-z-]*=(false|0|no|off) | --no-watch[a-z-]* '),
+    @(' (tsc|webpack|sass|esbuild|rollup|swc|tailwindcss) ([^ ]+ )*-w ', ''),
+    @(' vitest ', ' vitest (run|bench|related|typecheck|list) | --run '),
+    @(' (logs|journalctl) ([^ ]+ )*(-[a-z]*f[a-z]*|--follow[^ ]*) ', ''),
     @(' watch ', '')
 )
-$ServiceDashW = ' (grep|egrep|fgrep|rg|wc|ls|sort|diff|cut|tr|sed|awk|ps|date|stat|find|git|npm|pnpm|yarn|npx|make|docker|podman|kubectl|python[0-9.]*|pytest|go|cargo) '
+$ServiceDashW = ' (grep|egrep|fgrep|rg|wc|ls|sort|diff|cut|tr|sed|awk|ps|date|stat|find|git|npm|pnpm|yarn|npx|make|docker|podman|python[0-9.]*|pytest|go|cargo) '
 
 # The command is split at ; & | (and line breaks) and each command is matched
 # on its own, so a word of one never pairs with a word of the next.
@@ -1533,8 +1547,8 @@ function Test-ServiceCmd([string]$cmd) {
     $cmd = [regex]::Replace($cmd, '\\n', ';')
     $cmd = [regex]::Replace($cmd, '\\[rt"]', ' ')
     foreach ($part in [regex]::Split($cmd, '[;&|]+')) {
-        $o = [regex]::Replace($part, '[()\t]', ' ')
-        $o = ' ' + ([regex]::Replace($o, ' +', ' ')) + ' '
+        $o = [regex]::Replace(' ' + $part + ' ', '[()\t]', ' ')
+        $o = [regex]::Replace($o, ' +', ' ')
         $c = $o.ToLowerInvariant()
         foreach ($e in $ServiceCmds) {
             if ($c -match $e[0]) {
@@ -1561,15 +1575,7 @@ function Test-BgAllOld([string]$prevIds) {
 function Invoke-StopDone([string]$what) {
     if ($what) { $Script:Msg = Get-DoneMsg $what } else { $Script:Msg = Limit-JsonText $Last 200 800 }
     if ((Get-Field $f 'stop_hook_active') -eq 'true') { $Script:XFlag = '1' }
-    if ($what) {
-        # Work still runs: the events that follow may be that work's own (a
-        # background subagent's tool calls carry this session id) and would
-        # cancel the wait, losing the done. At once, then.
-        try { [IO.File]::Delete((Join-Path $RunDir ($Sid + '.pend'))) } catch { }
-        Send-Background 'done'
-    } else {
-        Send-DoneLater
-    }
+    Send-DoneLater
     Invoke-UsageReport
     Write-State 'done' ''
     Update-Cli
@@ -1778,9 +1784,12 @@ try {
     }
 
     # A done waits done_delay seconds (Send-DoneLater) in case another Stop
-    # hook keeps the agent going; any later event of the session ends that
-    # wait. Only the Stop events that send a done themselves leave it be.
-    if (@('claude:Stop', 'codex:Stop', 'grok:Stop') -notcontains ($Agent + ':' + $HookEvent)) {
+    # hook keeps the agent going; any later event of the main thread ends that
+    # wait. Only the Stop events that send a done themselves leave it be, and
+    # so do the events of a subagent (agent_id is set, foreground or
+    # background): its tool calls carry the session id and are no sign of the
+    # main thread going on.
+    if (@('claude:Stop', 'codex:Stop', 'grok:Stop') -notcontains ($Agent + ':' + $HookEvent) -and -not (Get-Field $f 'agent_id')) {
         try { [IO.File]::Delete((Join-Path $RunDir ($Sid + '.pend'))) } catch { }
     }
 
@@ -1843,8 +1852,8 @@ try {
         { $_ -eq 'claude:PostToolUse' -or $_ -eq 'claude:PostToolUseFailure' } {
             if ($HookEvent -eq 'PostToolUseFailure' -and (Get-Field $f 'is_interrupt') -eq 'true' -and -not (Get-Field $f 'agent_id')) {
                 # Esc during a tool call: the turn is over (no Stop follows).
-                # Not when a background subagent's tool was interrupted
-                # (agent_id is set): the main session's wait goes on.
+                # Not when a subagent's tool was interrupted (agent_id is
+                # set): the main session's wait goes on.
                 Add-Note 'turn' ''
                 Write-State 'idle' ''
                 break

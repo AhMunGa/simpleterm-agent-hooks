@@ -1279,7 +1279,8 @@ case $AGENT in
     # background_tasks (Claude Code Stop): the first ten tasks.
     # session_crons (the first five): scheduled wake-ups. prompt/source tell
     # who started a turn; stop_hook_active and is_interrupt are flags. agent_id is
-    # there only when a background subagent's own tool call fires the hook.
+    # there only when a subagent's own tool call fires the hook (foreground or
+    # background; absent for the main thread).
     WANT='hook_event_name,notification_type,tool_name,tool_input.command,tool_input.file_path,tool_input.url,tool_input.description,tool_input.questions.0.question,session_id,cwd,message,last_assistant_message,error,transcript_path,context_tokens,model,to_model,prompt,source,stop_hook_active,is_interrupt,agent_id'
     for i in 0 1 2 3 4 5 6 7 8 9; do WANT=$WANT,background_tasks.$i.id,background_tasks.$i.type,background_tasks.$i.description,background_tasks.$i.command; done
     for i in 0 1 2 3 4; do WANT=$WANT,session_crons.$i.id,session_crons.$i.schedule,session_crons.$i.prompt; done
@@ -1324,10 +1325,9 @@ CRON_N=0 CRON_SCHED='' CRON_SUMS=''
 SVC_AWK='
 function svc(re, ex) { if (c ~ re && (ex == "" || c !~ ex)) found = 1 }
 function scan(part) {
-  o = part
+  o = " " part " "
   gsub(/[()\t]/, " ", o)
   gsub(/  +/, " ", o)
-  o = " " o " "
   c = tolower(o)
   svc(" (npm|pnpm|yarn|bun)( run| run-script)? (dev|start|serve|preview|watch)(:[a-z0-9_-]+)? ", "")
   svc(" next (dev|start) ", "")
@@ -1342,7 +1342,10 @@ function scan(part) {
   svc(" tail ([^ ]+ )*(-[a-z]*f[a-z]*|--follow[^ ]*) ", "")
   svc(" --watch[a-z-]*(=[^ ]*)? ", " --watch[a-z-]*=(false|0|no|off) | --no-watch[a-z-]* ")
   # -w on the original case: -W (python, make) is something else.
-  if (o ~ / -w / && c !~ " (grep|egrep|fgrep|rg|wc|ls|sort|diff|cut|tr|sed|awk|ps|date|stat|find|git|npm|pnpm|yarn|npx|make|docker|podman|kubectl|python[0-9.]*|pytest|go|cargo) ") found = 1
+  if (o ~ / -w / && c !~ " (grep|egrep|fgrep|rg|wc|ls|sort|diff|cut|tr|sed|awk|ps|date|stat|find|git|npm|pnpm|yarn|npx|make|docker|podman|python[0-9.]*|pytest|go|cargo) ") found = 1
+  svc(" (tsc|webpack|sass|esbuild|rollup|swc|tailwindcss) ([^ ]+ )*-w ", "")
+  svc(" vitest ", " vitest (run|bench|related|typecheck|list) | --run ")
+  svc(" (logs|journalctl) ([^ ]+ )*(-[a-z]*f[a-z]*|--follow[^ ]*) ", "")
   svc(" watch ", "")
 }
 {
@@ -1369,10 +1372,12 @@ is_service_cmd() { printf '%s\n' "$1" | awk "$SVC_AWK" 2>/dev/null; }
 # baramnida, hallaeyo.
 ASK_AWK='
 BEGIN {
-  nk = split("\352\271\214\354\232\224|\353\213\210\352\271\214|\355\225\230\354\213\234\352\262\240\354\226\264\354\232\224|\354\243\274\354\204\270\354\232\224|\354\243\274\354\213\234\352\262\240\354\226\264\354\232\224|\354\243\274\354\213\244\353\236\230\354\232\224|\353\202\230\354\232\224|\354\235\270\352\260\200\354\232\224|\353\260\224\353\236\215\353\213\210\353\213\244|\355\225\240\353\236\230\354\232\224", KO, "|")
+  nk = split("\352\271\214\354\232\224|\353\213\210\352\271\214|\355\225\230\354\213\234\352\262\240\354\226\264\354\232\224|\354\243\274\354\204\270\354\232\224|\354\243\274\354\213\234\352\262\240\354\226\264\354\232\224|\354\243\274\354\213\244\353\236\230\354\232\224|\353\202\230\354\232\224|\354\235\270\352\260\200\354\232\224|\353\260\224\353\236\215\353\213\210\353\213\244|\355\225\240\353\236\230\354\232\224|\353\266\200\355\203\201\353\223\234\353\246\275\353\213\210\353\213\244", KO, "|")
   ne = split("should i|shall i|would you like|do you want|let me know which|let me know whether|want me to|please confirm|please choose|please select|please tell me", EN, "|")
   FWQ = "\357\274\237"; FWE = "\357\274\201"; IDEO = "\343\200\202"
-  nf = split("\352\270\260\353\213\244|\354\260\270\352\263\240|\354\260\270\354\241\260|\354\226\221\355\225\264|\354\235\264\355\225\264\355\225\264|\352\260\220\354\225\210|\354\234\240\354\235\230", FYI, "|")
+  nf = split("\352\270\260\353\213\244|\354\260\270\352\263\240|\354\260\270\354\241\260|\354\226\221\355\225\264|\354\235\264\355\225\264|\352\260\220\354\225\210|\354\234\240\354\235\230", FYI, "|")
+  REQ["\354\243\274\354\204\270\354\232\224"] = 1; REQ["\353\260\224\353\236\215\353\213\210\353\213\244"] = 1; REQ["\353\266\200\355\203\201\353\223\234\353\246\275\353\213\210\353\213\244"] = 1
+  nh = split("\354\243\274\354\213\234\352\270\260|\355\225\230\354\213\234\352\270\260|\354\213\234\352\270\260", HON, "|")
   nc = split("\343\200\215|\343\200\217|\342\200\235|\342\200\231|\357\274\211|" FWQ "|" FWE "|" IDEO, CL, "|")
 }
 function hexv(h,   k, v, c) {
@@ -1426,18 +1431,24 @@ function add(x, term,   y) {
   m++; S[m] = y; T[m] = term
 }
 # "Wait a moment", "for your reference", "bear with us" end like a request
-# but ask for nothing: the words just before the ending say so.
-function fyi(cr, sl,   t, k) {
+# but ask for nothing: the word before the ending (past a polite "juusigi" /
+# "hasigi") starts with one of those words. "Check it, then decide for me"
+# keeps asking: its last word is the thing asked.
+function fyi(cr, sl,   t, k, n, W, w) {
   t = substr(cr, 1, length(cr) - sl)
-  t = substr(t, length(t) - 11)
-  for (k = 1; k <= nf; k++) if (index(t, FYI[k])) return 1
+  sub(/ +$/, "", t)
+  for (k = 1; k <= nh; k++) if (ends(t, HON[k])) { t = substr(t, 1, length(t) - length(HON[k])); break }
+  sub(/ +$/, "", t)
+  n = split(t, W, " ")
+  w = (n > 0) ? W[n] : ""
+  for (k = 1; k <= nf; k++) if (index(w, FYI[k]) == 1) return 1
   return 0
 }
 function asks(k,   x, cr, low, j, p) {
   x = S[k]
   if (T[k] == "?" || T[k] == FWQ) return 1
   cr = core(x)
-  for (j = 1; j <= nk; j++) if (ends(cr, KO[j])) { if ((j == 4 || j == 9) && fyi(cr, length(KO[j]))) continue; return 1 }
+  for (j = 1; j <= nk; j++) if (ends(cr, KO[j])) { if ((KO[j] in REQ) && fyi(cr, length(KO[j]))) continue; return 1 }
   low = " " tolower(cr) " "
   for (j = 1; j <= ne; j++) { p = index(low, " " EN[j] " "); if (p > 6 && substr(low, p - 6, 6) == "if you") continue; if (p > 0) return 1 }
   return 0
@@ -1610,12 +1621,17 @@ CWD_BASE=$(json_trim "${CWD:-$EXTRA}" 64 256 base)
 FP=$(printf '%s\t%s' "$TOOL" "$(json_trim "$DETAIL" 200 800)" | cksum | awk '{ print $1 }')
 
 # A `done` waits done_delay seconds (done_later) in case another Stop hook
-# keeps the agent going; any later event of the session ends that wait. Only
-# the turn-end events that send a `done` themselves leave it be (a newer one
-# replaces it).
+# keeps the agent going; any later event of the main thread ends that wait.
+# Only the turn-end events that send a `done` themselves leave it be (a newer
+# one replaces it), and so do the events of a subagent (agent_id is set,
+# whether it runs in the foreground or the background): a background
+# subagent's tool calls carry the session id and are no sign of the main
+# thread going on.
 case $AGENT:$EVENT in
   claude:Stop | codex:Stop | grok:Stop | gemini:AfterAgent) ;;
-  *) [ -f "$RUN_DIR/$SID.pend" ] && rm -f "$RUN_DIR/$SID.pend" 2>/dev/null ;;
+  *)
+    if [ -z "$AGENTID" ] && [ -f "$RUN_DIR/$SID.pend" ]; then rm -f "$RUN_DIR/$SID.pend" 2>/dev/null; fi
+    ;;
 esac
 
 # Lets a waiting permission hook see that the agent moved on. A new turn
@@ -1922,15 +1938,7 @@ bg_all_old() {
 stop_done() {
   if [ -n "${1:-}" ]; then MSG=$(done_msg "$1"); else MSG=$(json_trim "$LAST" 200 800); fi
   [ "$STOPACT" = true ] && XFLAGS=',"stop_hook_active":true'
-  if [ -n "${1:-}" ]; then
-    # Work still runs: the events that follow may be that work's own (a
-    # background subagent's tool calls carry this session id) and would
-    # cancel the wait, losing the done. At once, then.
-    rm -f "$RUN_DIR/$SID.pend" 2>/dev/null
-    send_bg done
-  else
-    done_later
-  fi
+  done_later
   usage_report
   print_state done
   turn_end
@@ -2038,8 +2046,8 @@ case $AGENT:$EVENT in
   claude:PostToolUse | claude:PostToolUseFailure)
     if [ "$EVENT" = PostToolUseFailure ] && [ "$ISINT" = true ] && [ -z "$AGENTID" ]; then
       # Esc during a tool call: the turn is over (no Stop follows). Not when
-      # a background subagent's tool was interrupted (agent_id is set): the
-      # main session's wait goes on.
+      # a subagent's tool was interrupted (agent_id is set): the main
+      # session's wait goes on.
       note turn
       print_state idle
       finish
@@ -2198,14 +2206,22 @@ case $AGENT:$EVENT in
   opencode:Stop)
     # The plugin lists the background shells still open (background_tasks):
     # a dev server does not hold the done back, other work waits as for
-    # Claude Code. OpenCode does not say who started a turn: a person did,
-    # so shells that were open at the last Stop do not hold this one back.
+    # Claude Code. OpenCode does not say who started a turn (the plugin's
+    # UserPromptSubmit stands for every turn start): shells that were open at
+    # the last Stop do not hold this one back.
+    note turn
+    stop_flow
+    ;;
+  opencode:UserPromptSubmit)
+    # Sent by the plugin when a session's own turn starts (a person's, or the
+    # session taken up again by a background shell): ends a pause, and the
+    # shells open at the last Stop do not hold this turn's Stop back.
     note turn
     PROMPT_USER=1
     turn_mark
-    stop_flow
     ;;
   opencode:StopFailure)
+    note turn
     ev=error
     case $ERR in ProviderAuthError | *[Aa]uth*) ev=auth ;; esac
     MSG=$(json_trim "$ERR: $LAST" 200 800)

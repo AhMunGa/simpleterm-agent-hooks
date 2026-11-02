@@ -173,6 +173,20 @@ async function hasRunningChild(ctx, sessionID, running) {
   return false;
 }
 
+// The turn events of one session run one after the other: a start must reach
+// the hook before the end of the turn it belongs to, or it would undo the
+// pause that end made.
+const lanes = (globalThis.__simpletermLanes ??= new Map());
+function inLane(sessionID, work) {
+  const run = (lanes.get(sessionID) || Promise.resolve()).then(work);
+  const tail = run.catch(() => {});
+  lanes.set(sessionID, tail);
+  tail.then(() => {
+    if (lanes.get(sessionID) === tail) lanes.delete(sessionID);
+  });
+  return run;
+}
+
 export default {
   id: "simpleterm",
   setup(ctx) {
@@ -224,35 +238,18 @@ export default {
             .catch(() => {}); // answered in the terminal first
           return;
         }
+        case "session.execution.started":
+          // A turn of the session's own starts (a person's prompt, or the
+          // session taken up again): the hook ends the pause of the last
+          // Stop, so a long turn is not announced done by that pause's timer.
+          return inLane(d.sessionID, async () => {
+            const info = await sessionInfo(ctx, d.sessionID);
+            if (info.parentID) return; // a subagent's session
+            await runHook({ hook_event_name: "UserPromptSubmit", session_id: d.sessionID, cwd }, cwd);
+          });
         case "session.execution.succeeded":
-        case "session.execution.failed": {
-          const info = await sessionInfo(ctx, d.sessionID);
-          sessions.parent.set(d.sessionID, info.parentID || "");
-          if (info.parentID) return; // a subagent's session
-          const failed = event.type === "session.execution.failed";
-          if (!failed && (await hasRunningChild(ctx, d.sessionID, running))) return;
-          const background = failed ? [] : await openShellsOf(ctx, d.sessionID, open);
-          const err = d.error || {};
-          await runHook(
-            failed
-              ? {
-                  hook_event_name: "StopFailure",
-                  session_id: d.sessionID,
-                  cwd,
-                  error: String(err.type || "error"),
-                  last_assistant_message: String(err.message || ""),
-                }
-              : {
-                  hook_event_name: "Stop",
-                  session_id: d.sessionID,
-                  cwd,
-                  last_assistant_message: String(info.title || ""),
-                  ...(background.length ? { background_tasks: background } : {}),
-                },
-            cwd,
-          );
-          return;
-        }
+        case "session.execution.failed":
+          return inLane(d.sessionID, () => turnEnd(event, d, cwd, running, open));
         case "form.created": {
           // data: { form: { id, sessionID, title, fields, ... } }
           const form = d.form || d;
@@ -268,6 +265,34 @@ export default {
           return;
         }
       }
+    }
+
+    async function turnEnd(event, d, cwd, running, open) {
+      const info = await sessionInfo(ctx, d.sessionID);
+      sessions.parent.set(d.sessionID, info.parentID || "");
+      if (info.parentID) return; // a subagent's session
+      const failed = event.type === "session.execution.failed";
+      if (!failed && (await hasRunningChild(ctx, d.sessionID, running))) return;
+      const background = failed ? [] : await openShellsOf(ctx, d.sessionID, open);
+      const err = d.error || {};
+      await runHook(
+        failed
+          ? {
+              hook_event_name: "StopFailure",
+              session_id: d.sessionID,
+              cwd,
+              error: String(err.type || "error"),
+              last_assistant_message: String(err.message || ""),
+            }
+          : {
+              hook_event_name: "Stop",
+              session_id: d.sessionID,
+              cwd,
+              last_assistant_message: String(info.title || ""),
+              ...(background.length ? { background_tasks: background } : {}),
+            },
+        cwd,
+      );
     }
 
     (async () => {

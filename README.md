@@ -190,16 +190,16 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | Claude `PermissionRequest` | `permission` (waits for your answer, up to 540 s) | waiting, then running |
 | Claude `PreToolUse` `AskUserQuestion`, `Notification` (idle, elicitation, input needed) | `question` (one per question: `PermissionRequest` repeats it) | waiting (idle keeps done; `agent_needs_input`, another session's, leaves the badge) |
 | Claude `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure` | none (context, see below) | running |
-| Claude `Stop` / `StopFailure` | `done` (sent 3 s later, see below) / `error` or `auth` | done |
+| Claude `Stop` / `StopFailure` | `done` (sent 3 s later on Claude Code, see below) / `error` or `auth` | done |
 | Claude `Stop` with `background_tasks` in flight | none (and no idle question until the next turn), unless the last message asks you something (`question`), only services or tasks that ran before your prompt are left (`done`) | background (+ an OSC 7501 `working` record, see below); waiting (+ a `blocked` record) for a question |
 | Claude `Stop` with `session_crons` set, turn started by a schedule | none (a question: `question`) | background, `scheduled: <schedule>` |
-| Claude `PostToolUseFailure` with `is_interrupt` (Esc; not for a background subagent's tool, `agent_id` set) | none | idle |
+| Claude `PostToolUseFailure` with `is_interrupt` (Esc; not for a subagent's tool, `agent_id` set) | none | idle |
 | Claude `SessionStart`, `PostCompact`, `PostModelSwitch` | none (context) | none |
 | Codex `PermissionRequest` | `permission` (waits up to 60 s) | none |
 | Codex `Stop` | `done`, none while a `/goal` is active | none |
 | Codex `SessionStart` (resumed or forked session), `PostCompact` | none (context) | none |
 | Gemini `Notification` (`ToolPermission`) | `question` (`approve <tool>: <command or file>`) | none |
-| Gemini `AfterAgent` | `done` (3 s later); `error` when the turn had no response text (API error, cancel, loop) | none |
+| Gemini `AfterAgent` | `done` (at once); `error` when the turn had no response text (API error, cancel, loop) | none |
 | agy `PreToolUse` `run_command` (only with `agy_wait`) | `permission` | none |
 | agy `PreToolUse` `ask_question`, `ask_permission` | `question` | none |
 | agy `Stop` (fully idle) | `done`, or `error` | none |
@@ -278,9 +278,10 @@ sends one `done`, for its real end. The badge changes at once; only the alert is
 Gemini CLI and OpenCode register no event that would arrive within the delay (Codex: `SessionStart`,
 `PermissionRequest`, `PostCompact`, `Stop`; Gemini: `Notification`, `AfterAgent`), so for them the
 wait could only delay the alert: their default is 0 (at once; set `done_delay` to wait anyway,
-a newer `Stop` then still replaces the first). A `done` that leaves background work running is
-also sent at once: a background subagent's own tool calls carry the session id and would cancel
-the wait. A `done` whose `Stop` carried `stop_hook_active: true` also carries
+a newer `Stop` then still replaces the first). Only events of the main thread cancel the wait: a
+subagent's own tool calls (their hook input carries `agent_id`, foreground or background) carry the
+session id too, but are no sign of the main thread going on, so a `done` that leaves background
+work running is not lost to them. A `done` whose `Stop` carried `stop_hook_active: true` also carries
 `"stop_hook_active":true` in its plaintext.
 
 Codex runs a `PermissionRequest` hook before it shows its own approval prompt, so while the hook
@@ -475,8 +476,11 @@ Not tested on Windows yet.
 - **Questions are read from text.** Whether the last message asks something is a guess from its
   last two sentences (see above); a question phrased in another way is read wrongly now and then. A report that
   ends with a sign-off such as `Let me know if you need anything else` or `If you want me to ...`, a
-  wait or FYI request (`기다려 주세요`, `참고해 주세요`, `양해 바랍니다`), or a `?` inside inline code or
-  a table row is not read as a question.
+  wait or FYI request (`기다려 주세요`, `참고해 주시기 바랍니다`, `양해 부탁드립니다`: the word before the
+  ending starts with 기다, 참고, 참조, 양해, 이해, 감안 or 유의; `참고해서 결정해 주세요` still asks), or a
+  `?` inside inline code or a table row is not read as a question. Trade-off: any sentence with
+  `if you want me to` is read as an offer, not a question, so `If you want me to continue, say
+  so` stays quiet while `Do you want me to continue?` asks.
 - **Scheduled turns before Claude Code sends `UserPromptSubmit` `source`.** 2.1.316 sends none;
   a turn started by a schedule is recognised by its prompt (equal to one of the last `Stop`'s
   `session_crons`) and a typed prompt equal to a scheduled one counts as scheduled.

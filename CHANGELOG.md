@@ -31,7 +31,10 @@
     session again, and that turn's end is done) for at most `bg_done_after` seconds, and a turn
     after the one that started the shell is `done` at once (OpenCode does not say who started a
     turn, so it counts as yours). A shell that never exits no longer blocks the dones of every
-    later turn. Running child sessions are still waited for (they end).
+    later turn. Running child sessions are still waited for (they end). The plugin sends a turn
+    start (`UserPromptSubmit`) for every `session.execution.started` of a root session and the
+    hook ends the pause at it (also at `StopFailure`), so a long turn after a pause is not
+    announced `done` by the pause's `bg_done_after` timer; the events of one session run in order.
   - **OpenCode 1.x** (1.19.5 with `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS`): no `done` while a
     child session is busy (`session.status`); the child's report wakes the parent again. A child
     that errors is not busy any more.
@@ -65,15 +68,15 @@
   of the session, so a Stop that another Stop hook blocks (the agent works on,
   `stop_hook_active: true`) no longer sends a `done` before and another after (Claude Code and
   Grok Build, whose later events come within the delay; Codex, Gemini CLI and OpenCode register
-  no such event, so their default is 0: at once; `done_delay` sets either). A `done` that leaves
-  background work running is sent at once, since a background subagent's own tool calls carry
-  the session id and would cancel it. A `done` of a `Stop` with `stop_hook_active: true` carries
+  no such event, so their default is 0: at once; `done_delay` sets either). Only events of the
+  main thread cancel the wait: a subagent's tool calls (hook input with `agent_id`) carry the
+  session id too and no longer cancel a `done` that leaves background work running. A `done` of a `Stop` with `stop_hook_active: true` carries
   `"stop_hook_active":true`.
 - Claude Code: one `AskUserQuestion` sends one `question` (`PreToolUse` and `PermissionRequest`
   both reported it); `agent_needs_input` (another background session's) still alerts but no
   longer changes this tab's badge; `PostToolUseFailure` with `is_interrupt` (Esc) sets the badge
-  idle, not running, and ends a background pause (not when the interrupted tool is a background
-  subagent's: its hook input carries `agent_id`, found in the 2.1.316 binary). A turn paused on a
+  idle, not running, and ends a background pause (not when the interrupted tool is a subagent's,
+  foreground or background: its hook input carries `agent_id`, found in the 2.1.316 binary). A turn paused on a
   question keeps the `waiting` badge when a background subagent runs a tool.
 - Gemini CLI: an `AfterAgent` with `[no response text]` (API error, cancelled stream, loop) sends
   `error`, not `done`.
