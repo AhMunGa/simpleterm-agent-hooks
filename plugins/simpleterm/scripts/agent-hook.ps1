@@ -1,6 +1,9 @@
-# SimpleTerm agent hook v1 (Windows PowerShell 5.1+ and PowerShell 7).
-# Installed by the SimpleTerm app as ~/.simpleterm/agent-hook.ps1; see
-# README.md and docs/tech_specs/TDS_AGENT_ALERTS.md (sections 5 and 6).
+# SimpleTerm agent hook (Windows PowerShell 5.1+ and PowerShell 7), part of the
+# simpleterm-agent-hooks plugin; see README.md and, in the SimpleTerm app
+# repository, docs/tech_specs/TDS_AGENT_ALERTS.md (sections 5 and 6: relay
+# protocol v1, hooks, SSH tunnel) and docs/tech_specs/TDS_AGENT_EVENTS_V2.md
+# (event and decision format v2: request contents, decision lists, decision
+# extensions, results, states, session records) for the contract.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File agent-hook.ps1 claude
 #   ... agent-hook.ps1 claude signal     Claude Code PermissionRequest status only
@@ -8,12 +11,20 @@
 #   ... agent-hook.ps1 codex-notify J    Codex `notify` program (JSON is last arg)
 #   ... agent-hook.ps1 notify T [B]      `simpleterm notify` (simpleterm.cmd)
 #
-# Same behavior as agent-hook.sh for Claude Code, Codex and Grok Build (run
+# The same behavior as agent-hook.sh for Claude Code, Codex and Grok Build (run
 # with `claude` and GROK_HOOK_EVENT set), using only .NET (Aes CBC/PKCS7,
-# HMACSHA256, HttpWebRequest). Gemini CLI, Antigravity and OpenCode are
-# sh-only. It never evaluates its input, prints only agent-defined JSON on
-# stdout, and always exits 0. Keep this file ASCII: Windows PowerShell 5.1
-# reads BOM-less scripts in the ANSI code page.
+# HMACSHA256, HttpWebRequest): for the same input it makes the same event
+# plaintext, byte for byte (TDS_AGENT_EVENTS_V2 section 2.2). Gemini CLI,
+# Antigravity, OpenCode and GitHub Copilot CLI are sh-only (run by Copilot,
+# COPILOT_CLI=1, it does nothing). It never evaluates its input, prints only
+# agent-defined JSON on stdout, and always exits 0. Keep this file ASCII:
+# Windows PowerShell 5.1 reads BOM-less scripts in the ANSI code page.
+#
+# Text is handled as bytes: a "byte string" holds one char (U+0000 to U+00FF)
+# per byte, as ISO-8859-1 decodes it. Lengths, cuts and comparisons are then
+# those of agent-hook.sh (LC_ALL=C awk), and what goes out is the same bytes.
+# PowerShell compares strings without case by default: here every comparison
+# that agent-hook.sh makes is -ceq / -cne / -cmatch or ordinal.
 
 $ErrorActionPreference = 'Stop'
 $ScriptArgs = @($args)
@@ -30,7 +41,11 @@ $HookVersion = '0.3.2'
 $CliRev = 2
 $Inv = [Globalization.CultureInfo]::InvariantCulture
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
+$Latin1 = [Text.Encoding]::GetEncoding(28591)
 $IsWin = ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
+$Ord = [StringComparison]::Ordinal
+$Tab = [string][char]9
+$Nl = [string][char]10
 
 $StDir = Join-Path $HOME '.simpleterm'
 $LinksDir = Join-Path $StDir 'links'
@@ -43,12 +58,27 @@ function Now-Epoch {
     return [int64][Math]::Floor(([DateTime]::UtcNow - $epoch).TotalSeconds)
 }
 
+function Now-Ms {
+    $epoch = New-Object DateTime(1970, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+    return [int64][Math]::Floor(([DateTime]::UtcNow - $epoch).TotalMilliseconds)
+}
+
+# Byte string <-> .NET text.
+function BS([string]$text) {
+    if (-not $text) { return '' }
+    return $Latin1.GetString($Utf8.GetBytes($text))
+}
+
+function US([string]$bytes) {
+    if (-not $bytes) { return '' }
+    return $Utf8.GetString($Latin1.GetBytes($bytes))
+}
+
 function Write-Log([string]$text) {
     try {
         if (-not [IO.Directory]::Exists($StDir)) { return }
-        $line = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture) +
-            ' ' + $Agent + ' ' + $text + "`n"
-        [IO.File]::AppendAllText($LogPath, $line, $Utf8)
+        $line = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ', $Inv) + ' ' + $Agent + ' ' + $text + "`n"
+        [IO.File]::AppendAllText($LogPath, $line, $Latin1)
         $Script:Logged = $true
     } catch { }
 }
@@ -56,162 +86,410 @@ function Write-Log([string]$text) {
 function Trim-Log {
     if (-not $Script:Logged) { return }
     try {
-        $lines = [IO.File]::ReadAllLines($LogPath, $Utf8)
-        if ($lines.Length -le 200) { return }
-        $keep = $lines[($lines.Length - 200)..($lines.Length - 1)]
+        $lines = $Latin1.GetString([IO.File]::ReadAllBytes($LogPath)).Split([char]10)
+        $n = $lines.Length
+        if ($n -gt 0 -and $lines[$n - 1] -ceq '') { $n-- }
+        if ($n -le 200) { return }
+        $keep = $lines[($n - 200)..($n - 1)]
         $tmp = $LogPath + '.' + $PID
-        [IO.File]::WriteAllText($tmp, (($keep -join "`n") + "`n"), $Utf8)
+        [IO.File]::WriteAllText($tmp, (($keep -join "`n") + "`n"), $Latin1)
         if ([IO.File]::Exists($LogPath)) { [IO.File]::Delete($LogPath) }
         [IO.File]::Move($tmp, $LogPath)
     } catch { }
 }
 
+# Writes a byte string (and a line break) to stdout.
 function Write-Out([string]$text) {
-    $bytes = $Utf8.GetBytes($text + "`n")
+    $bytes = $Latin1.GetBytes($text + "`n")
     $out = [Console]::OpenStandardOutput()
     $out.Write($bytes, 0, $bytes.Length)
     $out.Flush()
 }
 
-# --- JSON helpers --------------------------------------------------------
+# --- files (byte strings) -------------------------------------------------------
 
-$TokenRe = New-Object System.Text.RegularExpressions.Regex('"(?:[^"\\]|\\.)*"|[{}\[\],:]|[^\s{}\[\],:"]+|"')
+function Read-HeadB([string]$path, [int64]$max) {
+    try {
+        $fs = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        try {
+            $n = [int][Math]::Min($max, $fs.Length)
+            $buf = New-Object byte[] $n
+            $read = 0
+            while ($read -lt $n) {
+                $r = $fs.Read($buf, $read, $n - $read)
+                if ($r -le 0) { break }
+                $read += $r
+            }
+            return $Latin1.GetString($buf, 0, $read)
+        } finally { $fs.Dispose() }
+    } catch { return '' }
+}
 
-# Returns a hashtable path -> value for the wanted paths (`a`, `a.b`,
-# `a.0.b`). String values stay JSON-escaped. Tolerates truncated input.
-function Get-JsonFields([string]$text, [string[]]$want) {
-    $result = @{}
-    $wantSet = @{}
-    foreach ($w in $want) { $wantSet[$w] = $true }
-    $need = $want.Count
-    $types = New-Object System.Collections.ArrayList
-    $keys = New-Object System.Collections.ArrayList
-    $expectKey = New-Object System.Collections.ArrayList
-    $m = $TokenRe.Match($text)
+function Read-TailB([string]$path, [int64]$max) {
+    try {
+        $fs = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        try {
+            $len = $fs.Length
+            $n = [int][Math]::Min($max, $len)
+            [void]$fs.Seek($len - $n, [IO.SeekOrigin]::Begin)
+            $buf = New-Object byte[] $n
+            $read = 0
+            while ($read -lt $n) {
+                $r = $fs.Read($buf, $read, $n - $read)
+                if ($r -le 0) { break }
+                $read += $r
+            }
+            return $Latin1.GetString($buf, 0, $read)
+        } finally { $fs.Dispose() }
+    } catch { return '' }
+}
+
+# The whole file, or $null when it cannot be read.
+function Read-FileB([string]$path) {
+    try {
+        if ([IO.File]::Exists($path)) { return $Latin1.GetString([IO.File]::ReadAllBytes($path)) }
+    } catch { }
+    return $null
+}
+
+# Line $n (0-based) of a file, '' if it has none (sed -n Np).
+function Read-LineB([string]$path, [int]$n) {
+    $t = Read-FileB $path
+    if ($null -eq $t) { return '' }
+    $l = $t.Split([char]10)
+    if ($n -lt $l.Length) {
+        if ($n -eq $l.Length - 1 -and $l[$n] -ceq '') { return '' }
+        return $l[$n]
+    }
+    return ''
+}
+
+function Write-FileB([string]$path, [string]$text) {
+    try { [IO.File]::WriteAllText($path, $text, $Latin1); return $true } catch { return $false }
+}
+
+function Remove-FileQ([string]$path) {
+    try { if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) } } catch { }
+}
+
+# --- JSON helpers (byte strings) -------------------------------------------------
+
+# One JSON token at a time, as the awk scanners of agent-hook.sh read them:
+# white space, a structural character (1), a string (2), a string that does not
+# end (3), or a bare word up to white space or , : } ] (4).
+$TokRe = New-Object System.Text.RegularExpressions.Regex ('\G(?:[ \t\r\n]+|([,:{}\[\]])|("[^"\\]*(?:\\[\s\S][^"\\]*)*")|(")|([^ \t\r\n,:}\]]+))')
+$CtrlRe = New-Object System.Text.RegularExpressions.Regex ('[\x01-\x1F\x7F]')
+$NormRe = New-Object System.Text.RegularExpressions.Regex ('[^\x20-\x5B\x5D-\x7E]')
+$UnitRe = New-Object System.Text.RegularExpressions.Regex ('[\\\xC0-\xFF]')
+
+# Port of jwalk (JSON_GET): the wanted paths (`a`, `a.b`, `a.0.b`) found in
+# the JSON text, the first of each, in document order: @{ order; got }.
+# String values stay JSON-escaped. Tolerates truncation.
+function Get-JsonKV([string]$text, [string[]]$want) {
+    $wantSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($w in $want) { [void]$wantSet.Add($w) }
+    $got = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $order = New-Object 'System.Collections.Generic.List[string]'
+    $need = $wantSet.Count
+    $jt = New-Object 'System.Collections.Generic.List[int]'
+    $jk = New-Object 'System.Collections.Generic.List[string]'
+    $je = New-Object 'System.Collections.Generic.List[bool]'
+    $m = $TokRe.Match([string]$text, 0)
     while ($m.Success -and $need -gt 0) {
-        $t = $m.Value
-        $depth = $types.Count
-        if ($t -eq '{' -or $t -eq '[') {
-            if ($t -eq '{') { [void]$types.Add('o'); [void]$keys.Add(''); [void]$expectKey.Add($true) }
-            else { [void]$types.Add('a'); [void]$keys.Add(0); [void]$expectKey.Add($false) }
-        } elseif ($t -eq '}' -or $t -eq ']') {
-            if ($depth -gt 0) {
-                $types.RemoveAt($depth - 1); $keys.RemoveAt($depth - 1); $expectKey.RemoveAt($depth - 1)
-            }
-        } elseif ($t -eq ',') {
-            if ($depth -gt 0) {
-                if ($types[$depth - 1] -eq 'a') { $keys[$depth - 1] = [int]$keys[$depth - 1] + 1 }
-                else { $expectKey[$depth - 1] = $true }
-            }
-        } elseif ($t -eq ':') {
-            if ($depth -gt 0) { $expectKey[$depth - 1] = $false }
-        } elseif ($t -eq '"') {
+        $d = $jt.Count
+        $v = $null
+        if ($m.Groups[1].Success) {
+            $c = $m.Groups[1].Value
+            if ($c -ceq ',') {
+                if ($d -gt 0) { if ($jt[$d - 1] -eq 2) { $jk[$d - 1] = [string]([int]$jk[$d - 1] + 1) } else { $je[$d - 1] = $true } }
+            } elseif ($c -ceq ':') {
+                if ($d -gt 0) { $je[$d - 1] = $false }
+            } elseif ($c -ceq '{') { $jt.Add(1); $jk.Add(''); $je.Add($true) }
+            elseif ($c -ceq '[') { $jt.Add(2); $jk.Add('0'); $je.Add($false) }
+            elseif ($d -gt 0) { $jt.RemoveAt($d - 1); $jk.RemoveAt($d - 1); $je.RemoveAt($d - 1) }
+        } elseif ($m.Groups[2].Success) {
+            $s = $m.Groups[2].Value
+            $s = $s.Substring(1, $s.Length - 2)
+            if ($d -gt 0 -and $jt[$d - 1] -eq 1 -and $je[$d - 1]) { $jk[$d - 1] = $s } else { $v = $s }
+        } elseif ($m.Groups[3].Success) {
             break
-        } else {
-            $isString = $t.StartsWith('"')
-            $value = $t
-            if ($isString) { $value = $t.Substring(1, $t.Length - 2) }
-            if ($depth -gt 0 -and $types[$depth - 1] -eq 'o' -and $expectKey[$depth - 1]) {
-                $keys[$depth - 1] = $value
-            } elseif ($depth -gt 0) {
-                $path = ($keys | ForEach-Object { [string]$_ }) -join '.'
-                if ($wantSet.ContainsKey($path) -and -not $result.ContainsKey($path)) {
-                    $result[$path] = $value
-                    $need--
-                }
+        } elseif ($m.Groups[4].Success) {
+            $v = $m.Groups[4].Value
+        }
+        if ($null -ne $v -and $d -gt 0) {
+            $p = $jk -join '.'
+            if ($wantSet.Contains($p) -and -not $got.ContainsKey($p)) {
+                $got[$p] = $v
+                $order.Add($p)
+                $need--
             }
         }
         $m = $m.NextMatch()
     }
-    return $result
+    return @{ order = $order; got = $got }
 }
 
-function Get-Field($fields, [string]$name) {
-    if ($fields.ContainsKey($name)) { return [string]$fields[$name] }
+function Get-Field($kv, [string]$name) {
+    $v = $null
+    if ($kv.got.TryGetValue($name, [ref]$v)) { return [string]$v }
     return ''
 }
 
-function Test-Hex4([string]$s) {
-    return ($s.Length -eq 4 -and $s -match '^[0-9a-fA-F]{4}$')
+$SpanDefault = @('tool_input', 'tool_input.questions', 'requested_schema', 'toolCall.args.Arguments', 'toolInput', 'toolArgs')
+
+# Port of JSON_FACTS: one line `path TAB s|r|j TAB value` per scalar (strings
+# JSON-escaped as received, control characters as spaces) and for a few
+# containers (tool_input and the like) their own text as the content of a JSON
+# string (j). With $rawp: only that container's text, raw (control characters
+# as spaces), for an answer that hands it back.
+function Get-Facts([string]$s, [string]$rawp) {
+    $spanW = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    if ($rawp) { [void]$spanW.Add($rawp) } else { foreach ($w in $SpanDefault) { [void]$spanW.Add($w) } }
+    $out = New-Object 'System.Collections.Generic.List[string]'
+    $jt = New-Object 'System.Collections.Generic.List[int]'
+    $jk = New-Object 'System.Collections.Generic.List[string]'
+    $je = New-Object 'System.Collections.Generic.List[bool]'
+    $sps = New-Object 'System.Collections.Generic.List[int]'
+    $spp = New-Object 'System.Collections.Generic.List[string]'
+    $count = 0
+    $m = $TokRe.Match([string]$s, 0)
+    while ($m.Success) {
+        $d = $jt.Count
+        if ($m.Groups[1].Success) {
+            $c = $m.Groups[1].Value
+            if ($c -ceq ',') {
+                if ($d -gt 0) { if ($jt[$d - 1] -eq 2) { $jk[$d - 1] = [string]([int]$jk[$d - 1] + 1) } else { $je[$d - 1] = $true } }
+            } elseif ($c -ceq ':') {
+                if ($d -gt 0) { $je[$d - 1] = $false }
+            } elseif ($c -ceq '{' -or $c -ceq '[') {
+                $p = ''
+                if ($d -gt 0) { $p = $jk -join '.' }
+                if ($c -ceq '{') { $jt.Add(1); $jk.Add(''); $je.Add($true) } else { $jt.Add(2); $jk.Add('0'); $je.Add($false) }
+                $st = -1
+                if ($p.Length -gt 0 -and ($spanW.Contains($p) -or $p -cmatch '\Apermission_suggestions\.[0-9]+\z')) { $st = $m.Index }
+                $sps.Add($st)
+                $spp.Add($p)
+            } elseif ($d -gt 0) {
+                $st = $sps[$d - 1]
+                if ($st -ge 0) {
+                    $t = $s.Substring($st, $m.Index - $st + 1)
+                    if ($rawp) {
+                        if ($spp[$d - 1] -ceq $rawp) { return $CtrlRe.Replace($t, ' ') }
+                    } elseif ($count -lt 20000) {
+                        $count++
+                        $out.Add($spp[$d - 1] + $Tab + 'j' + $Tab + (ConvertTo-JsonEsc $t))
+                    }
+                }
+                $jt.RemoveAt($d - 1); $jk.RemoveAt($d - 1); $je.RemoveAt($d - 1); $sps.RemoveAt($d - 1); $spp.RemoveAt($d - 1)
+            }
+        } elseif ($m.Groups[2].Success) {
+            $v = $m.Groups[2].Value
+            $v = $v.Substring(1, $v.Length - 2)
+            if ($d -gt 0 -and $jt[$d - 1] -eq 1 -and $je[$d - 1]) { $jk[$d - 1] = $v }
+            elseif ($d -gt 0 -and -not $rawp -and $count -lt 20000) {
+                $count++
+                $out.Add(($jk -join '.') + $Tab + 's' + $Tab + $CtrlRe.Replace($v, ' '))
+            }
+        } elseif ($m.Groups[3].Success) {
+            break
+        } elseif ($m.Groups[4].Success) {
+            if ($d -gt 0 -and -not $rawp -and $count -lt 20000) {
+                $count++
+                $out.Add(($jk -join '.') + $Tab + 'r' + $Tab + $m.Groups[4].Value)
+            }
+        }
+        $m = $m.NextMatch()
+    }
+    if ($rawp) { return '' }
+    return (, $out)
 }
 
-# Truncates JSON-escaped string content to $maxU characters and $maxB UTF-8
-# bytes without splitting an escape or a surrogate pair; control characters
-# become spaces. -Base keeps only the last path component (for cwd).
-function Limit-JsonText([string]$s, [int]$maxU, [int]$maxB, [switch]$Base) {
+# Raw text as the content of a JSON string: \ and " escaped, control
+# characters (tab and line breaks too) as spaces (jesc).
+function ConvertTo-JsonEsc([string]$t) {
+    return $CtrlRe.Replace($t, ' ').Replace('\', '\\').Replace('"', '\"')
+}
+
+function Test-Hex4([string]$s) {
+    return ($s.Length -eq 4 -and $s -cmatch '\A[0-9a-fA-F]{4}\z')
+}
+
+# nhex(substr(s, i + 1, 4)): the value of 4 hex digits at 0-based index i, -1 if none.
+function Get-Hex4([string]$s, [int]$i) {
+    if ($i -lt 0 -or $i + 4 -gt $s.Length) { return -1 }
+    $h = $s.Substring($i, 4)
+    if ($h -cnotmatch '\A[0-9a-fA-F]{4}\z') { return -1 }
+    return [Convert]::ToInt32($h, 16)
+}
+
+# jnorm: JSON-escaped string content, normalized (TDS_AGENT_EVENTS_V2 section
+# 2.2): escapes stay as received; control characters and the escapes that
+# stand for them become a space ($keepnl keeps \n, \t, \u000a and \u0009);
+# lone surrogates and bytes that are not UTF-8 become a space; a broken escape
+# ends the text.
+function ConvertTo-Norm([string]$s, [bool]$keepnl) {
+    $n = $s.Length
+    if ($n -eq 0) { return '' }
+    $sb = New-Object System.Text.StringBuilder ($n + 16)
+    $i = 0
+    while ($i -lt $n) {
+        $m = $NormRe.Match($s, $i)
+        if (-not $m.Success) { [void]$sb.Append($s, $i, $n - $i); break }
+        $k = $m.Index
+        if ($k -gt $i) { [void]$sb.Append($s, $i, $k - $i) }
+        $i = $k
+        $c = [int]$s[$i]
+        $step = 1
+        $unit = ' '
+        if ($c -eq 92) {
+            if ($i + 1 -ge $n) { break }
+            $e = [int]$s[$i + 1]
+            $step = 2
+            if ($e -eq 117) {
+                $v = Get-Hex4 $s ($i + 2)
+                if ($v -lt 0) { break }
+                $unit = $s.Substring($i, 6)
+                $step = 6
+                if ($v -ge 55296 -and $v -le 56319) {
+                    $v2 = -1
+                    if ($i + 8 -le $n -and $s.Substring($i + 6, 2) -ceq '\u') { $v2 = Get-Hex4 $s ($i + 8) }
+                    if ($v2 -ge 56320 -and $v2 -le 57343) { $unit = $s.Substring($i, 12); $step = 12 } else { $unit = ' ' }
+                } elseif ($v -ge 56320 -and $v -le 57343) { $unit = ' ' }
+                elseif ($keepnl -and ($v -eq 10 -or $v -eq 9)) { }
+                elseif ($v -lt 32 -or ($v -ge 127 -and $v -le 159) -or $v -eq 8232 -or $v -eq 8233) { $unit = ' ' }
+            } elseif ($e -eq 34 -or $e -eq 92 -or $e -eq 47) { $unit = $s.Substring($i, 2) }
+            elseif ($keepnl -and ($e -eq 110 -or $e -eq 116)) { $unit = $s.Substring($i, 2) }
+        } elseif ($c -ge 192) {
+            $w = 0
+            if ($c -lt 224) { $w = 2 } elseif ($c -lt 240) { $w = 3 } elseif ($c -lt 248) { $w = 4 }
+            $ok = ($w -gt 0)
+            for ($j = 1; $ok -and $j -lt $w; $j++) {
+                if ($i + $j -ge $n) { $ok = $false } else { $x = [int]$s[$i + $j]; if ($x -lt 128 -or $x -ge 192) { $ok = $false } }
+            }
+            if ($ok) {
+                $unit = $s.Substring($i, $w)
+                $step = $w
+                if ($c -eq 194 -and [int]$s[$i + 1] -lt 160) { $unit = ' ' }
+            }
+        }
+        [void]$sb.Append($unit)
+        $i += $step
+    }
+    return $sb.ToString()
+}
+
+# ucut: the longest start of normalized content with at most $maxu units (an
+# escape, a surrogate pair escape or a UTF-8 character is one) and $maxb bytes,
+# never splitting a unit.
+function Get-UCut([string]$s, [int64]$maxu, [int64]$maxb) {
+    $n = $s.Length
+    if ($n -le $maxb -and $n -le $maxu) { return $s }
+    $u = [int64]0
+    $b = [int64]0
+    $i = 0
+    while ($i -lt $n) {
+        $m = $UnitRe.Match($s, $i)
+        $k = $n
+        if ($m.Success) { $k = $m.Index }
+        if ($k -gt $i) {
+            # A run of one-byte units.
+            $run = [int64]($k - $i)
+            $room = [Math]::Min($maxu - $u, $maxb - $b)
+            if ($room -lt $run) { $i += [int]$room; break }
+            $u += $run; $b += $run; $i = $k
+            if ($i -ge $n) { break }
+        }
+        $c = [int]$s[$i]
+        if ($c -eq 92) {
+            $step = 2
+            if ($i + 1 -lt $n -and [int]$s[$i + 1] -eq 117) {
+                $step = 6
+                $v = Get-Hex4 $s ($i + 2)
+                if ($v -ge 55296 -and $v -le 56319) { $step = 12 }
+            }
+        } elseif ($c -ge 240) { $step = 4 } elseif ($c -ge 224) { $step = 3 } else { $step = 2 }
+        if ($u + 1 -gt $maxu -or $b + $step -gt $maxb) { break }
+        $u++; $b += $step; $i += $step
+    }
+    if ($i -gt $n) { $i = $n }
+    return $s.Substring(0, $i)
+}
+
+# json_trim (JSON_TRIM): JSON-escaped string content cut to $maxU characters
+# and $maxB bytes without splitting an escape or a UTF-8 sequence; control
+# characters become spaces. -Base keeps only the last path component (cwd).
+function Limit-Json([string]$s, [int64]$maxU, [int64]$maxB, [switch]$Base) {
     if ($Base) {
         while ($s.Length -gt 0) {
-            if ($s.EndsWith('/')) { $s = $s.Substring(0, $s.Length - 1) }
-            elseif ($s.EndsWith('\\')) { $s = $s.Substring(0, $s.Length - 2) }
+            if ($s.EndsWith('/', $Ord)) { $s = $s.Substring(0, $s.Length - 1) }
+            elseif ($s.Length -ge 2 -and $s.EndsWith('\\', $Ord)) { $s = $s.Substring(0, $s.Length - 2) }
             else { break }
         }
         $p = 0
         $k = 0
         while ($k -lt $s.Length) {
-            $c = $s[$k]
-            if ($c -eq '/') { $p = $k + 1 }
-            elseif ($c -eq '\' -and $k + 1 -lt $s.Length -and $s[$k + 1] -eq '\') { $p = $k + 2; $k++ }
-            elseif ($c -eq '\') { $k++ }
+            $c = [int]$s[$k]
+            if ($c -eq 47) { $p = $k + 1 }
+            elseif ($c -eq 92 -and $k + 1 -lt $s.Length -and [int]$s[$k + 1] -eq 92) { $p = $k + 2; $k++ }
+            elseif ($c -eq 92) { $k++ }
             $k++
         }
         $s = $s.Substring([Math]::Min($p, $s.Length))
     }
     $sb = New-Object System.Text.StringBuilder
-    $i = 0; $u = 0; $b = 0; $n = $s.Length
+    $n = $s.Length
+    $i = 0
+    $u = 0
+    $b = 0
     while ($i -lt $n -and $u -lt $maxU) {
-        $c = $s[$i]
-        $unit = [string]$c
+        $c = [int]$s[$i]
         $step = 1
-        $code = [int]$c
-        if ($c -eq '\') {
+        $unit = [string]$s[$i]
+        if ($c -eq 92) {
             if ($i + 1 -ge $n) { break }
-            $e = $s[$i + 1]
+            $e = [int]$s[$i + 1]
             $step = 2
-            if ($e -eq 'u') {
-                if ($i + 6 -gt $n -or -not (Test-Hex4 $s.Substring($i + 2, 4))) { break }
-                $v = [Convert]::ToInt32($s.Substring($i + 2, 4), 16)
-                $unit = $s.Substring($i, 6); $step = 6
-                if ($v -ge 0xD800 -and $v -le 0xDBFF) {
+            if ($e -eq 117) {
+                $v = Get-Hex4 $s ($i + 2)
+                if ($v -lt 0) { break }
+                $unit = $s.Substring($i, 6)
+                $step = 6
+                if ($v -ge 55296 -and $v -le 56319) {
                     $v2 = -1
-                    if ($i + 12 -le $n -and $s.Substring($i + 6, 2) -eq '\u' -and (Test-Hex4 $s.Substring($i + 8, 4))) {
-                        $v2 = [Convert]::ToInt32($s.Substring($i + 8, 4), 16)
-                    }
-                    if ($v2 -ge 0xDC00 -and $v2 -le 0xDFFF) { $unit = $s.Substring($i, 12); $step = 12 }
-                    else { $unit = ' ' }
-                } elseif ($v -ge 0xDC00 -and $v -le 0xDFFF) { $unit = ' ' }
-                elseif ($v -lt 32 -or ($v -ge 127 -and $v -le 159) -or $v -eq 0x2028 -or $v -eq 0x2029) { $unit = ' ' }
-            } elseif ($e -eq '"' -or $e -eq '\' -or $e -eq '/') {
-                $unit = $s.Substring($i, 2)
-            } else {
-                $unit = ' '
-            }
-        } elseif ([char]::IsHighSurrogate($c)) {
-            if ($i + 1 -lt $n -and [char]::IsLowSurrogate($s[$i + 1])) { $unit = $s.Substring($i, 2); $step = 2 }
+                    if ($i + 8 -le $n -and $s.Substring($i + 6, 2) -ceq '\u') { $v2 = Get-Hex4 $s ($i + 8) }
+                    if ($v2 -ge 56320 -and $v2 -le 57343) { $unit = $s.Substring($i, 12); $step = 12 } else { $unit = ' ' }
+                } elseif ($v -ge 56320 -and $v -le 57343) { $unit = ' ' }
+                elseif ($v -lt 32 -or ($v -ge 127 -and $v -le 159) -or $v -eq 8232 -or $v -eq 8233) { $unit = ' ' }
+            } elseif ($e -eq 34 -or $e -eq 92 -or $e -eq 47) { $unit = $s.Substring($i, 2) }
             else { $unit = ' ' }
-        } elseif ([char]::IsLowSurrogate($c)) {
-            $unit = ' '
-        } elseif ($code -lt 32 -or ($code -ge 127 -and $code -le 159) -or $code -eq 0x2028 -or $code -eq 0x2029) {
-            $unit = ' '
-        }
-        $ub = $Utf8.GetByteCount($unit)
-        if ($b + $ub -gt $maxB) { break }
+        } elseif ($c -ge 192) {
+            $w = 0
+            if ($c -lt 224) { $w = 2 } elseif ($c -lt 240) { $w = 3 } elseif ($c -lt 248) { $w = 4 }
+            $ok = ($w -gt 0)
+            for ($j = 1; $ok -and $j -lt $w; $j++) {
+                if ($i + $j -ge $n) { $ok = $false } else { $x = [int]$s[$i + $j]; if ($x -lt 128 -or $x -ge 192) { $ok = $false } }
+            }
+            if ($ok) {
+                $unit = $s.Substring($i, $w)
+                $step = $w
+                if ($c -eq 194 -and [int]$s[$i + 1] -lt 160) { $unit = ' ' }
+            } else { $unit = ' ' }
+        } elseif ($c -lt 32 -or $c -ge 127) { $unit = ' ' }
+        if ($b + $unit.Length -gt $maxB) { break }
         [void]$sb.Append($unit)
-        $b += $ub; $u++; $i += $step
+        $b += $unit.Length
+        $u++
+        $i += $step
     }
     return $sb.ToString()
 }
 
-# Escapes plain text (from our own config files) as JSON string content.
-function ConvertTo-JsonText([string]$text, [int]$maxU, [int]$maxB) {
-    $sb = New-Object System.Text.StringBuilder
-    foreach ($ch in $text.ToCharArray()) {
-        $code = [int]$ch
-        if ($code -lt 32 -or $code -eq 127) { continue }
-        if ($ch -eq '\') { [void]$sb.Append('\\') }
-        elseif ($ch -eq '"') { [void]$sb.Append('\"') }
-        else { [void]$sb.Append($ch) }
-    }
-    return (Limit-JsonText $sb.ToString() $maxU $maxB)
+# json_text: plain text (a byte string: our own config files, command-line
+# arguments) as JSON string content: control characters dropped, \ and "
+# escaped, then cut as Limit-Json.
+function ConvertTo-JsonB([string]$text, [int64]$maxU, [int64]$maxB, [switch]$Base) {
+    $t = [regex]::Replace([string]$text, '[\x00-\x1F\x7F]', '').Replace('\', '\\').Replace('"', '\"')
+    return (Limit-Json $t $maxU $maxB -Base:$Base)
 }
 
 # Text of a `simpleterm notify` notification, as notify_text in agent-hook.sh:
@@ -221,7 +499,7 @@ function ConvertTo-JsonText([string]$text, [int]$maxU, [int]$maxB) {
 # UTF-16 form of invalid UTF-8) are removed; `;`, the OSC 777 field
 # separator, becomes `,`; leading and trailing spaces go; then it is cut to
 # $maxU characters and $maxB UTF-8 bytes, between characters and not after a
-# space.
+# space. (.NET text in, .NET text out.)
 function Format-NotifyText([string]$text, [int]$maxU, [int]$maxB) {
     $t = [regex]::Replace([string]$text, '[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]', '')
     $t = [regex]::Replace($t, '[\t\n\x0b\x0c\r\u0085\u2028\u2029]', ' ')
@@ -240,11 +518,16 @@ function Format-NotifyText([string]$text, [int]$maxU, [int]$maxB) {
 }
 
 function Test-Hex([string]$s, [int]$len) {
-    return ($null -ne $s -and $s.Length -eq $len -and $s -cmatch '^[0-9a-f]+$')
+    return ($null -ne $s -and $s.Length -eq $len -and $s -cmatch '\A[0-9a-f]+\z')
 }
 
 function Test-UInt([string]$s) {
-    return ($null -ne $s -and $s -match '^[0-9]{1,12}$')
+    return ($null -ne $s -and $s -cmatch '\A[0-9]{1,12}\z')
+}
+
+# is_id: the section 3 id format.
+function Test-Id([string]$s) {
+    return ($null -ne $s -and $s -cmatch '\A[A-Za-z0-9._:-]+\z' -and $s.Length -le 128)
 }
 
 # --- crypto ----------------------------------------------------------------
@@ -271,18 +554,19 @@ function New-RandomHex([int]$n) {
 
 function Get-Sha256Hex([string]$text) {
     $sha = [System.Security.Cryptography.SHA256]::Create()
-    $hash = $sha.ComputeHash([Text.Encoding]::ASCII.GetBytes($text))
+    $hash = $sha.ComputeHash($Latin1.GetBytes($text))
     $sha.Dispose()
     return (ConvertTo-Hex $hash)
 }
 
 function Get-HmacHex([string]$keyHex, [string]$message) {
     $h = New-Object System.Security.Cryptography.HMACSHA256 (, (ConvertFrom-Hex $keyHex))
-    $mac = $h.ComputeHash([Text.Encoding]::ASCII.GetBytes($message))
+    $mac = $h.ComputeHash($Latin1.GetBytes($message))
     $h.Dispose()
     return (ConvertTo-Hex $mac)
 }
 
+# Compares two MACs in constant time.
 function Test-SameHex([string]$a, [string]$b) {
     if ($a.Length -ne $b.Length) { return $false }
     $diff = 0
@@ -290,7 +574,8 @@ function Test-SameHex([string]$a, [string]$b) {
     return ($diff -eq 0)
 }
 
-# Returns the section 5.2 envelope JSON of $plain for $link, or $null.
+# Returns the section 5.2 envelope JSON of plaintext $plain (a byte string)
+# for $link, or $null.
 function New-Envelope([string]$plain, $link) {
     $iv = New-RandomHex 16
     if ($env:SIMPLETERM_HOOK_TEST -eq '1' -and $env:SIMPLETERM_HOOK_TEST_IV) { $iv = $env:SIMPLETERM_HOOK_TEST_IV }
@@ -301,7 +586,7 @@ function New-Envelope([string]$plain, $link) {
     $aes.Key = ConvertFrom-Hex $link.enc
     $aes.IV = ConvertFrom-Hex $iv
     $enc = $aes.CreateEncryptor()
-    $pb = $Utf8.GetBytes($plain)
+    $pb = $Latin1.GetBytes($plain)
     $ct = [Convert]::ToBase64String($enc.TransformFinalBlock($pb, 0, $pb.Length))
     $enc.Dispose()
     $aes.Dispose()
@@ -309,29 +594,55 @@ function New-Envelope([string]$plain, $link) {
     return '{"v":1,"iv":"' + $iv + '","ct":"' + $ct + '","mac":"' + $mac + '"}'
 }
 
+# Opens a decision extension (section 5.1): its plaintext (the first 4096
+# bytes, line breaks dropped) or '' if it does not decrypt.
+function Open-Dext($link, [string]$iv, [string]$ct) {
+    try {
+        $aes = [System.Security.Cryptography.Aes]::Create()
+        $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
+        $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+        $aes.Key = ConvertFrom-Hex $link.enc
+        $aes.IV = ConvertFrom-Hex $iv
+        $dec = $aes.CreateDecryptor()
+        $cb = [Convert]::FromBase64String($ct)
+        $pb = $dec.TransformFinalBlock($cb, 0, $cb.Length)
+        $dec.Dispose()
+        $aes.Dispose()
+        $n = [Math]::Min(4096, $pb.Length)
+        return $Latin1.GetString($pb, 0, $n).Replace("`n", '').Replace("`r", '')
+    } catch { return '' }
+}
+
 # --- links -----------------------------------------------------------------
 
+# Loads one link file; $null if it is unusable (load_link).
 function Read-Link([string]$file) {
     try {
         $info = New-Object IO.FileInfo($file)
-        if (-not $info.Exists -or $info.Length -gt 4096) { Write-Log 'link-skip too-large'; return $null }
-        $link = @{ v = ''; relay = ''; link = ''; secret = ''; enc = ''; mac = ''; label = ''; kind = '' }
-        foreach ($line in [IO.File]::ReadAllLines($file, $Utf8)) {
+        if (-not $info.Exists) { return $null }
+        if ($info.Length -gt 4096) { Write-Log 'link-skip too-large'; return $null }
+        $link = @{ v = ''; relay = ''; link = ''; secret = ''; enc = ''; mac = ''; label = ''; kind = ''; fmt = ''; file = $file }
+        $text = $Latin1.GetString([IO.File]::ReadAllBytes($file))
+        foreach ($line in $text.Split([char]10)) {
             if ($line.Length -gt 512) { continue }
-            $idx = $line.IndexOf('=')
-            if ($idx -lt 1) { continue }
-            $k = $line.Substring(0, $idx)
-            if ($link.ContainsKey($k)) { $link[$k] = $line.Substring($idx + 1).TrimEnd("`r") }
+            if ($line.EndsWith("`r", $Ord)) { $line = $line.Substring(0, $line.Length - 1) }
+            foreach ($k in @('v', 'relay', 'link', 'secret', 'enc', 'mac', 'label', 'kind', 'fmt')) {
+                if ($line.StartsWith($k + '=', $Ord)) { $link[$k] = $line.Substring($k.Length + 1); break }
+            }
         }
-        if ($link.v -ne '1') { Write-Log 'link-skip version'; return $null }
+        if ($link.v -cne '1') { Write-Log 'link-skip version'; return $null }
         # kind=tunnel: the app's end of its SSH connection on a loopback port.
         if ($link.kind -cne 'tunnel') { $link.kind = '' }
+        # fmt=2: the receiver takes decision extensions and decidable questions
+        # (TDS_AGENT_EVENTS_V2 section 1.2). Anything else is an older receiver.
+        if ($link.fmt -cne '2') { $link.fmt = '' }
         if (-not ((Test-Hex $link.link 32) -and (Test-Hex $link.secret 64) -and (Test-Hex $link.enc 64) -and (Test-Hex $link.mac 64))) {
             Write-Log 'link-skip fields'; return $null
         }
-        $relay = $link.relay.TrimEnd('/')
-        $ok = ($relay -cmatch '^https://[A-Za-z0-9.:/_~%-]+$') -or
-            ($relay -cmatch '^http://(127\.0\.0\.1|localhost)(:[0-9]+)?(/[A-Za-z0-9._~%/-]*)?$')
+        $relay = $link.relay
+        if ($relay.EndsWith('/', $Ord)) { $relay = $relay.Substring(0, $relay.Length - 1) }
+        $ok = ($relay -cmatch '\A[A-Za-z0-9.:/_~%-]+\z') -and
+            (($relay -cmatch '\Ahttps://.') -or ($relay -cmatch '\Ahttp://(127\.0\.0\.1|localhost)([:/]|\z)'))
         if (-not $ok) { Write-Log 'link-skip relay'; return $null }
         $link.relay = $relay
         if ([IO.File]::Exists((Join-Path $RunDir ($link.link + '.revoked')))) { return $null }
@@ -345,21 +656,30 @@ function Read-Link([string]$file) {
 function Get-LinkFiles {
     $files = @()
     if (-not [IO.Directory]::Exists($LinksDir)) { return $files }
-    foreach ($f in ([IO.Directory]::GetFiles($LinksDir, '*.conf') | Sort-Object)) {
-        $name = [IO.Path]::GetFileNameWithoutExtension($f)
-        if (-not (Test-Hex $name 32)) { continue }
+    $all = [IO.Directory]::GetFiles($LinksDir, '*.conf')
+    [Array]::Sort($all, [StringComparer]::Ordinal)
+    foreach ($f in $all) {
+        $name = [IO.Path]::GetFileName($f)
+        if (-not $name.EndsWith('.conf', $Ord)) { continue }
+        if (-not (Test-Hex $name.Substring(0, $name.Length - 5) 32)) { continue }
         $files += $f
         if ($files.Count -ge $MaxLinks) { break }
     }
     return $files
 }
 
-function Get-ConfInt([string]$key, [int]$default) {
+# conf_int: key=digits from ~/.simpleterm/agent-hook.conf (the first line that
+# names the key decides), or the default.
+function Get-ConfInt([string]$key, [int64]$default) {
     $path = Join-Path $StDir 'agent-hook.conf'
     try {
-        if ([IO.File]::Exists($path) -and (New-Object IO.FileInfo($path)).Length -le 4096) {
-            foreach ($line in [IO.File]::ReadAllLines($path, $Utf8)) {
-                if ($line -cmatch ('^' + $key + '=([0-9]{1,6})\s*$')) { return [int]$Matches[1] }
+        if ([IO.File]::Exists($path)) {
+            foreach ($line in (Read-HeadB $path 4096).Split([char]10)) {
+                if ($line.StartsWith($key + '=', $Ord) -and $line.Substring($key.Length + 1) -cmatch '\A[0-9]*\z') {
+                    $v = $line.Substring($key.Length + 1)
+                    if (Test-UInt $v) { return [int64]$v }
+                    return $default
+                }
             }
         }
     } catch { }
@@ -371,36 +691,56 @@ function Get-ConfInt([string]$key, [int]$default) {
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 } catch { }
+# Every link long-polls at once (several may share the relay's host): .NET
+# Framework allows 2 connections per host by default, and a third request
+# would queue behind a 25-second poll. No 100-continue round trip either.
+try {
+    [Net.ServicePointManager]::DefaultConnectionLimit = 64
+    [Net.ServicePointManager]::Expect100Continue = $false
+} catch { }
 
-# Starts an asynchronous request; Complete-Relay finishes it.
+# Starts an asynchronous request ($body: a byte string); Complete-Relay
+# finishes it. Nothing secret goes on a command line: the bearer token is a
+# request header.
 function Start-Relay($link, [string]$method, [string]$path, [string]$body, [int]$timeoutSec) {
-    $req = [System.Net.HttpWebRequest]::Create($link.relay + $path)
-    $req.Method = $method
-    $req.AllowAutoRedirect = $false
-    $req.UserAgent = 'simpleterm-hook/1'
-    $req.Timeout = $timeoutSec * 1000
-    $req.ReadWriteTimeout = $timeoutSec * 1000
-    $req.Headers['Authorization'] = 'Bearer ' + $link.link + '.' + $link.secret
-    if ($method -eq 'POST') {
-        $bytes = $Utf8.GetBytes($body)
-        $req.ContentType = 'application/json'
-        $req.ContentLength = $bytes.Length
-        $stream = $req.GetRequestStream()
-        $stream.Write($bytes, 0, $bytes.Length)
-        $stream.Close()
+    $op = @{ req = $null; ar = $null; until = [DateTime]::UtcNow.AddSeconds($timeoutSec); link = $link; failed = $false }
+    try {
+        $req = [System.Net.HttpWebRequest]::Create($link.relay + $path)
+        $op.req = $req
+        $req.Method = $method
+        $req.AllowAutoRedirect = $false
+        $req.UserAgent = 'simpleterm-hook/1'
+        $req.Timeout = $timeoutSec * 1000
+        $req.ReadWriteTimeout = $timeoutSec * 1000
+        $req.Headers['Authorization'] = 'Bearer ' + $link.link + '.' + $link.secret
+        if ($method -eq 'POST') {
+            $bytes = $Latin1.GetBytes($body)
+            $req.ContentType = 'application/json'
+            $req.ContentLength = $bytes.Length
+            $stream = $req.GetRequestStream()
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Close()
+        }
+        $op.ar = $req.BeginGetResponse($null, $null)
+    } catch {
+        $op.failed = $true
     }
-    return @{ req = $req; ar = $req.BeginGetResponse($null, $null); until = [DateTime]::UtcNow.AddSeconds($timeoutSec); link = $link }
+    return $op
 }
 
 function Test-RelayDone($op) {
+    if ($op.failed) { return $true }
     if ($op.ar.IsCompleted) { return $true }
     if ([DateTime]::UtcNow -gt $op.until) { try { $op.req.Abort() } catch { } ; return $true }
     return $false
 }
 
-# Waits for the request and returns @{ code; body } (code 0 on failure).
-function Complete-Relay($op) {
-    while (-not (Test-RelayDone $op)) { Start-Sleep -Milliseconds 100 }
+# Waits for the request and returns @{ code; body } (code 0 on failure; the
+# first $max bytes of the body as a byte string).
+function Complete-Relay($op, [int]$max) {
+    if ($max -le 0) { $max = 4096 }
+    while (-not (Test-RelayDone $op)) { Start-Sleep -Milliseconds 50 }
+    if ($op.failed) { return @{ code = 0; body = '' } }
     $resp = $null
     try {
         $resp = $op.req.EndGetResponse($op.ar)
@@ -414,82 +754,919 @@ function Complete-Relay($op) {
     $body = ''
     try {
         $stream = $resp.GetResponseStream()
-        $buf = New-Object byte[] 4096
+        $buf = New-Object byte[] $max
         $total = 0
         while ($total -lt $buf.Length) {
             $n = $stream.Read($buf, $total, $buf.Length - $total)
             if ($n -le 0) { break }
             $total += $n
         }
-        $body = $Utf8.GetString($buf, 0, $total)
+        $body = $Latin1.GetString($buf, 0, $total)
     } catch { }
-    $resp.Close()
+    try { $resp.Close() } catch { }
     return @{ code = $code; body = $body }
 }
 
 function Short([string]$id) { return $id.Substring(0, 8) }
 
+function Format-Code([int]$code) { return $code.ToString('000', $Inv) }
+
+# --- event format v2: the spec (V2_SPEC) -------------------------------------------
+
+# The v2 fields of an event (TDS_AGENT_EVENTS_V2 section 3) as spec lines
+# `path TAB o|a|s|r TAB value`, from the facts and `@.<key>` parameters
+# (strings, JSON-escaped): common fields, the request (section 4; rkind names
+# how this agent asked), the end of a turn (section 6.1), a state (6.2) or a
+# result (5.6). Lines starting with # are notes for the waiting hook (#smap:
+# the original index of each Claude scope). The port of V2_SPEC in
+# agent-hook.sh, for the request kinds of the agents this hook serves.
+function SpFs([string]$p) {
+    $t = $null
+    if ($Script:SFT.TryGetValue($p, [ref]$t) -and $t -cne 'r') { return $Script:SFV[$p] }
+    return ''
+}
+
+function SpFr([string]$p) {
+    $t = $null
+    if ($Script:SFT.TryGetValue($p, [ref]$t) -and $t -ceq 'r' -and $Script:SFV[$p] -cne 'null') { return $Script:SFV[$p] }
+    return ''
+}
+
+function SpIn([string]$p) { return $Script:SFT.ContainsKey($p) }
+function SpP([string]$k) { return (SpFs ('@.' + $k)) }
+function SpOut([string]$p, [string]$t, [string]$v) { $Script:SOut.Add($p + $Tab + $t + $Tab + $v) }
+function SpS([string]$p, [string]$v, [bool]$keep) { if ($v.Length -gt 0) { SpOut $p 's' (ConvertTo-Norm $v $keep) } }
+function SpR([string]$p, [string]$v) { if ($v.Length -gt 0) { SpOut $p 'r' $v } }
+function SpB([string]$p, [string]$v) { if ($v -ceq 'true' -or $v -ceq 'false') { SpOut $p 'r' $v } }
+function SpO([string]$p) { SpOut $p 'o' '' }
+function SpA([string]$p) { SpOut $p 'a' '' }
+
+# The first non-empty string fact among the comma list of paths.
+function SpFirst([string]$list) {
+    foreach ($p in $list.Split(',')) {
+        $x = SpFs $p
+        if ($x.Length -gt 0) { return $x }
+    }
+    return ''
+}
+
+function Split-Words([string]$list) {
+    return @(([string]$list).Split([char[]]@([char]32, [char]9, [char]10), [StringSplitOptions]::RemoveEmptyEntries))
+}
+
+# A list of decision ids as a JSON array at path p.
+function SpIds([string]$p, [string]$list) {
+    $l = Split-Words $list
+    if ($l.Count -eq 0) { return }
+    SpA $p
+    $m = 0
+    foreach ($x in $l) { SpOut ($p + '.' + $m) 's' $x; $m++ }
+}
+
+function Test-InList([string]$list, [string]$v) { return (' ' + $list + ' ').Contains(' ' + $v + ' ') }
+
+function SpAskShell([string]$cmd, [string]$desc) { SpO 'req.ask'; SpS 'req.ask.cmd' $cmd $true; SpS 'req.ask.desc' $desc $true }
+function SpAskPath([string]$p) { SpO 'req.ask'; SpS 'req.ask.path' $p $true }
+function SpAskWeb([string]$url, [string]$prompt) { SpO 'req.ask'; SpS 'req.ask.url' $url $true; SpS 'req.ask.prompt' $prompt $true }
+function SpAskMcp([string]$server, [string]$tool, [string]$a) { SpO 'req.ask'; SpS 'req.ask.server' $server $true; SpS 'req.ask.tool' $tool $true; SpS 'req.ask.args' $a $false }
+function SpAskText([string]$t) { if ($t.Length -eq 0) { return }; SpO 'req.ask'; SpS 'req.ask.text' $t $true }
+
+# mcp__<server>__<tool> (Claude, Codex) or <server>__<tool> (Grok): MS, MT.
+function SpMcpSplit([string]$name, [string]$pre) {
+    $Script:MS = ''
+    $Script:MT = ''
+    $r = ''
+    if ($name.Length -gt $pre.Length) { $r = $name.Substring($pre.Length) }
+    $k = $r.IndexOf('__', $Ord)
+    if ($k -lt 0) { return $false }
+    $Script:MS = $r.Substring(0, $k)
+    $Script:MT = $r.Substring($k + 2)
+    return ($Script:MS.Length -gt 0 -and $Script:MT.Length -gt 0)
+}
+
+# Questions under prefix qp (qp.N...), with the field names of the agent.
+function SpAskQs([string]$qp, [string]$fq, [string]$fh, [string]$fm, [string]$fopt, [string]$fl, [string]$fd, [bool]$free, [string]$multitrue) {
+    SpO 'req.ask'
+    SpA 'req.ask.qs'
+    $n = 0
+    for ($k = 0; $k -lt 64; $k++) {
+        $base = $qp + '.' + $k
+        if (-not (SpIn ($base + '.' + $fq)) -and -not (SpIn ($base + '.' + $fh)) -and -not (SpIn ($base + '.' + $fopt + '.0.' + $fl)) -and -not (SpIn ($base + '.' + $fopt + '.0'))) { break }
+        $q = 'req.ask.qs.' + $n
+        SpO $q
+        SpS ($q + '.q') (SpFs ($base + '.' + $fq)) $true
+        SpS ($q + '.h') (SpFs ($base + '.' + $fh)) $true
+        $m = SpFr ($base + '.' + $fm)
+        if ($m.Length -eq 0 -and $multitrue.Length -gt 0 -and (SpFs ($base + '.' + $fm)) -ceq $multitrue) { $m = 'true' }
+        if ($m -ceq 'true') { SpOut ($q + '.multi') 'r' 'true' } else { SpOut ($q + '.multi') 'r' 'false' }
+        if ($free -or (SpFr ($base + '.custom')) -ceq 'true') { SpOut ($q + '.free') 'r' 'true' } else { SpOut ($q + '.free') 'r' 'false' }
+        SpA ($q + '.opts')
+        for ($j = 0; $j -lt 64; $j++) {
+            $ob = $base + '.' + $fopt + '.' + $j
+            if ($fl.Length -gt 0 -and (SpIn ($ob + '.' + $fl))) { $l = SpFs ($ob + '.' + $fl) }
+            elseif (SpIn $ob) { $l = SpFs $ob }
+            else { break }
+            SpO ($q + '.opts.' + $j)
+            SpS ($q + '.opts.' + $j + '.l') $l $true
+            if ($fl.Length -gt 0) { SpS ($q + '.opts.' + $j + '.d') (SpFs ($ob + '.' + $fd)) $true }
+        }
+        $n++
+    }
+    $Script:NQ = $n
+}
+
+# Codex apply_patch: the files it touches, lines added and removed.
+function SpAskCodexPatch([string]$t) {
+    SpO 'req.ask'
+    $files = New-Object 'System.Collections.Generic.List[string]'
+    $add = 0
+    $del = 0
+    $path = ''
+    foreach ($x in $t.Split([string[]]@('\n'), [StringSplitOptions]::None)) {
+        if ($x -cmatch '\A\*\*\* (Add|Update|Delete) File: ') {
+            $x = $x -creplace '\A\*\*\* (Add|Update|Delete) File: ', ''
+            if ($path.Length -eq 0) { $path = $x }
+            $files.Add($x)
+        } elseif ($x.StartsWith('+', $Ord) -and -not $x.StartsWith('+++', $Ord)) { $add++ }
+        elseif ($x.StartsWith('-', $Ord) -and -not $x.StartsWith('---', $Ord)) { $del++ }
+    }
+    SpS 'req.ask.path' $path $true
+    if ($files.Count -gt 1) {
+        SpA 'req.ask.files'
+        for ($k = 0; $k -lt $files.Count; $k++) { SpS ('req.ask.files.' + $k) $files[$k] $true }
+    }
+    SpO 'req.ask.change'
+    SpOut 'req.ask.change.form' 's' 'patch'
+    SpOut 'req.ask.change.fmt' 's' 'codex'
+    SpS 'req.ask.change.text' $t $true
+    SpOut 'req.ask.add' 'r' ([string]$add)
+    SpOut 'req.ask.del' 'r' ([string]$del)
+}
+
+function SpChangeReplace([string]$old, [string]$new, [string]$all) {
+    SpO 'req.ask.change'
+    SpOut 'req.ask.change.form' 's' 'replace'
+    SpS 'req.ask.change.old' $old $true
+    SpS 'req.ask.change.new' $new $true
+    SpB 'req.ask.change.all' $all
+}
+
+function SpChangeWrite([string]$content) {
+    SpO 'req.ask.change'
+    SpOut 'req.ask.change.form' 's' 'write'
+    SpS 'req.ask.change.content' $content $true
+}
+
+# Claude permission_suggestions -> scopes (addDirectories left out: undoing
+# it does not stop the next redirect from asking). SMAP: original indexes.
+function SpClaudeScopes {
+    $n = 0
+    $Script:SMAP = ''
+    $Script:SL = @{}
+    $Script:SK = @{}
+    $Script:SD = @{}
+    for ($k = 0; $k -lt 16; $k++) {
+        $pre = 'permission_suggestions.' + $k
+        if (-not (SpIn ($pre + '.type'))) { break }
+        $t = SpFs ($pre + '.type')
+        $beh = SpFs ($pre + '.behavior')
+        if ($t -ceq 'addDirectories' -or $t -ceq 'removeDirectories') { continue }
+        if (($t -ceq 'addRules' -or $t -ceq 'replaceRules') -and $beh.Length -gt 0 -and $beh -cne 'allow') { continue }
+        $lab = ''
+        if ($t -ceq 'addRules' -or $t -ceq 'replaceRules') {
+            for ($j = 0; $j -lt 16; $j++) {
+                $x = SpFs ($pre + '.rules.' + $j + '.toolName')
+                if ($x.Length -eq 0) { break }
+                $rc = SpFs ($pre + '.rules.' + $j + '.ruleContent')
+                if ($rc.Length -gt 0) { $x = $x + '(' + $rc + ')' }
+                if ($lab.Length -gt 0) { $lab += ', ' }
+                $lab += $x
+            }
+            $Script:SK[$n] = 'rule'
+        } elseif ($t -ceq 'setMode') { $lab = SpFs ($pre + '.mode'); $Script:SK[$n] = 'mode' }
+        else { $lab = $t; $Script:SK[$n] = 'other' }
+        if ($lab.Length -eq 0) { continue }
+        $Script:SL[$n] = $lab
+        $Script:SD[$n] = SpFs ($pre + '.destination')
+        $Script:SMAP += ' ' + $k
+        $n++
+    }
+    $Script:NS = $n
+}
+
+function SpScopes {
+    if ($Script:NS -eq 0) { return }
+    SpA 'req.scopes'
+    for ($k = 0; $k -lt $Script:NS; $k++) {
+        SpO ('req.scopes.' + $k)
+        SpS ('req.scopes.' + $k + '.label') $Script:SL[$k] $true
+        SpOut ('req.scopes.' + $k + '.kind') 's' $Script:SK[$k]
+        SpS ('req.scopes.' + $k + '.dest') $Script:SD[$k] $true
+    }
+}
+
+function SpReq([string]$rk) {
+    $id = ''
+    $win = 'other'
+    $tool = ''
+    $wait = 'shared'
+    $can = ''
+    $Script:NS = 0
+    $Script:NQ = 0
+    $Script:SMAP = ''
+    $rid = SpP 'rid'
+    if ($rk -ceq 'claude_perm' -or $rk -ceq 'claude_askpre') {
+        $tool = SpFs 'tool_name'
+        if ($tool -ceq 'Bash') { $win = 'shell' }
+        elseif ($tool -ceq 'Edit' -or $tool -ceq 'Write' -or $tool -ceq 'MultiEdit') { $win = 'edit' }
+        elseif ($tool -ceq 'WebFetch') { $win = 'web' }
+        elseif ($tool.StartsWith('mcp__', $Ord) -and (SpMcpSplit $tool 'mcp__')) { $win = 'mcp' }
+        elseif ($tool -ceq 'AskUserQuestion') { $win = 'question' }
+        elseif ($tool -ceq 'ExitPlanMode') { $win = 'plan' }
+        if ($win -ceq 'question') { $can = 'answer deny deny_reason' }
+        elseif ($win -ceq 'plan') { $can = 'plan_approve plan_refine deny' }
+        else {
+            SpClaudeScopes
+            $can = 'allow'
+            if ($Script:NS -gt 0) { $can += ' allow_scope' }
+            $can += ' deny deny_reason'
+        }
+    } elseif ($rk -ceq 'claude_notif') {
+        $t = SpP 'ntype'
+        $wait = 'none'
+        if ($t -ceq 'elicitation_dialog') { $win = 'form' } elseif ($t -ceq 'elicitation_url_dialog') { $win = 'login' } else { $win = 'other' }
+    } elseif ($rk -ceq 'codex_perm') {
+        $tool = SpFs 'tool_name'
+        $wait = 'hidden'
+        if ($tool -ceq 'Bash') { $win = 'shell' }
+        elseif ($tool -ceq 'apply_patch') { $win = 'edit' }
+        elseif ($tool.StartsWith('mcp__', $Ord) -and (SpMcpSplit $tool 'mcp__')) { $win = 'mcp' }
+        $can = 'allow deny deny_reason'
+    } elseif ($rk -ceq 'codex_plan') {
+        $win = 'plan'
+        $wait = 'none'
+    } elseif ($rk -ceq 'grok_notif') {
+        $wait = 'none'
+        $tool = SpFs 'pre.toolName'
+        if (Test-Id (SpFs 'pre.toolUseId')) { $id = SpFs 'pre.toolUseId' }
+        $t = SpP 'ntype'
+        if ($t -ceq 'plan' -or $tool -ceq 'exit_plan_mode') { $win = 'plan' }
+        elseif ($t -ceq 'elicitation_dialog' -or $tool -ceq 'ask_user_question') { $win = 'question' }
+        elseif ($tool -ceq 'run_terminal_command' -or $tool -ceq 'run_terminal_cmd' -or $tool -ceq 'Bash') { $win = 'shell' }
+        elseif ($tool -ceq 'write' -or $tool -ceq 'search_replace' -or $tool -ceq 'edit_file') { $win = 'edit' }
+        elseif ($tool -ceq 'web_fetch') { $win = 'web' }
+        elseif ($tool -ceq 'read_file') { $win = 'read' }
+        elseif ($tool.Length -gt 0 -and (SpMcpSplit $tool '')) { $win = 'mcp' }
+    }
+    if ($id.Length -eq 0) { $id = 'st-' + $rid }
+    SpO 'req'
+    SpOut 'req.id' 's' $id
+    SpOut 'req.win' 's' $win
+    SpS 'req.tool' $tool $true
+    SpOut 'req.wait' 's' $wait
+    # what is asked
+    if ($rk -ceq 'claude_perm' -or $rk -ceq 'claude_askpre') {
+        if ($win -ceq 'shell') { SpAskShell (SpFs 'tool_input.command') (SpFs 'tool_input.description') }
+        elseif ($win -ceq 'edit') {
+            SpAskPath (SpFs 'tool_input.file_path')
+            if ($tool -ceq 'Edit') { SpChangeReplace (SpFs 'tool_input.old_string') (SpFs 'tool_input.new_string') (SpFr 'tool_input.replace_all') }
+            elseif ($tool -ceq 'Write') { SpChangeWrite (SpFs 'tool_input.content') }
+        }
+        elseif ($win -ceq 'web') { SpAskWeb (SpFs 'tool_input.url') (SpFs 'tool_input.prompt') }
+        elseif ($win -ceq 'mcp') { SpAskMcp $Script:MS $Script:MT (SpFs 'tool_input') }
+        elseif ($win -ceq 'question') { SpAskQs 'tool_input.questions' 'question' 'header' 'multiSelect' 'options' 'label' 'description' $true '' }
+        elseif ($win -ceq 'plan') { SpO 'req.ask'; SpS 'req.ask.text' (SpFs 'tool_input.plan') $true; SpS 'req.ask.file' (SpFs 'tool_input.planFilePath') $true }
+        else { SpAskText (SpFirst 'tool_input.description,tool_input.command,tool_input.file_path,tool_input.url,tool_input.prompt') }
+    } elseif ($rk -ceq 'claude_notif') {
+        $t = SpFs 'message'
+        if ($win -ceq 'other') { SpAskText $t }
+        elseif ($t.Length -gt 0) { SpO 'req.ask'; SpS 'req.ask.msg' $t $true }
+    } elseif ($rk -ceq 'codex_perm') {
+        if ($win -ceq 'shell') { SpAskShell (SpFs 'tool_input.command') (SpFs 'tool_input.description') }
+        elseif ($win -ceq 'edit') { SpAskCodexPatch (SpFs 'tool_input.command') }
+        elseif ($win -ceq 'mcp') { SpAskMcp $Script:MS $Script:MT (SpFs 'tool_input') }
+        else { SpAskText (SpFirst 'tool_input.description,tool_input.command') }
+    } elseif ($rk -ceq 'codex_plan') { SpAskText (SpP 'plan') }
+    elseif ($rk -ceq 'grok_notif') {
+        if ($win -ceq 'shell') { SpAskShell (SpFs 'pre.toolInput.command') (SpFs 'pre.toolInput.description') }
+        elseif ($win -ceq 'edit' -or $win -ceq 'read') { SpAskPath (SpFirst 'pre.toolInput.file_path,pre.toolInput.path,pre.toolInput.target_file') }
+        elseif ($win -ceq 'web') { SpAskWeb (SpFs 'pre.toolInput.url') (SpFs 'pre.toolInput.prompt') }
+        elseif ($win -ceq 'mcp') { SpAskMcp $Script:MS $Script:MT (SpFs 'pre.toolInput') }
+        elseif ($win -ceq 'question' -and (SpIn 'pre.toolInput.questions.0.question')) { SpAskQs 'pre.toolInput.questions' 'question' 'header' 'multiSelect' 'options' 'label' 'description' $false '' }
+        else { SpAskText (SpFs 'message') }
+    }
+    # what may be decided (the full list; the builder narrows it per link)
+    SpIds 'req.can' $can
+    SpScopes
+    if ($win -ceq 'plan' -and $rk -ceq 'claude_perm') { SpA 'req.modes'; SpOut 'req.modes.0' 's' 'default'; SpOut 'req.modes.1' 's' 'accept_edits' }
+    if ($Script:SMAP.Length -gt 0) { SpOut '#smap' 's' $Script:SMAP }
+}
+
+function SpBgKind([string]$t) {
+    if ($t -ceq 'subagent' -or $t -ceq 'shell' -or $t -ceq 'monitor' -or $t -ceq 'workflow' -or $t -ceq 'teammate') { return $t }
+    if ($t -ceq 'cloud session') { return 'cloud' }
+    if ($t -ceq 'MCP task') { return 'mcp_task' }
+    return 'other'
+}
+
+function SpTurn {
+    SpO 'turn'
+    SpS 'turn.end' (SpP 'end') $false
+    SpS 'turn.by' (SpP 'by') $false
+    SpB 'turn.asks' (SpP 'asks')
+    SpS 'turn.last' (SpP 'last') $true
+    SpB 'turn.late' (SpP 'late')
+    SpB 'turn.hook' (SpP 'hook')
+    $bp = SpP 'bgp'
+    if ($bp.Length -gt 0 -and ((SpIn ($bp + '.0.type')) -or (SpIn ($bp + '.0.id')))) {
+        SpA 'turn.bg'
+        $n = 0
+        for ($k = 0; $k -lt 64; $k++) {
+            $base = $bp + '.' + $k
+            if (-not (SpIn ($base + '.type')) -and -not (SpIn ($base + '.id'))) { break }
+            $t = SpFs ($base + '.type')
+            if ($t -ceq 'dream' -or $t -ceq 'auto-mode scan' -or $t -ceq 'memory import' -or $t -ceq 'memory save') { continue }
+            $q = 'turn.bg.' + $n
+            SpO $q
+            $id = SpFs ($base + '.id')
+            if ($id -cmatch '\A[A-Za-z0-9_-]+\z' -and $id.Length -le 64) { SpOut ($q + '.id') 's' $id } else { $id = '' }
+            SpOut ($q + '.kind') 's' (SpBgKind $t)
+            SpS ($q + '.name') (SpFirst ($base + '.agent_type,' + $base + '.agentType')) $true
+            SpS ($q + '.desc') (SpFs ($base + '.description')) $true
+            SpS ($q + '.cmd') (SpFs ($base + '.command')) $true
+            if ($id.Length -gt 0) { if (Test-InList (SpP 'prev') $id) { SpOut ($q + '.new') 'r' 'false' } else { SpOut ($q + '.new') 'r' 'true' } }
+            if ($t -ceq 'shell') { if (Test-InList (SpP 'svc') ([string]$k)) { SpOut ($q + '.svc') 'r' 'true' } else { SpOut ($q + '.svc') 'r' 'false' } }
+            SpS ($q + '.st') (SpFs ($base + '.status')) $true
+            $n++
+        }
+    }
+    $cp = SpP 'cronp'
+    if ($cp.Length -gt 0 -and (SpIn ($cp + '.0.schedule'))) {
+        SpA 'turn.crons'
+        for ($k = 0; $k -lt 64 -and (SpIn ($cp + '.' + $k + '.schedule')); $k++) {
+            SpO ('turn.crons.' + $k)
+            SpS ('turn.crons.' + $k + '.sched') (SpFs ($cp + '.' + $k + '.schedule')) $true
+            SpS ('turn.crons.' + $k + '.prompt') (SpFs ($cp + '.' + $k + '.prompt')) $true
+        }
+    }
+    SpS 'turn.goal' (SpP 'goal') $false
+}
+
+# The spec of the input text (facts, then @-parameter lines): the first line
+# of each path counts. Returns the spec lines joined with line breaks.
+function Get-Spec([string]$text) {
+    $Script:SFT = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $Script:SFV = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $Script:SOut = New-Object 'System.Collections.Generic.List[string]'
+    $Script:MS = ''
+    $Script:MT = ''
+    $recs = $text.Split([char]10)
+    $nr = $recs.Length
+    if ($nr -gt 0 -and $recs[$nr - 1].Length -eq 0) { $nr-- }
+    for ($r = 0; $r -lt $nr; $r++) {
+        $line = $recs[$r]
+        $t1 = $line.IndexOf([char]9)
+        if ($t1 -lt 0) { $p = $line; $t = ''; $v = '' }
+        else {
+            $p = $line.Substring(0, $t1)
+            $t2 = $line.IndexOf([char]9, $t1 + 1)
+            if ($t2 -lt 0) { $t = $line.Substring($t1 + 1); $v = '' } else { $t = $line.Substring($t1 + 1, $t2 - $t1 - 1); $v = $line.Substring($t2 + 1) }
+        }
+        if (-not $Script:SFT.ContainsKey($p)) { $Script:SFT[$p] = $t; $Script:SFV[$p] = $v }
+    }
+    SpOut 'fmt' 'r' '2'
+    SpS 'pv' (SpP 'pv') $false
+    SpS 'av' (SpP 'av') $false
+    SpS 'avs' (SpP 'avs') $false
+    SpS 'sid' (SpP 'sid') $false
+    SpS 'tid' (SpP 'tid') $false
+    if ((SpP 'sub.id').Length -gt 0) {
+        SpO 'sub'
+        SpS 'sub.id' (SpP 'sub.id') $false
+        SpS 'sub.type' (SpP 'sub.type') $true
+        SpS 'sub.name' (SpP 'sub.name') $true
+        SpS 'sub.parent' (SpP 'sub.parent') $false
+        SpB 'sub.bg' (SpP 'sub.bg')
+    }
+    SpS 'dir' (SpP 'dir') $false
+    if ((SpP 'cfg.var').Length -gt 0 -and (SpP 'cfg.path').Length -gt 0) { SpO 'cfg'; SpS 'cfg.var' (SpP 'cfg.var') $false; SpS 'cfg.path' (SpP 'cfg.path') $false }
+    SpS 'pm' (SpP 'pm') $false
+    SpS 'mux' (SpP 'mux') $false
+    SpR 'tms' (SpP 'tms')
+    if ((SpP 'rkind').Length -gt 0) { SpReq (SpP 'rkind') }
+    if ((SpP 'turn') -ceq '1') { SpTurn }
+    SpS 'st' (SpP 'st') $false
+    if ((SpP 'res.scope').Length -gt 0) {
+        SpO 'res'
+        foreach ($k in @('scope', 'req', 'rrid', 'out', 'act', 'win')) { SpS ('res.' + $k) (SpP ('res.' + $k)) $false }
+    }
+    return ($Script:SOut -join "`n")
+}
+
+# --- event format v2: the plaintext of one link (V2_BUILD) ---------------------------
+
+# Builds the plaintext for one link from the v1 fields and the spec
+# (TDS_AGENT_EVENTS_V2 sections 2.1, 2.2, 3): the link's variant of the
+# request (section 4.3), then the field limits and the deterministic cuts of
+# section 2.2, the same bytes as agent-hook.sh. Returns @{ plain; meta } (meta:
+# the META line, then the spec's notes).
+function New-PlainV2($link, [string]$rid, [string]$ev, [string]$nonce) {
+    $kind = 'relay'
+    if ($link.kind -ceq 'tunnel') { $kind = 'tunnel' }
+    $fmt2 = ($link.fmt -ceq '2')
+    $dec = ($nonce.Length -gt 0)
+    $vx = ''
+    if ($ev -ceq 'done') { $vx = [string]$Script:XFlags }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('=rid' + $Tab + $rid + $Nl + '=ev' + $Tab + $ev + $Nl + '=app' + $Tab + $Script:App + $Nl)
+    [void]$sb.Append('=host' + $Tab + (ConvertTo-JsonB $link.label 100000 100000) + $Nl + '=cwd' + $Tab + $Script:CwdBaseF + $Nl)
+    if (-not $Script:NoMsg) { [void]$sb.Append('=msg' + $Tab + $Script:MsgF + $Nl) }
+    [void]$sb.Append('=xflags' + $Tab + $vx + $Nl + '=nonce' + $Tab + $nonce + $Nl + '=ts' + $Tab + $Script:Ts + $Nl)
+    [void]$sb.Append([string]$Script:Spec + $Nl)
+    $recs = $sb.ToString().Split([char]10)
+    $nr = $recs.Length
+    if ($nr -gt 0 -and $recs[$nr - 1].Length -eq 0) { $nr-- }
+
+    $V1 = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $notes = New-Object 'System.Collections.Generic.List[string]'
+    $NP = New-Object 'System.Collections.Generic.List[string]'
+    $NT = New-Object 'System.Collections.Generic.List[string]'
+    $NV = New-Object 'System.Collections.Generic.List[string]'
+    $NK = New-Object 'System.Collections.Generic.List[string]'
+    $CH = New-Object 'System.Collections.Generic.List[object]'
+    $ND = New-Object 'System.Collections.Generic.List[bool]'
+    $IDX = New-Object 'System.Collections.Generic.Dictionary[string,int]' ([StringComparer]::Ordinal)
+    $NP.Add(''); $NT.Add('o'); $NV.Add(''); $NK.Add(''); $CH.Add((New-Object 'System.Collections.Generic.List[int]')); $ND.Add($false)
+    for ($r = 0; $r -lt $nr; $r++) {
+        $line = $recs[$r]
+        $t1 = $line.IndexOf([char]9)
+        if ($line.StartsWith('=', $Ord)) {
+            if ($t1 -lt 0) { $V1[$line.Substring(1)] = '' } else { $V1[$line.Substring(1, $t1 - 1)] = $line.Substring($t1 + 1) }
+            continue
+        }
+        if ($line.StartsWith('#', $Ord)) { $notes.Add($line); continue }
+        if ($t1 -lt 0) { $p = $line; $t = ''; $v = '' }
+        else {
+            $p = $line.Substring(0, $t1)
+            $t2 = $line.IndexOf([char]9, $t1 + 1)
+            if ($t2 -lt 0) { $t = $line.Substring($t1 + 1); $v = '' } else { $t = $line.Substring($t1 + 1, $t2 - $t1 - 1); $v = $line.Substring($t2 + 1) }
+        }
+        if ($IDX.ContainsKey($p)) { continue }
+        $k = $p.LastIndexOf('.')
+        $par = ''
+        if ($k -ge 0) { $par = $p.Substring(0, $k) }
+        if ($par.Length -gt 0 -and -not $IDX.ContainsKey($par)) { continue }
+        $pi = 0
+        if ($par.Length -gt 0) { $pi = $IDX[$par] }
+        if ($NT[$pi] -cne 'o' -and $NT[$pi] -cne 'a') { continue }
+        $id = $NP.Count
+        $IDX[$p] = $id
+        $NP.Add($p); $NT.Add($t); $NV.Add($v); $NK.Add($p.Substring($k + 1)); $CH.Add((New-Object 'System.Collections.Generic.List[int]')); $ND.Add($false)
+        $CH[$pi].Add($id)
+    }
+
+    function GetV1([string]$k) { $x = $null; if ($V1.TryGetValue($k, [ref]$x)) { return $x }; return '' }
+    function BKill([int]$i) {
+        $stack = New-Object 'System.Collections.Generic.Stack[int]'
+        $stack.Push($i)
+        while ($stack.Count -gt 0) {
+            $x = $stack.Pop()
+            if ($ND[$x]) { continue }
+            $ND[$x] = $true
+            foreach ($c in $CH[$x]) { $stack.Push($c) }
+        }
+    }
+    function BLive([int]$i) { $n = 0; foreach ($c in $CH[$i]) { if (-not $ND[$c]) { $n++ } }; return $n }
+    function BLastLive([int]$i) { for ($k = $CH[$i].Count - 1; $k -ge 0; $k--) { if (-not $ND[$CH[$i][$k]]) { return $CH[$i][$k] } }; return 0 }
+    function BNode([string]$p) { $x = 0; if ($IDX.TryGetValue($p, [ref]$x) -and -not $ND[$x]) { return $x }; return 0 }
+    function BSer([int]$i) {
+        $t = $NT[$i]
+        if ($t -ceq 's') { return '"' + $NV[$i] + '"' }
+        if ($t -ceq 'r') { return $NV[$i] }
+        $o = ($t -ceq 'o')
+        $x = New-Object System.Text.StringBuilder
+        if ($o) { [void]$x.Append('{') } else { [void]$x.Append('[') }
+        $f = $true
+        foreach ($c in $CH[$i]) {
+            if ($ND[$c]) { continue }
+            if (-not $f) { [void]$x.Append(',') }
+            if ($o) { [void]$x.Append('"' + $NK[$c] + '":') }
+            [void]$x.Append((BSer $c))
+            $f = $false
+        }
+        if ($o) { [void]$x.Append('}') } else { [void]$x.Append(']') }
+        return $x.ToString()
+    }
+    # The cut record (section 2.2 step 6).
+    $CK = New-Object 'System.Collections.Generic.List[string]'
+    $CV = New-Object 'System.Collections.Generic.List[string]'
+    $CDEAD = New-Object 'System.Collections.Generic.List[bool]'
+    $REC = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $cs = @{ clive = 0; plus = 0 }
+    function BRec([string]$path, $val) {
+        if (-not $REC.Add($path)) { return }
+        if ($cs.plus -gt 0 -or $cs.clive -ge 16) { $cs.plus++; return }
+        $CK.Add($path); $CV.Add([string]$val); $CDEAD.Add($false); $cs.clive++
+    }
+    function BUnrec([string]$path) {
+        $pre = $path + '.'
+        for ($k = 0; $k -lt $CK.Count; $k++) {
+            if ($CDEAD[$k]) { continue }
+            if ($CK[$k].StartsWith($pre, $Ord)) { $CDEAD[$k] = $true; $cs.clive-- }
+        }
+    }
+    function BCut {
+        if ($cs.clive -eq 0 -and $cs.plus -eq 0) { return '' }
+        $x = ',"cut":{'
+        $f = $true
+        for ($k = 0; $k -lt $CK.Count; $k++) {
+            if ($CDEAD[$k]) { continue }
+            if (-not $f) { $x += ',' }
+            $x += '"' + $CK[$k] + '":' + $CV[$k]
+            $f = $false
+        }
+        if ($cs.plus -gt 0) { if (-not $f) { $x += ',' }; $x += '"+":' + $cs.plus }
+        return $x + '}'
+    }
+    function BPlain {
+        $x = New-Object System.Text.StringBuilder
+        [void]$x.Append('{"v":1,"rid":"' + (GetV1 'rid') + '","ev":"' + (GetV1 'ev') + '","app":"' + (GetV1 'app') + '","host":"' + $vs.host + '","cwd":"' + $vs.cwd + '"')
+        if ($V1.ContainsKey('title')) { [void]$x.Append(',"title":"' + $vs.title + '"') }
+        if ($V1.ContainsKey('msg')) { [void]$x.Append(',"msg":"' + $vs.msg + '"') }
+        [void]$x.Append((GetV1 'xflags'))
+        if ($dec -and (GetV1 'nonce').Length -gt 0) { [void]$x.Append(',"nonce":"' + (GetV1 'nonce') + '"') }
+        foreach ($c in $CH[0]) {
+            if (-not $ND[$c]) { [void]$x.Append(',"' + $NK[$c] + '":' + (BSer $c)) }
+        }
+        [void]$x.Append((BCut))
+        [void]$x.Append(',"ts":' + (GetV1 'ts') + '}')
+        return $x.ToString()
+    }
+    function BSize { return (BPlain).Length }
+    # Removes decision id d from req.can, or keeps only those in list.
+    function BNoCan([string]$d) {
+        $i = BNode 'req.can'
+        if (-not $i) { return }
+        foreach ($c in $CH[$i]) { if (-not $ND[$c] -and $NV[$c] -ceq $d) { BKill $c } }
+    }
+    function BCanKeep([string]$list) {
+        $i = BNode 'req.can'
+        if (-not $i) { return }
+        foreach ($c in $CH[$i]) { if (-not $ND[$c] -and -not (Test-InList $list $NV[$c])) { BKill $c } }
+    }
+    function BDrop([string]$p) { $i = BNode $p; if ($i) { BKill $i } }
+    function BGPath([string]$p) {
+        $q = $p.Split('.')
+        for ($k = 0; $k -lt $q.Length; $k++) { if ($q[$k] -cmatch '\A[0-9]+\z') { $q[$k] = '#' } }
+        return ($q -join '.')
+    }
+    function BV1Cut([string]$key, [string]$v, [int64]$mu, [int64]$mb) {
+        $c = Get-UCut $v $mu $mb
+        if ($c.Length -lt $v.Length) { BRec $key $v.Length }
+        return $c
+    }
+
+    # Section 2.2 field limits: "tunnel relay" bytes (- not sent to the relay),
+    # CNT the same for arrays.
+    $STR = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $CNT = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $STR['dir'] = '1024 -'; $STR['cfg'] = '0 -'; $STR['cfg.path'] = '1024 -'
+    $STR['avs'] = '0 -'; $STR['tid'] = '0 -'; $STR['pm'] = '0 -'; $STR['tms'] = '0 -'; $STR['req.nid'] = '0 -'
+    $STR['req.tool'] = '128 128'; $STR['req.ask.cmd'] = '8192 400'; $STR['req.ask.desc'] = '1024 200'
+    $STR['req.ask.path'] = '1024 256'; $STR['req.ask.file'] = '1024 256'; $STR['req.ask.files.#'] = '1024 256'
+    $STR['req.ask.change'] = '0 -'; $STR['req.ask.change.old'] = '12288 -'; $STR['req.ask.change.new'] = '12288 -'
+    $STR['req.ask.change.content'] = '24576 -'; $STR['req.ask.change.text'] = '24576 -'
+    $STR['req.ask.url'] = '2048 400'; $STR['req.ask.prompt'] = '1024 -'
+    $STR['req.ask.server'] = '128 128'; $STR['req.ask.tool'] = '128 128'; $STR['req.ask.args'] = '4096 -'
+    $STR['req.ask.msg'] = '1024 200'; $STR['req.ask.schema'] = '8192 -'
+    $STR['req.ask.qs.#.q'] = '400 160'; $STR['req.ask.qs.#.h'] = '64 32'
+    $STR['req.ask.qs.#.opts.#.l'] = '200 64'; $STR['req.ask.qs.#.opts.#.d'] = '600 -'
+    $STR['req.scopes.#.label'] = '200 80'; $STR['sub.type'] = '64 64'; $STR['sub.name'] = '64 64'
+    $STR['turn.last'] = '4000 -'; $STR['turn.bg.#.name'] = '64 32'; $STR['turn.bg.#.desc'] = '200 80'
+    $STR['turn.bg.#.cmd'] = '200 80'; $STR['turn.crons'] = '0 -'; $STR['turn.crons.#.sched'] = '64 -'
+    $STR['turn.crons.#.prompt'] = '200 -'
+    # A plan is long; any other text short.
+    $wn = BNode 'req.win'
+    if ($wn -and $NV[$wn] -ceq 'plan') { $STR['req.ask.text'] = '24576 600' } else { $STR['req.ask.text'] = '1024 200' }
+    $CNT['req.ask.files'] = '32 4'; $CNT['req.ask.qs'] = '8 4'; $CNT['req.ask.qs.#.opts'] = '16 8'
+    $CNT['req.scopes'] = '8 4'; $CNT['req.others'] = '32 8'; $CNT['turn.bg'] = '16 3'; $CNT['turn.crons'] = '8 -'
+    $li = 1
+    if ($kind -ceq 'tunnel') { $li = 0 }
+
+    $budget = 2048
+    if ($kind -ceq 'tunnel') { $budget = 32768 }
+    # variant of this link (section 4.3)
+    if ($Script:WaitOv.Length -gt 0) { $i = BNode 'req.wait'; if ($i) { $NV[$i] = $Script:WaitOv } }
+    if (-not $dec) { BDrop 'req.can'; BDrop 'req.scopes'; BDrop 'req.modes'; BDrop 'req.affects'; BDrop 'req.others' }
+    elseif (-not $fmt2) {
+        $win = ''
+        $i = BNode 'req.win'
+        if ($i) { $win = $NV[$i] }
+        if ($win -ceq 'plan') { BCanKeep 'plan_approve deny'; BDrop 'req.modes' } else { BCanKeep 'allow deny' }
+        BDrop 'req.scopes'
+        $i = BNode 'req.others'
+        if ($i -and (BLive $i) -gt 0) { BCanKeep 'allow' }
+        BDrop 'req.affects'
+        BDrop 'req.others'
+    }
+    # step 0: field limits, in serialization order (v1 fields first)
+    $vs = @{ host = ''; cwd = ''; title = ''; msg = '' }
+    $vs.host = BV1Cut 'host' (ConvertTo-Norm (GetV1 'host') $false) 64 256
+    $vs.cwd = BV1Cut 'cwd' (ConvertTo-Norm (GetV1 'cwd') $false) 64 256
+    if ($V1.ContainsKey('title')) { $vs.title = BV1Cut 'title' (ConvertTo-Norm (GetV1 'title') $false) 64 256 }
+    if ($V1.ContainsKey('msg')) { $vs.msg = BV1Cut 'msg' (ConvertTo-Norm (GetV1 'msg') $false) 200 800 }
+    for ($i = 1; $i -lt $NP.Count; $i++) {
+        if ($ND[$i]) { continue }
+        $g = BGPath $NP[$i]
+        $t = $NT[$i]
+        if ($t -ceq 'a' -or $t -ceq 'o') {
+            if ($kind -ceq 'relay' -and $STR.ContainsKey($g) -and $STR[$g].Split(' ')[$li] -ceq '-') { BKill $i; continue }
+            if ($t -ceq 'a' -and $CNT.ContainsKey($g)) {
+                $c = $CNT[$g].Split(' ')[$li]
+                if ($c -ceq '-') { BKill $i; continue }
+                $cn = [int]$c
+                $n = 0
+                foreach ($cc in $CH[$i]) {
+                    if ($ND[$cc]) { continue }
+                    $n++
+                    if ($n -gt $cn) { BKill $cc }
+                }
+                if ($n -gt $cn) {
+                    BRec $NP[$i] $n
+                    if ($g -ceq 'req.ask.qs') { BNoCan 'answer' }
+                }
+            }
+            continue
+        }
+        if (-not $STR.ContainsKey($g)) { continue }
+        $c = $STR[$g].Split(' ')[$li]
+        if ($c -ceq '-') { BKill $i; continue }
+        $cn = [int]$c
+        if ($cn -gt 0 -and $NV[$i].Length -gt $cn) {
+            BRec $NP[$i] $NV[$i].Length
+            $NV[$i] = Get-UCut $NV[$i] 1000000000 $cn
+        }
+    }
+    $ORIG = @{}
+    $ARR = @('req.others', 'turn.bg', 'req.scopes', 'req.ask.qs')
+    foreach ($a in $ARR) { $x = 0; if ($IDX.TryGetValue($a, [ref]$x)) { $ORIG[$a] = BLive $x } }
+    # step 1: the last item of the first non-empty array
+    while ((BSize) -gt $budget) {
+        $done = $false
+        foreach ($a in $ARR) {
+            $i = BNode $a
+            if (-not $i -or (BLive $i) -eq 0) { continue }
+            $c = BLastLive $i
+            BUnrec $NP[$c]
+            BKill $c
+            BRec $a $ORIG[$a]
+            if ($a -ceq 'req.ask.qs') { BNoCan 'answer' }
+            if ((BLive $i) -eq 0) {
+                if ($a -ceq 'req.scopes') { BKill $i; BNoCan 'allow_scope' }
+                if ($a -ceq 'req.others') { BKill $i; BDrop 'req.affects' }
+            }
+            $done = $true
+            break
+        }
+        if (-not $done) { break }
+    }
+    # step 2: whole objects
+    foreach ($a in @('req.ask', 'req.scopes', 'req.modes', 'turn', 'sub', 'req')) {
+        if ((BSize) -le $budget) { break }
+        $i = BNode $a
+        if (-not $i) { continue }
+        $b = (BSer $i).Length
+        BUnrec $a
+        BKill $i
+        BRec $a $b
+        if ($a -ceq 'req.ask') { BNoCan 'answer'; BNoCan 'allow_scope' }
+        if ($a -ceq 'req.scopes') { BNoCan 'allow_scope' }
+    }
+    $plain = BPlain
+    $m = 'META'
+    if (BNode 'req') {
+        $x = ''; $i = BNode 'req.id'; if ($i) { $x = $NV[$i] }
+        $m += ' rq=' + $x
+        $x = ''; $i = BNode 'req.win'; if ($i) { $x = $NV[$i] }
+        $m += ' win=' + $x
+        foreach ($pair in @(@('can', 'req.can'), @('aff', 'req.affects'))) {
+            $l = @()
+            $i = BNode $pair[1]
+            if ($i) { foreach ($c in $CH[$i]) { if (-not $ND[$c]) { $l += $NV[$c] } } }
+            $m += ' ' + $pair[0] + '=' + ($l -join ',')
+        }
+        $i = BNode 'req.scopes'
+        $x = 0; if ($i) { $x = BLive $i }
+        $m += ' ns=' + $x
+        $l = @()
+        $i = BNode 'req.modes'
+        if ($i) { foreach ($c in $CH[$i]) { if (-not $ND[$c]) { $l += $NV[$c] } } }
+        $m += ' modes=' + ($l -join ',')
+        $i = BNode 'req.ask.qs'
+        $x = 0; if ($i) { $x = BLive $i }
+        $m += ' nq=' + $x
+    }
+    $meta = New-Object 'System.Collections.Generic.List[string]'
+    $meta.Add($m)
+    foreach ($x in $notes) { $meta.Add($x) }
+    return @{ plain = $plain; meta = $meta }
+}
+
 # --- event payload ---------------------------------------------------------
 
-# `usage` carries $Script:UsageJson instead of a message; `notify` a title.
-function New-Plaintext($link, [string]$rid, [string]$ev, [string]$nonce) {
-    $hostText = ConvertTo-JsonText $link.label 64 256
-    $p = '{"v":1,"rid":"' + $rid + '","ev":"' + $ev + '","app":"' + $App + '","host":"' + $hostText +
-        '","cwd":"' + $CwdBase + '"'
-    if ($ev -eq 'usage') { $p += $Script:UsageJson }
-    elseif ($ev -eq 'notify') { $p += ',"title":"' + $Script:Title + '","msg":"' + $Script:Msg + '"' }
+# A file path from the hook input (JSON-escaped byte string) that can be read
+# (.NET text), or ''.
+function Get-InputFile([string]$raw) {
+    if (-not $raw -or $raw -ceq 'null') { return '' }
+    $sb = New-Object System.Text.StringBuilder
+    for ($i = 0; $i -lt $raw.Length; $i++) {
+        $c = $raw[$i]
+        if ([int]$c -eq 92) {
+            if ($i + 1 -ge $raw.Length) { return '' }
+            $e = [int]$raw[$i + 1]
+            if ($e -ne 92 -and $e -ne 47 -and $e -ne 34) { return '' }
+            $c = $raw[$i + 1]
+            $i++
+        }
+        [void]$sb.Append($c)
+    }
+    $path = US $sb.ToString()
+    try { if ([IO.File]::Exists($path)) { return $path } } catch { }
+    return ''
+}
+
+# MSG (v1, cut) and MSGF (whole: the v2 builder cuts it and records the cut,
+# TDS_AGENT_EVENTS_V2 section 2.2) from JSON-escaped text (setmsg).
+function Set-Msg([string]$text) {
+    $Script:MsgF = $text
+    $Script:Msg = Limit-Json $text 200 800
+}
+
+# The section 5.2 (v1) plaintext for $link: notify, usage and test, and every
+# event before the v2 fields are prepared. `usage` carries UsageJson instead of
+# a message; `notify` adds a title.
+function New-PlainV1($link, [string]$rid, [string]$ev, [string]$nonce) {
+    $hostText = ConvertTo-JsonB $link.label 64 256
+    $p = '{"v":1,"rid":"' + $rid + '","ev":"' + $ev + '","app":"' + $Script:App + '","host":"' + $hostText + '","cwd":"' + $Script:CwdBase + '"'
+    if ($ev -ceq 'usage') { $p += $Script:UsageJson }
+    elseif ($ev -ceq 'notify') { $p += ',"title":"' + $Script:Title + '","msg":"' + $Script:Msg + '"' }
     else { $p += ',"msg":"' + $Script:Msg + '"' }
     # A done of a Stop that another Stop hook had already kept going.
-    if ($ev -eq 'done' -and $Script:XFlag -eq '1') { $p += ',"stop_hook_active":true' }
+    if ($ev -ceq 'done' -and $Script:XFlags) { $p += $Script:XFlags }
     if ($nonce) { $p += ',"nonce":"' + $nonce + '"' }
-    return $p + ',"ts":' + $Ts + '}'
+    return $p + ',"ts":' + $Script:Ts + '}'
+}
+
+function Get-Plaintext($link, [string]$rid, [string]$ev, [string]$nonce) {
+    $Script:LastMeta = $null
+    if ($ev -cne 'notify' -and $ev -cne 'usage' -and $ev -cne 'test' -and $Script:V2) {
+        $r = New-PlainV2 $link $rid $ev $nonce
+        $Script:LastMeta = $r.meta
+        return $r.plain
+    }
+    return (New-PlainV1 $link $rid $ev $nonce)
+}
+
+# Builds and seals one event for one link (ingest_raw, up to the send):
+# @{ link; ev; meta; body; mt } or, if it cannot be sealed, @{ seal }.
+# IngMt caps the relay's time (the tunnel's is 5).
+function New-Ingest($link, [string]$rid, [string]$ev, [string]$nonce) {
+    $nh = ''
+    if ($nonce) { $nh = Get-Sha256Hex $nonce }
+    $pt = Get-Plaintext $link $rid $ev $nonce
+    $meta = $Script:LastMeta
+    # Test only: the plaintext before it is sealed, to compare the sh and the
+    # PowerShell hook byte for byte (TDS_AGENT_EVENTS_V2 section 2.2): one
+    # file per event and link in directory SIMPLETERM_HOOK_TEST_PLAIN.
+    if ($env:SIMPLETERM_HOOK_TEST -eq '1' -and $env:SIMPLETERM_HOOK_TEST_PLAIN -and [IO.Directory]::Exists($env:SIMPLETERM_HOOK_TEST_PLAIN)) {
+        [void](Write-FileB (Join-Path $env:SIMPLETERM_HOOK_TEST_PLAIN ((Short $link.link) + '.' + $ev + '.' + $rid + '.' + $PID)) $pt)
+    }
+    $envJson = $null
+    if ($pt) { $envJson = New-Envelope $pt $link }
+    if ($null -eq $envJson) {
+        Write-Log ('seal-failed link=' + (Short $link.link))
+        return @{ seal = $true; link = $link; ev = $ev; meta = $meta }
+    }
+    $body = '{"v":1,"rid":"' + $rid + '","ev":"' + $ev + '"'
+    if ($nh) { $body += ',"nh":"' + $nh + '"' }
+    $body += ',"env":' + $envJson + '}'
+    # A tunnel answers at once or not at all (a dead port may belong to
+    # something else by now); the relay may hold the request a few seconds.
+    $mt = [string]$Script:IngMt
+    if (-not $mt) { $mt = '20' }
+    if (-not (Test-UInt $mt) -or [int64]$mt -lt 1) { $mt = '1' }
+    $t = [int64]$mt
+    if ($t -gt 20) { $t = 20 }
+    if ($link.kind -ceq 'tunnel' -and $t -gt 5) { $t = 5 }
+    return @{ seal = $false; link = $link; ev = $ev; meta = $meta; body = $body; mt = [int]$t }
+}
+
+# Sends a built event; Complete-Ingest finishes it.
+function Start-IngestOp($prep) {
+    if ($prep.seal) { return $prep }
+    $op = Start-Relay $prep.link 'POST' '/v1/ingest' $prep.body $prep.mt
+    $op.ev = $prep.ev
+    $op.meta = $prep.meta
+    $op.seal = $false
+    return $op
 }
 
 function Start-Ingest($link, [string]$rid, [string]$ev, [string]$nonce) {
-    $envJson = New-Envelope (New-Plaintext $link $rid $ev $nonce) $link
-    if ($null -eq $envJson) { Write-Log ('seal-failed link=' + (Short $link.link)); return $null }
-    $body = '{"v":1,"rid":"' + $rid + '","ev":"' + $ev + '"'
-    if ($nonce) { $body += ',"nh":"' + (Get-Sha256Hex $nonce) + '"' }
-    $body += ',"env":' + $envJson + '}'
-    # A tunnel answers at once or not at all; the relay may hold the request.
-    $timeout = 20
-    if ($link.kind -eq 'tunnel') { $timeout = 5 }
-    return (Start-Relay $link 'POST' '/v1/ingest' $body $timeout)
+    return (Start-IngestOp (New-Ingest $link $rid $ev $nonce))
 }
 
-# Finishes an ingest; returns the push result or httpNNN.
-function Complete-Ingest($op, [string]$ev) {
-    $r = Complete-Relay $op
+# Finishes an ingest: @{ push (the push result or http<code>); code (3 digits); err }.
+function Complete-Ingest($op) {
+    if ($op.seal) { return @{ push = 'seal'; code = '000'; err = '-' } }
+    $r = Complete-Relay $op 4096
     $push = ''
-    if ($r.code -eq 200) { $push = Get-Field (Get-JsonFields $r.body @('push')) 'push' }
-    if ($r.code -eq 410) {
-        try { [IO.File]::WriteAllText((Join-Path $RunDir ($op.link.link + '.revoked')), '', $Utf8) } catch { }
-    }
-    $Script:IngestCode = $r.code
+    $err = ''
+    if ($r.code -eq 200) { $push = [regex]::Replace((Get-Field (Get-JsonKV $r.body @('push')) 'push'), '[^a-z-]', '') }
+    elseif ($r.code -eq 410) { [void](Write-FileB (Join-Path $RunDir ($op.link.link + '.revoked')) '') }
+    elseif ($r.code -eq 400) { $err = [regex]::Replace((Get-Field (Get-JsonKV $r.body @('error')) 'error'), '[^a-zA-Z-]', '') }
+    $code = Format-Code $r.code
     $shown = $push
     if (-not $shown) { $shown = '-' }
-    Write-Log ('ingest ev=' + $ev + ' link=' + (Short $op.link.link) + ' http=' + ('{0:000}' -f $r.code) + ' push=' + $shown)
-    if ($push) { return $push }
-    return ('http' + $r.code)
+    Write-Log ('ingest ev=' + $op.ev + ' link=' + (Short $op.link.link) + ' http=' + $code + ' push=' + $shown)
+    if (-not $push) { $push = 'http' + $code }
+    if (-not $err) { $err = '-' }
+    return @{ push = $push; code = $code; err = $err }
 }
 
-# Sends the event to every link from a detached child process and returns.
-# $scope limits it to `tunnel` or `relay` links; once a link took the event,
-# $markText is written to the run file $markName.
-# (PowerShell names are case-insensitive: a parameter `$rid` would hide `$Rid`.)
-function Send-Background([string]$ev, [string]$eventRid, [string]$scope, [string]$markName, [string]$markText) {
-    if ($LinkFiles.Count -eq 0) { return }
-    if (-not $eventRid) { $eventRid = $Rid }
-    if (-not $scope) { $scope = 'all' }
-    # The child gets the event through its environment, not its command line.
-    $usage = [Convert]::ToBase64String($Utf8.GetBytes([string]$Script:UsageJson))
-    $mark = [Convert]::ToBase64String($Utf8.GetBytes([string]$markText))
-    $payload = '{"ev":"' + $ev + '","rid":"' + $eventRid + '","ts":"' + $Ts + '","cwd":"' + $CwdBase +
-        '","msg":"' + $Script:Msg + '","title":"' + $Script:Title + '","xflag":"' + $Script:XFlag + '","usage":"' + $usage + '","scope":"' + $scope +
-        '","mark":"' + $markName + '","marktext":"' + $mark + '"' + $Script:LaterJson + '}'
-    $env:SIMPLETERM_HOOK_PAYLOAD = [Convert]::ToBase64String($Utf8.GetBytes($payload))
+# Sends event $ev to every link (tunnels first: the app reports a shown event
+# to the relay, which holds a push for a few seconds to hear that), $scope
+# `all`, `tunnel` or `relay`; once a link took the event, $markText goes to the
+# run file $markName. The body of send_bg (here in the detached child).
+function Send-Now([string]$ev, [string]$rid, [string]$scope, [string]$markName, [string]$markText) {
+    # Every link's event is made first, then sent: tunnels, then the relay.
+    $preps = @{ tunnel = (New-Object 'System.Collections.Generic.List[object]'); relay = (New-Object 'System.Collections.Generic.List[object]') }
+    foreach ($file in (Get-LinkFiles)) {
+        $link = Read-Link $file
+        if ($null -eq $link) { continue }
+        $pass = 'relay'
+        if ($link.kind -ceq 'tunnel') { $pass = 'tunnel' }
+        if ($scope -cne 'all' -and $scope -cne $pass) { continue }
+        try { $preps[$pass].Add((New-Ingest $link $rid $ev '')) } catch { Write-Log 'ingest-failed' }
+    }
+    foreach ($pass in @('tunnel', 'relay')) {
+        $ops = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($prep in $preps[$pass]) {
+            try { $ops.Add((Start-IngestOp $prep)) } catch { Write-Log 'ingest-failed' }
+        }
+        foreach ($op in $ops) {
+            try {
+                $r = Complete-Ingest $op
+                if ($r.code -ceq '200' -and $markName) { [void](Write-FileB (Join-Path $RunDir $markName) ($markText + "`n")) }
+            } catch { Write-Log 'ingest-failed' }
+        }
+    }
+}
+
+# --- detached sends ------------------------------------------------------------
+
+# A send that outlives the hook (sh: a background subshell) runs in a detached
+# child process (agent-hook.ps1 <agent> __send <job>). The job file in the run
+# directory holds what it needs (each value base64 of its bytes): the event's
+# fields, facts and spec, so that a later send can make the event again.
+function New-Job([string]$kind) {
+    return @{
+        kind = $kind; agent = $Script:Agent; app = $Script:App; sid = $Script:Sid; now = [string]$Script:Now
+        ts = [string]$Script:Ts; rid = [string]$Script:Rid; v2 = $(if ($Script:V2) { '1' } else { '' })
+        spec = [string]$Script:Spec; facts = [string]$Script:FactsText; at = [string]$Script:AT; v2x = [string]$Script:V2X
+        msgf = [string]$Script:MsgF; nomsg = $(if ($Script:NoMsg) { '1' } else { '' }); xflags = [string]$Script:XFlags
+        waitov = [string]$Script:WaitOv; cwdbasef = [string]$Script:CwdBaseF; cwdbase = [string]$Script:CwdBase
+        msg = [string]$Script:Msg; title = [string]$Script:Title; usage = [string]$Script:UsageJson; reqid = [string]$Script:ReqId
+    }
+}
+
+function Save-Job([hashtable]$job) {
+    $name = 'job.' + $PID + '.' + (New-RandomHex 4)
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($k in $job.Keys) { [void]$sb.Append([string]$k + '=' + [Convert]::ToBase64String($Latin1.GetBytes([string]$job[$k])) + "`n") }
+    if (-not (Write-FileB (Join-Path $RunDir $name) $sb.ToString())) { return '' }
+    return $name
+}
+
+function Read-Job([string]$name) {
+    if ($name -cnotmatch '\Ajob\.[0-9]+\.[0-9a-f]{8}\z') { return $null }
+    $path = Join-Path $RunDir $name
+    $t = Read-FileB $path
+    Remove-FileQ $path
+    if ($null -eq $t) { return $null }
+    $job = @{}
+    foreach ($line in $t.Split([char]10)) {
+        $k = $line.IndexOf('=')
+        if ($k -lt 1) { continue }
+        try { $job[$line.Substring(0, $k)] = $Latin1.GetString([Convert]::FromBase64String($line.Substring($k + 1))) } catch { }
+    }
+    return $job
+}
+
+function Start-Child([hashtable]$job) {
+    $name = Save-Job $job
+    if (-not $name) { return }
     $exe = (Get-Process -Id $PID).Path
-    $argList = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'), $Agent, '__send')
+    $argList = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'), $Script:Agent0, '__send', $name)
     try {
         if ($IsWin) {
             Start-Process -FilePath $exe -ArgumentList $argList -WindowStyle Hidden | Out-Null
@@ -500,38 +1677,97 @@ function Send-Background([string]$ev, [string]$eventRid, [string]$scope, [string
         }
     } catch {
         Write-Log ('background-start-failed ' + $_.Exception.GetType().Name)
+        Remove-FileQ (Join-Path $RunDir $name)
     }
-    Remove-Item Env:\SIMPLETERM_HOOK_PAYLOAD -ErrorAction SilentlyContinue
 }
 
-# Sends `done` later from the background child: after $wait seconds, if the
-# file $file still holds $token on line $line (a pause or a goal turn not
-# ended meanwhile) and, for a goal, the rollout $path got no task_started
-# after $offset. The event is made then (fresh rid and time).
-function Start-LaterSend([string]$kind, [int]$wait, [string]$file, [int]$line, [string]$token, [string]$path, [int64]$offset) {
-    $Script:LaterJson = ',"lkind":"' + $kind + '","lwait":"' + $wait + '","lline":"' + $line + '","ltoken":"' + $token +
-        '","lfile":"' + [Convert]::ToBase64String($Utf8.GetBytes($file)) + '","lpath":"' + [Convert]::ToBase64String($Utf8.GetBytes($path)) +
-        '","loff":"' + $offset + '"'
-    Send-Background 'done'
-    $Script:LaterJson = ''
+# send_bg: event $ev to every link (scope all|tunnel|relay) from a detached
+# child; returns at once.
+function Send-Background([string]$ev, [string]$eventRid, [string]$scope, [string]$markName, [string]$markText) {
+    if ($Script:LinkFiles.Count -eq 0) { return }
+    if (-not $eventRid) { $eventRid = $Script:Rid }
+    # One rid per event: a receiver shows a rid once (Send-State takes a new
+    # one when this run's rid went out already).
+    if ($eventRid -ceq $Script:Rid) { $Script:RidUsed = $true }
+    if (-not $eventRid) { return }
+    if (-not $scope) { $scope = 'all' }
+    $job = New-Job 'send'
+    $job.ev = $ev
+    $job.rid = $eventRid
+    $job.scope = $scope
+    $job.mark = $markName
+    $job.marktext = $markText
+    Start-Child $job
 }
 
-function Test-LaterStillDue($f) {
-    $wait = Get-Field $f 'lwait'
-    $line = Get-Field $f 'lline'
-    $off = Get-Field $f 'loff'
-    if (-not (Test-UInt $wait) -or -not (Test-UInt $line) -or -not (Test-UInt $off)) { return $false }
-    Start-Sleep -Seconds ([int]$wait)
+# Sends `done` (or $ev) later from the child: after $wait seconds, if line $line
+# of file $file still holds $token (a pending done, a pause or a goal turn not
+# ended meanwhile) and, for a goal, the rollout $path got no task_started after
+# $offset. The event is made then (fresh rid and time).
+function Start-LaterSend([string]$kind, [int64]$wait, [string]$file, [int]$line, [string]$token, [string]$path, [int64]$offset) {
+    if ($Script:LinkFiles.Count -eq 0) { return }
+    $job = New-Job 'later'
+    $job.ev = 'done'
+    $job.scope = 'all'
+    $job.lkind = $kind
+    $job.lwait = [string]$wait
+    $job.lfile = BS $file
+    $job.lline = [string]$line
+    $job.ltoken = $token
+    $job.lpath = BS $path
+    $job.loff = [string]$offset
+    Start-Child $job
+}
+
+function Restore-Job($job) {
+    $Script:Agent = $job.agent
+    $Script:App = $job.app
+    $Script:Sid = $job.sid
+    $Script:Now = 0
+    if (Test-UInt $job.now) { $Script:Now = [int64]$job.now }
+    $Script:Ts = $job.ts
+    $Script:Rid = $job.rid
+    $Script:V2 = ($job.v2 -ceq '1')
+    $Script:Spec = $job.spec
+    $Script:FactsText = $job.facts
+    $Script:AT = $job.at
+    $Script:V2X = $job.v2x
+    $Script:MsgF = $job.msgf
+    $Script:NoMsg = ($job.nomsg -ceq '1')
+    $Script:XFlags = $job.xflags
+    $Script:WaitOv = $job.waitov
+    $Script:CwdBaseF = $job.cwdbasef
+    $Script:CwdBase = $job.cwdbase
+    $Script:Msg = $job.msg
+    $Script:Title = $job.title
+    $Script:UsageJson = $job.usage
+    $Script:ReqId = $job.reqid
+    $Script:IngMt = ''
+    $Script:InputB = ''
+    $Script:LinkFiles = @(Get-LinkFiles)
+}
+
+function Test-LaterStillDue($job) {
+    if (-not (Test-UInt $job.lwait) -or -not (Test-UInt $job.lline) -or -not (Test-UInt $job.loff)) { return $false }
+    $file = US $job.lfile
+    # The token is this run's rid, never written again once replaced: a wait
+    # that another event ended stops at once instead of sleeping out (a
+    # PowerShell process is not a cheap sleeper).
+    $until = [DateTime]::UtcNow.AddSeconds([int]$job.lwait)
+    while ($true) {
+        $left = ($until - [DateTime]::UtcNow).TotalMilliseconds
+        if ($left -le 0) { break }
+        Start-Sleep -Milliseconds ([int][Math]::Min($left, 2000))
+        if ((Read-LineB $file ([int]$job.lline)) -cne $job.ltoken) { return $false }
+    }
     try {
-        $file = $Utf8.GetString([Convert]::FromBase64String((Get-Field $f 'lfile')))
-        $lines = [IO.File]::ReadAllLines($file, $Utf8)
-        if ($lines.Count -le [int]$line -or $lines[[int]$line] -ne (Get-Field $f 'ltoken')) { return $false }
-        if ((Get-Field $f 'lkind') -eq 'goal') {
-            $path = $Utf8.GetString([Convert]::FromBase64String((Get-Field $f 'lpath')))
+        if ((Read-LineB $file ([int]$job.lline)) -cne $job.ltoken) { return $false }
+        if ($job.lkind -ceq 'goal') {
+            $path = US $job.lpath
             $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
             try {
-                [void]$fs.Seek([int64]$off, 'Begin')
-                $rest = (New-Object IO.StreamReader($fs, $Utf8)).ReadToEnd()
+                [void]$fs.Seek([int64]$job.loff, 'Begin')
+                $rest = (New-Object IO.StreamReader($fs, $Latin1)).ReadToEnd()
             } finally { $fs.Dispose() }
             if ($rest.Contains('"type":"task_started"')) { return $false }
         }
@@ -540,48 +1776,511 @@ function Test-LaterStillDue($f) {
     return $true
 }
 
-function Invoke-SendChild {
-    $raw = $env:SIMPLETERM_HOOK_PAYLOAD
-    if (-not $raw) { return }
-    $json = $Utf8.GetString([Convert]::FromBase64String($raw))
-    $f = Get-JsonFields $json @('ev', 'rid', 'ts', 'msg', 'cwd', 'title', 'xflag', 'usage', 'scope', 'mark', 'marktext',
-        'lkind', 'lwait', 'lline', 'ltoken', 'lfile', 'lpath', 'loff')
-    $ev = Get-Field $f 'ev'
-    $Script:Rid = Get-Field $f 'rid'
-    $Script:Ts = Get-Field $f 'ts'
-    $Script:Msg = Get-Field $f 'msg'
-    $Script:Title = Get-Field $f 'title'
-    $Script:XFlag = Get-Field $f 'xflag'
-    $Script:CwdBase = Get-Field $f 'cwd'
-    $scope = Get-Field $f 'scope'
-    $mark = Get-Field $f 'mark'
-    if (-not ($mark -cmatch '^[A-Za-z0-9_-]{1,80}\.usage$')) { $mark = '' }
-    $markText = ''
-    try { $markText = $Utf8.GetString([Convert]::FromBase64String((Get-Field $f 'marktext'))) } catch { $mark = '' }
-    try { $Script:UsageJson = $Utf8.GetString([Convert]::FromBase64String((Get-Field $f 'usage'))) } catch { $Script:UsageJson = '' }
-    if (-not ($ev -cmatch '^[a-z]{1,16}$') -or -not (Test-Hex $Script:Rid 16) -or -not (Test-UInt $Script:Ts)) { return }
-    if ($ev -eq 'usage' -and -not $Script:UsageJson) { return }
-    if (Get-Field $f 'lkind') {
-        if (-not (Test-LaterStillDue $f)) { return }
-        $Script:Rid = New-RandomHex 8
-        $Script:Ts = [string](Now-Epoch)
-        if (-not (Test-Hex $Script:Rid 16)) { return }
+# later_send: the event made now (fresh rid, time and, v2, tms) and sent.
+function Send-Later([string]$ev, [string]$scope) {
+    $Script:Now = Now-Epoch
+    $Script:Ts = [string]$Script:Now
+    $Script:Rid = New-RandomHex 8
+    if (-not (Test-Hex $Script:Rid 16)) { return }
+    # v2: the event's time again (tms).
+    if ($Script:V2) { Update-Spec ($Script:V2X + '@.tms' + $Tab + 's' + $Tab + (Get-Tms) + $Nl) }
+    if (-not $scope) { $scope = 'all' }
+    Send-Now $ev $Script:Rid $scope '' ''
+}
+
+function Invoke-Child([string]$name) {
+    $job = Read-Job $name
+    if ($null -eq $job) { return }
+    Restore-Job $job
+    switch -CaseSensitive ([string]$job.kind) {
+        'send' {
+            $mark = [string]$job.mark
+            if ($mark -cnotmatch '\A[A-Za-z0-9_-]{1,80}\.usage\z') { $mark = '' }
+            if ($job.ev -cnotmatch '\A[a-z]{1,16}\z' -or -not (Test-Hex $job.rid 16) -or -not (Test-UInt $job.ts)) { return }
+            Send-Now $job.ev $job.rid $job.scope $mark ([string]$job.marktext)
+        }
+        'later' { if (Test-LaterStillDue $job) { Send-Later $job.ev $job.scope } }
+        'state' {
+            Start-Sleep -Seconds 1
+            $f = (Read-LineB (Join-Path $RunDir ($Script:Sid + '.st')) 0).Split(' ')
+            if ($f.Length -ge 3 -and $f[2] -ceq $job.rid) { Send-Later 'state' 'tunnel' }
+        }
+        'ask' {
+            if (Test-UInt $job.wait) { Start-Sleep -Seconds ([int]$job.wait) }
+            if (Test-Once ([string]$job.key)) { Send-Now 'question' $Script:Rid 'all' '' '' }
+        }
+        'resolved' {
+            foreach ($item in ([string]$job.items).Split([char]10)) {
+                $x = $item.Split([char]9)
+                if ($x.Length -lt 5) { continue }
+                Send-Result (Read-Link (US $x[0])) $x[1] $x[2] $x[3] $x[4]
+            }
+        }
+        'ver' { Invoke-VerChild $job }
     }
-    $ops = @()
-    foreach ($file in (Get-LinkFiles)) {
-        $link = Read-Link $file
-        if ($null -eq $link) { continue }
-        if ($scope -eq 'tunnel' -and $link.kind -ne 'tunnel') { continue }
-        if ($scope -eq 'relay' -and $link.kind -eq 'tunnel') { continue }
-        try { $op = Start-Ingest $link $Script:Rid $ev ''; if ($op) { $ops += $op } } catch { Write-Log 'ingest-failed' }
-    }
-    foreach ($op in $ops) {
+}
+
+# --- event format v2: the common fields --------------------------------------------
+
+# Adds the @-parameter $k (JSON-escaped value $v, nothing if empty).
+function Add-At([string]$k, [string]$v) {
+    if ($v.Length -gt 0) { $Script:AT += '@.' + $k + $Tab + 's' + $Tab + $v + $Nl }
+}
+
+# The facts of the event, once.
+function Initialize-Facts {
+    if ($Script:FactsText) { return }
+    $Script:FactsText = (Get-Facts $Script:InputB '') -join "`n"
+}
+
+# The raw text of container $p of the event (an answer hands it back).
+function Get-RawSpan([string]$p) { return [string](Get-Facts $Script:InputB $p) }
+
+# SPEC from the facts, AT and the extra parameter lines; V2 on.
+function Update-Spec([string]$extra) {
+    Initialize-Facts
+    $Script:Spec = Get-Spec ([string]$Script:FactsText + "`n" + $Script:AT + $extra)
+    $Script:V2 = $true
+}
+
+# The agent's version for a cached `--version` (D13): its executable's path and
+# the version, in run/ver.<name>; run again by a child when the executable is
+# newer than the cache or moved. The first dotted number of the output is taken.
+function Update-VerCache([string]$name) {
+    try {
+        $cmd = @(Get-Command -Name $name -CommandType Application -ErrorAction SilentlyContinue)
+        if ($cmd.Count -eq 0) { return }
+        $vb = [string]$cmd[0].Path
+        if (-not $vb -or -not [IO.Path]::IsPathRooted($vb)) { return }
+        $vc = Join-Path $RunDir ('ver.' + $name)
+        $vp = Read-LineB $vc 0
+        if ($vp -ceq (BS $vb)) { $Script:AV = Read-LineB $vc 1 }
+        if ($vp -ceq (BS $vb) -and -not ([IO.File]::GetLastWriteTimeUtc($vb) -gt [IO.File]::GetLastWriteTimeUtc($vc))) { return }
         try {
-            $Script:IngestCode = 0
-            [void](Complete-Ingest $op $ev)
-            if ($Script:IngestCode -eq 200 -and $mark) { [IO.File]::WriteAllText((Join-Path $RunDir $mark), $markText + "`n", $Utf8) }
-        } catch { Write-Log 'ingest-failed' }
+            $fs = New-Object IO.FileStream(($vc + '.lock'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
+            $fs.Dispose()
+        } catch { return }
+        $job = New-Job 'ver'
+        $job.vname = $name
+        $job.vb = BS $vb
+        Start-Child $job
+    } catch { }
+}
+
+function Invoke-VerChild($job) {
+    $name = [string]$job.vname
+    if ($name -cnotmatch '\A[a-z]{1,16}\z') { return }
+    $vc = Join-Path $RunDir ('ver.' + $name)
+    try {
+        $vb = US $job.vb
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $vb
+        $psi.Arguments = '--version'
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $p.StandardInput.Close()
+        $out = $p.StandardOutput.ReadToEndAsync()
+        $err = $p.StandardError.ReadToEndAsync()
+        if (-not $p.WaitForExit(15000)) { try { $p.Kill() } catch { } }
+        $text = ''
+        if ($out.Wait(2000)) { $text = BS ([string]$out.Result) }
+        if ($text.Length -gt 4096) { $text = $text.Substring(0, 4096) }
+        $v = ''
+        foreach ($line in $text.Split([char]10)) {
+            $m = [regex]::Match($line, '[0-9]+[.][0-9]+[0-9A-Za-z.+_-]*')
+            if ($m.Success) { $v = $m.Value; break }
+        }
+        if ($v -cmatch '\A[0-9A-Za-z.+_-]+\z') {
+            if (Write-FileB ($vc + '.tmp') ($job.vb + "`n" + $v + "`n")) {
+                Remove-FileQ $vc
+                [IO.File]::Move(($vc + '.tmp'), $vc)
+            }
+        }
+    } catch { }
+    Remove-FileQ ($vc + '.tmp')
+    Remove-FileQ ($vc + '.lock')
+}
+
+# AV and AVS: the agent's version and where it came from (section 10.1).
+function Get-AgentVersion {
+    $Script:AV = ''
+    $Script:AVS = ''
+    if ($Script:Agent -ceq 'claude') {
+        $vf = Get-InputFile $Script:TPath
+        if ($vf) {
+            $ms = [regex]::Matches((Read-TailB $vf 65536), '"version" *: *"([0-9][0-9A-Za-z.+_-]*)"')
+            if ($ms.Count -gt 0) { $Script:AV = $ms[$ms.Count - 1].Groups[1].Value }
+        }
+        $Script:AVS = 'transcript'
+    } elseif ($Script:Agent -ceq 'codex') {
+        $vf = Get-InputFile $Script:TPath
+        if ($vf) {
+            $m = [regex]::Match((Read-HeadB $vf 65536), '"cli_version" *: *"([^"\n]*)"')
+            if ($m.Success) { $Script:AV = $m.Groups[1].Value }
+        }
+        $Script:AVS = 'rollout'
+    } elseif ($Script:Agent -ceq 'grok') {
+        Update-VerCache 'grok'
+        $Script:AVS = 'cache'
     }
+    if ($Script:AV -cnotmatch '\A[0-9A-Za-z.+_-]+\z' -or $Script:AV.Length -gt 32) { $Script:AV = '' }
+}
+
+# Codex: the last turn's approval and sandbox policy from the rollout, as its
+# permission mode (`on-request/read-only`).
+function Get-CodexPm {
+    $vf = Get-InputFile $Script:TPath
+    if (-not $vf) { return '' }
+    $pm = ''
+    foreach ($line in (Read-TailB $vf 262144).Split([char]10)) {
+        if (-not $line.Contains('"type":"turn_context"')) { continue }
+        $a = ''
+        $b = ''
+        $m = [regex]::Match($line, '"approval_policy":"([A-Za-z0-9._-]*)"')
+        if ($m.Success) { $a = $m.Groups[1].Value }
+        $m = [regex]::Match($line, '"sandbox_policy":\{"type":"([A-Za-z0-9._-]*)"')
+        if ($m.Success) { $b = $m.Groups[1].Value }
+        if ($a) { $pm = $a; if ($b) { $pm += '/' + $b } }
+    }
+    return $pm
+}
+
+# The common fields (section 3) as @-parameters, once per run.
+function Initialize-Common {
+    if ($Script:V2C) { return }
+    $Script:V2C = $true
+    Add-At 'pv' $HookVersion
+    Get-AgentVersion
+    Add-At 'av' $Script:AV
+    if ($Script:AV) { Add-At 'avs' $Script:AVS }
+    if (Test-Id $Script:RawSid) { Add-At 'sid' $Script:RawSid }
+    if (Test-Id $Script:Tid) { Add-At 'tid' $Script:Tid }
+    if (Test-Id $Script:SubId) {
+        Add-At 'sub.id' $Script:SubId
+        Add-At 'sub.type' $Script:SubType
+        if (Test-Id $Script:SubPar) { Add-At 'sub.parent' $Script:SubPar }
+    }
+    if ($Script:DirV -cmatch '\A(/|[A-Za-z]:\\\\)') { Add-At 'dir' $Script:DirV }
+    $cv = ''
+    $cp = ''
+    if ($Script:Agent -ceq 'claude') {
+        if ($env:CLAUDE_CONFIG_DIR) { $cv = 'CLAUDE_CONFIG_DIR'; $cp = $env:CLAUDE_CONFIG_DIR }
+    } elseif ($Script:Agent -ceq 'codex') {
+        if ($env:CODEX_HOME -and -not (Test-DefaultHome $env:CODEX_HOME '.codex')) { $cv = 'CODEX_HOME'; $cp = $env:CODEX_HOME }
+    } elseif ($Script:Agent -ceq 'grok') {
+        if ($env:GROK_HOME -and -not (Test-DefaultHome $env:GROK_HOME '.grok')) { $cv = 'GROK_HOME'; $cp = $env:GROK_HOME }
+    }
+    if ($cv -and $cp) {
+        Add-At 'cfg.var' $cv
+        Add-At 'cfg.path' (ConvertTo-JsonB (BS $cp) 100000 100000)
+    }
+    if ($Script:Agent -ceq 'codex') { $Script:PMode = Get-CodexPm }
+    if ($Script:PMode -cmatch '\A[A-Za-z0-9._:/-]+\z' -and $Script:PMode.Length -le 48) { Add-At 'pm' $Script:PMode }
+    if ($env:TMUX) { Add-At 'mux' 'tmux' }
+    elseif ($env:STY) { Add-At 'mux' 'screen' }
+}
+
+# True if $dir (one trailing / or \ dropped) is ~/<name>.
+function Test-DefaultHome([string]$dir, [string]$name) {
+    if ($dir.EndsWith('/', $Ord) -or $dir.EndsWith('\', $Ord)) { $dir = $dir.Substring(0, $dir.Length - 1) }
+    return ($dir -ceq ($HOME + '/' + $name) -or $dir -ceq (Join-Path $HOME $name))
+}
+
+# The event time in milliseconds, for `tms`.
+function Get-Tms {
+    if ($env:SIMPLETERM_HOOK_TEST -eq '1' -and $env:SIMPLETERM_HOOK_TEST_TMS) { return (BS $env:SIMPLETERM_HOOK_TEST_TMS) }
+    $t = [string](Now-Ms)
+    if ($t -cmatch '\A[0-9]{13}\z') { return $t }
+    return ''
+}
+
+# Prepares SPEC for an event: the common fields, `tms`, and the extra
+# parameter lines (request kind, end of a turn, state, result).
+function Initialize-V2([string]$extra) {
+    Initialize-Common
+    $Script:V2X = $extra
+    Update-Spec ($extra + '@.tms' + $Tab + 's' + $Tab + (Get-Tms) + $Nl)
+}
+
+# --- states and results to the tunnel (sections 6.2, 5.6) -----------------------
+
+function Test-HasTunnel {
+    foreach ($f in $Script:LinkFiles) {
+        if ((Read-HeadB $f 4096).Contains('kind=tunnel')) { return $true }
+    }
+    return $false
+}
+
+# A state event (section 6.2) to the tunnels, when the session's state
+# changed, one a second at most (a change within the second goes a second later
+# unless another replaced it). $extra: extra parameter lines (the turn).
+# -Sync sends from this process (the agent is exiting: the send finishes
+# before the hook does).
+function Send-State([string]$st, [string]$extra, [switch]$Sync) {
+    if ($Script:LinkFiles.Count -eq 0 -or -not (Test-HasTunnel)) { return }
+    $sf = Join-Path $RunDir ($Script:Sid + '.st')
+    $sl = Read-FileB $sf
+    if ($null -eq $sl) { $sl = '' }
+    $sl = $sl.TrimEnd([char]10)
+    $first = $sl
+    $sp = $sl.IndexOf(' ')
+    if ($sp -ge 0) { $first = $sl.Substring(0, $sp) }
+    if ($first -ceq $st -and $st -cne 'sub_start' -and $st -cne 'sub_stop') { return }
+    $srid = $Script:Rid
+    if ($Script:RidUsed) {
+        $srid = New-RandomHex 8
+        if (-not (Test-Hex $srid 16)) { return }
+    }
+    [void](Write-FileB $sf ($st + ' ' + $Script:Now + ' ' + $srid + "`n"))
+    $ss = $Script:Spec
+    $sx = $Script:V2X
+    $sm = $Script:NoMsg
+    Initialize-V2 ($extra + '@.st' + $Tab + 's' + $Tab + $st + $Nl)
+    $Script:NoMsg = $true
+    $f2 = ''
+    if ($sp -ge 0) { $f2 = $sl.Split(' ')[1] }
+    if ($sp -ge 0 -and $f2 -ceq [string]$Script:Now) {
+        if ($Sync) {
+            $sr = @($Script:Rid, $Script:Ts, $Script:Now, $Script:Spec)
+            Start-Sleep -Seconds 1
+            $f = (Read-LineB $sf 0).Split(' ')
+            if ($f.Length -ge 3 -and $f[2] -ceq $srid) { Send-Later 'state' 'tunnel' }
+            $Script:Rid = $sr[0]; $Script:Ts = $sr[1]; $Script:Now = $sr[2]; $Script:Spec = $sr[3]
+        } else {
+            $job = New-Job 'state'
+            $job.rid = $srid
+            Start-Child $job
+        }
+    } elseif ($Sync) {
+        if ($srid -ceq $Script:Rid) { $Script:RidUsed = $true }
+        Send-Now 'state' $srid 'tunnel' '' ''
+    } else {
+        Send-Background 'state' $srid 'tunnel'
+    }
+    $Script:Spec = $ss
+    $Script:V2X = $sx
+    $Script:NoMsg = $sm
+}
+
+# A result event (section 5.6) to the tunnel $link: scope, out, the request
+# event's rid, decision id or window kind. Sent and finished here.
+function Send-Result($link, [string]$scope, [string]$out, [string]$rrid, [string]$aw) {
+    if ($null -eq $link -or $link.kind -cne 'tunnel') { return }
+    $rx = '@.res.scope' + $Tab + 's' + $Tab + $scope + $Nl + '@.res.req' + $Tab + 's' + $Tab + $Script:ReqId + $Nl +
+        '@.res.rrid' + $Tab + 's' + $Tab + $rrid + $Nl + '@.res.out' + $Tab + 's' + $Tab + $out + $Nl
+    if ($out -ceq 'applied' -and $aw) { $rx += '@.res.act' + $Tab + 's' + $Tab + $aw + $Nl }
+    if ($out -ceq 'window' -and $aw) { $rx += '@.res.win' + $Tab + 's' + $Tab + $aw + $Nl }
+    $rs = Get-Spec ([string]$Script:FactsText + "`n" + $Script:AT + $rx)
+    $save = @($Script:Spec, $Script:NoMsg, $Script:WaitOv, $Script:IngMt, $Script:Ts)
+    $Script:Spec = $rs
+    $Script:NoMsg = $true
+    $Script:WaitOv = ''
+    $Script:IngMt = ''
+    $Script:Ts = [string](Now-Epoch)
+    try {
+        $rr = New-RandomHex 8
+        if (Test-Hex $rr 16) { [void](Complete-Ingest (Start-Ingest $link $rr 'resolved' '')) }
+    } catch { Write-Log 'ingest-failed' }
+    $Script:Spec = $save[0]
+    $Script:NoMsg = $save[1]
+    $Script:WaitOv = $save[2]
+    $Script:IngMt = $save[3]
+    $Script:Ts = $save[4]
+}
+
+# --- session records (section 8.2) --------------------------------------------
+
+# Only sessions started in SimpleTerm (SIMPLETERM=1), with an id that can be
+# resumed. The file name is the id, or the start of its SHA-256 when it has
+# a `:` (a Windows file name cannot).
+function Test-SessOk {
+    if ($env:SIMPLETERM -ne '1') { return $false }
+    if ($Script:Agent -cne 'claude' -and $Script:Agent -cne 'codex' -and $Script:Agent -cne 'grok') { return $false }
+    if (-not (Test-Id $Script:RawSid)) { return $false }
+    $Script:SessDir = Join-Path (Join-Path $StDir 'sessions') $Script:App
+    if ($Script:RawSid.Contains(':')) { $Script:SessName = (Get-Sha256Hex $Script:RawSid).Substring(0, 32) } else { $Script:SessName = $Script:RawSid }
+    $Script:Sess = Join-Path $Script:SessDir $Script:SessName
+    return $true
+}
+
+function New-SessDir {
+    try { if (-not [IO.Directory]::Exists($Script:SessDir)) { [void][IO.Directory]::CreateDirectory($Script:SessDir) } } catch { }
+}
+
+function Set-Touch([string]$path) {
+    try {
+        if ([IO.File]::Exists($path)) { [IO.File]::SetLastWriteTimeUtc($path, [DateTime]::UtcNow) }
+        else { [IO.File]::WriteAllBytes($path, (New-Object byte[] 0)) }
+        return $true
+    } catch { return $false }
+}
+
+# The session's last hook event: <name>.beat's modification time (touched when
+# 30 seconds old, or always with -Force).
+function Update-SessBeat([switch]$Force) {
+    if (-not (Test-SessOk)) { return }
+    $bt = Join-Path $RunDir ($Script:Sid + '.beatts')
+    if (-not $Force) {
+        $t = (Read-LineB $bt 0)
+        if ((Test-UInt $t) -and ($Script:Now - [int64]$t) -le 30 -and [int64]$t -le $Script:Now -and [IO.File]::Exists($Script:Sess + '.beat')) { return }
+    }
+    New-SessDir
+    if (Set-Touch ($Script:Sess + '.beat')) { [void](Write-FileB $bt ([string]$Script:Now + "`n")) }
+}
+
+# The session's title and where it came from (section 10.7): SessTitle
+# (JSON-escaped), SessTsrc.
+function Get-SessTitle {
+    $Script:SessTitle = ''
+    $Script:SessTsrc = ''
+    $tf = Get-InputFile $Script:TPath
+    if ($Script:Agent -ceq 'claude') {
+        if ($tf) {
+            foreach ($line in (Read-TailB $tf 262144).Split([char]10)) {
+                if (-not $line.Contains('"type":"ai-title"')) { continue }
+                $m = [regex]::Match($line, '"aiTitle":"((?:[^"\\]|\\.)*)"')
+                if ($m.Success) { $Script:SessTitle = $m.Groups[1].Value }
+            }
+        }
+        $Script:SessTsrc = 'ai'
+    } elseif ($Script:Agent -ceq 'codex') {
+        $ch = $env:CODEX_HOME
+        if (-not $ch) { $ch = Join-Path $HOME '.codex' }
+        $ci = Join-Path $ch 'session_index.jsonl'
+        if ([IO.File]::Exists($ci)) {
+            foreach ($line in (Read-TailB $ci 262144).Split([char]10)) {
+                if (-not $line.Contains('"id":"' + $Script:RawSid + '"')) { continue }
+                $m = [regex]::Match($line, '"thread_name":"((?:[^"\\]|\\.)*)"')
+                if ($m.Success) { $Script:SessTitle = $m.Groups[1].Value }
+            }
+        }
+        $Script:SessTsrc = 'ai'
+    } elseif ($Script:Agent -ceq 'grok') {
+        if ($tf) {
+            $sj = Join-Path ([IO.Path]::GetDirectoryName($tf)) 'summary.json'
+            if ([IO.File]::Exists($sj)) { $Script:SessTitle = Get-Field (Get-JsonKV (Read-HeadB $sj 65536) @('generated_title')) 'generated_title' }
+        }
+        $Script:SessTsrc = 'ai'
+    }
+    if (-not $Script:SessTitle) { $Script:SessTsrc = '' }
+}
+
+# Writes the session's record (state running|idle; $prompt): a temp file
+# renamed into place, 4096 bytes at most. Keeps started_at, the last prompt and
+# a title it cannot find again from the record before.
+function Write-SessRecord([string]$state, [string]$prompt) {
+    if (-not (Test-SessOk)) { return }
+    New-SessDir
+    $old = Read-HeadB ($Script:Sess + '.json') 4096
+    $ow = $null
+    if ($old) { $ow = Get-JsonKV $old @('started_at', 'last_prompt', 'title', 'title_src') }
+    $so = ''
+    if ($ow) { $so = Get-Field $ow 'started_at' }
+    if (-not (Test-UInt $so)) { $so = [string]$Script:Now }
+    $lp = Limit-Json $prompt 200 800
+    if (-not $lp -and $ow) { $lp = Get-Field $ow 'last_prompt' }
+    Get-SessTitle
+    $ti = Limit-Json $Script:SessTitle 120 400
+    $ts = $Script:SessTsrc
+    if (-not $ti) {
+        $ti = ''
+        $ts = ''
+        if ($ow) { $ti = Get-Field $ow 'title'; $ts = Get-Field $ow 'title_src' }
+    }
+    if (-not $ti -and $lp) { $ti = Limit-Json $lp 120 400; $ts = 'prompt' }
+    if ($ts -cne 'ai' -and $ts -cne 'user' -and $ts -cne 'prompt') { $ts = '' }
+    if (-not $ts) { $ti = '' }
+    $j = '{"v":1,"app":"' + $Script:App + '"'
+    if ($Script:AV) { $j += ',"av":"' + $Script:AV + '"' }
+    $j += ',"sid":"' + $Script:RawSid + '"'
+    if ($Script:DirV -cmatch '\A(/|[A-Za-z]:\\\\)') { $j += ',"dir":"' + (Limit-Json $Script:DirV 100000 1024) + '"' }
+    if ($ti) { $j += ',"title":"' + $ti + '","title_src":"' + $ts + '"' }
+    if ($lp) { $j += ',"last_prompt":"' + $lp + '"' }
+    $j += ',"last_at":' + $Script:Now + ',"started_at":' + $so
+    # An absolute path: / or, on Windows, a drive (agent-hook.sh takes / only).
+    $tp = Get-InputFile $Script:TPath
+    if ($tp -cmatch '\A(/|[A-Za-z]:\\)') { $j += ',"tpath":"' + (ConvertTo-JsonB (BS $tp) 100000 1024) + '"' }
+    if ($Script:PMode -cmatch '\A[A-Za-z0-9._:/-]+\z' -and $Script:PMode.Length -le 48) { $j += ',"pm":"' + $Script:PMode + '"' }
+    $cvv = ''
+    $cpp = ''
+    foreach ($line in $Script:AT.Split([char]10)) {
+        if ($line.StartsWith('@.cfg.var' + $Tab + 's' + $Tab, $Ord)) { $cvv = $line.Substring(12) }
+        elseif ($line.StartsWith('@.cfg.path' + $Tab + 's' + $Tab, $Ord)) { $cpp = $line.Substring(13) }
+    }
+    if ($cvv -and $cpp) { $j += ',"cfg":{"var":"' + $cvv + '","path":"' + (Limit-Json $cpp 100000 1024) + '"}' }
+    $j += ',"state":"' + $state + '"'
+    if ($env:TMUX) { $j += ',"mux":"tmux"' } elseif ($env:STY) { $j += ',"mux":"screen"' }
+    $j += '}'
+    if ($j.Length -gt 4096) { return }
+    $tmp = $Script:Sess + '.json.' + $PID
+    if (Write-FileB $tmp ($j + "`n")) {
+        try {
+            if ([IO.File]::Exists($Script:Sess + '.json')) { [IO.File]::Delete($Script:Sess + '.json') }
+            [IO.File]::Move($tmp, $Script:Sess + '.json')
+        } catch { }
+    }
+    Remove-FileQ $tmp
+    Invoke-SessKeep
+}
+
+# A session starts or is resumed: no `.ended` any more.
+function Start-Sess {
+    if (-not (Test-SessOk)) { return }
+    Update-SessBeat -Force
+    Remove-FileQ ($Script:Sess + '.ended')
+}
+
+# The session ended: `.ended`, unless the record's .beat is newer than this
+# event (it was resumed meanwhile: a late end must not mark it ended).
+function Stop-Sess([DateTime]$since) {
+    if (-not (Test-SessOk)) { return }
+    try {
+        if ([IO.File]::Exists($Script:Sess + '.beat') -and [IO.File]::GetLastWriteTimeUtc($Script:Sess + '.beat') -gt $since) { return }
+    } catch { }
+    New-SessDir
+    [void](Write-FileB ($Script:Sess + '.ended') '')
+}
+
+# Keeps records whose last activity (.beat or the record, the later) is within
+# 30 days, 200 at most (D11); at most once in ten minutes.
+function Invoke-SessKeep {
+    $kf = Join-Path $RunDir 'sessions.keep'
+    $t = Read-LineB $kf 0
+    if ((Test-UInt $t) -and ($Script:Now - [int64]$t) -lt 600 -and [int64]$t -le $Script:Now) { return }
+    [void](Write-FileB $kf ([string]$Script:Now + "`n"))
+    try {
+        $root = Join-Path $StDir 'sessions'
+        if (-not [IO.Directory]::Exists($root)) { return }
+        $last = @{}
+        foreach ($d in [IO.Directory]::GetDirectories($root)) {
+            foreach ($f in [IO.Directory]::GetFiles($d)) {
+                if (-not ($f.EndsWith('.json', $Ord) -or $f.EndsWith('.beat', $Ord))) { continue }
+                $b = $f.Substring(0, $f.Length - 5)
+                $w = [IO.File]::GetLastWriteTimeUtc($f)
+                if (-not $last.ContainsKey($b) -or $w -gt $last[$b]) { $last[$b] = $w }
+            }
+        }
+        $now = [DateTime]::UtcNow
+        $n = 0
+        foreach ($e in ($last.GetEnumerator() | Sort-Object -Property Value -Descending)) {
+            $n++
+            if ($n -gt 200 -or ($now - $e.Value).TotalDays -ge 31) {
+                foreach ($x in @('.json', '.beat', '.ended')) { Remove-FileQ ($e.Key + $x) }
+            }
+        }
+    } catch { }
+}
+
+# The session's record at a turn's start (state running, its prompt) or end.
+function Write-SessTurn([string]$state, [string]$prompt) {
+    if (-not (Test-SessOk)) { return }
+    Initialize-Common
+    if ($state -ceq 'running') { Start-Sess } else { Update-SessBeat -Force }
+    Write-SessRecord $state $prompt
 }
 
 # --- terminal sequence (Claude Code only, SimpleTerm sessions only) -------
@@ -589,19 +2288,19 @@ function Invoke-SendChild {
 # $Script:UsageSeq is the JSON-escaped usage OSC to append, if any;
 # $Script:BgSeq the hook's OSC 7501 record for background work.
 function Write-State([string]$state, [string]$message) {
-    if ($Agent -ne 'claude' -or $env:SIMPLETERM -ne '1') { return }
+    if ($Script:Agent -cne 'claude' -or $env:SIMPLETERM -ne '1') { return }
     $m = ''
-    if ($message) { $m = ' ' + (Limit-JsonText $message 80 320) }
+    if ($message) { $m = ' ' + (Limit-Json $message 80 320) }
     Write-Out ('{"terminalSequence":"\u001b]9;simpleterm:state=' + $state + $m + '\u0007' + $Script:BgSeq + $Script:UsageSeq + '"}')
 }
 
 function Write-UsageOnly {
-    if ($Agent -ne 'claude' -or $env:SIMPLETERM -ne '1' -or -not $Script:UsageSeq) { return }
+    if ($Script:Agent -cne 'claude' -or $env:SIMPLETERM -ne '1' -or -not $Script:UsageSeq) { return }
     Write-Out ('{"terminalSequence":"' + $Script:UsageSeq + '"}')
 }
 
 function Get-StateJson([string]$state) {
-    if ($Agent -ne 'claude' -or $env:SIMPLETERM -ne '1') { return '' }
+    if ($Script:Agent -cne 'claude' -or $env:SIMPLETERM -ne '1') { return '' }
     return (',"terminalSequence":"\u001b]9;simpleterm:state=' + $state + '\u0007"')
 }
 
@@ -656,107 +2355,6 @@ function Test-AnsweredLocally([int64]$since, [string]$fp) {
     return $false
 }
 
-function Invoke-PermissionFlow {
-    if ($Agent -eq 'codex') { $cap = Get-ConfInt 'codex_wait' 60 } else { $cap = Get-ConfInt 'claude_wait' 540 }
-    if ($cap -gt 540) { $cap = 540 }
-    $pollWait = Get-ConfInt 'poll_wait' 25
-    if ($pollWait -lt 1 -or $pollWait -gt 25) { $pollWait = 25 }
-    $start = Now-Epoch
-    $script:ResBase = Get-ResLineCount
-    $deadline = $start + $cap
-    $agentPid = Get-AgentPid
-    $decision = ''
-    try {
-        $ingests = @()
-        foreach ($file in $LinkFiles) {
-            $link = Read-Link $file
-            if ($null -eq $link) { continue }
-            $nonce = New-RandomHex 16
-            if ($env:SIMPLETERM_HOOK_TEST -eq '1' -and $env:SIMPLETERM_HOOK_TEST_NONCE) { $nonce = $env:SIMPLETERM_HOOK_TEST_NONCE }
-            if (-not (Test-Hex $nonce 32)) { continue }
-            try {
-                $op = Start-Ingest $link $Rid 'permission' $nonce
-                if ($op) { $ingests += @{ op = $op; nonce = $nonce; link = $link } }
-            } catch { Write-Log ('ingest-failed link=' + (Short $link.link)) }
-        }
-        # Wait only where a device was actually notified.
-        $polls = @()
-        foreach ($it in $ingests) {
-            $push = Complete-Ingest $it.op 'permission'
-            if ($push -eq 'sent') { $polls += @{ link = $it.link; nonce = $it.nonce; op = $null; done = $false } }
-        }
-        if ($polls.Count -eq 0) { return }
-        $answered = $false
-        while ($true) {
-            $now = Now-Epoch
-            $active = 0
-            foreach ($p in $polls) {
-                if ($p.done) { continue }
-                if ($null -eq $p.op) {
-                    if ($now -ge $deadline) { $p.done = $true; continue }
-                    $w = [Math]::Min($pollWait, $deadline - $now)
-                    if ($w -lt 1) { $w = 1 }
-                    $p.op = Start-Relay $p.link 'GET' ('/v1/decision?rid=' + $Rid + '&wait=' + $w) '' ($w + 10)
-                    $p.started = $now
-                }
-                $active++
-                if (-not (Test-RelayDone $p.op)) { continue }
-                $r = Complete-Relay $p.op
-                $p.op = $null
-                if ($r.code -eq 200) {
-                    $f = Get-JsonFields $r.body @('status', 'decision', 'dmac')
-                    if ((Get-Field $f 'status') -eq 'decided') {
-                        $d = Get-Field $f 'decision'
-                        $dmac = Get-Field $f 'dmac'
-                        $result = 'invalid'
-                        if (($d -ceq 'allow' -or $d -ceq 'deny') -and (Test-Hex $dmac 64)) {
-                            $expect = Get-HmacHex $p.link.mac ('st1-dec.' + $Rid + '.' + $d + '.' + $p.nonce)
-                            if (Test-SameHex $expect $dmac) { $result = $d }
-                        }
-                        Write-Log ('decision link=' + (Short $p.link.link) + ' result=' + $result)
-                        $p.done = $true
-                        if ($result -ne 'invalid') { $decision = $result; break }
-                    } elseif ((Now-Epoch) -eq $p.started) {
-                        Start-Sleep -Seconds 1
-                    }
-                } elseif ($r.code -eq 404 -or $r.code -eq 410 -or $r.code -eq 401 -or $r.code -eq 403) {
-                    Write-Log ('decision link=' + (Short $p.link.link) + ' http=' + $r.code)
-                    if ($r.code -eq 410 -and (Get-Field (Get-JsonFields $r.body @('error')) 'error') -eq 'revoked') {
-                        try { [IO.File]::WriteAllText((Join-Path $RunDir ($p.link.link + '.revoked')), '', $Utf8) } catch { }
-                    }
-                    $p.done = $true
-                } elseif ($r.code -eq 0 -and $p.link.kind -eq 'tunnel') {
-                    # The app's connection ended: nothing will answer there.
-                    Write-Log ('decision link=' + (Short $p.link.link) + ' tunnel-gone')
-                    $p.done = $true
-                } else {
-                    Start-Sleep -Seconds 2
-                }
-            }
-            if ($decision) { break }
-            if ($active -eq 0) { break }
-            if (Test-AnsweredLocally $start $Fp) { $answered = $true; Write-Log 'permission answered-at-terminal'; break }
-            if ($agentPid -gt 0 -and $null -eq (Get-Process -Id $agentPid -ErrorAction SilentlyContinue)) {
-                $answered = $true; Write-Log 'permission agent-gone'; break
-            }
-            if ((Now-Epoch) -ge $deadline) { break }
-            Start-Sleep -Milliseconds 500
-        }
-        foreach ($p in $polls) { if ($null -ne $p.op) { try { $p.op.req.Abort() } catch { } } }
-        if (-not $decision -and -not $answered) {
-            if ((Now-Epoch) -ge $deadline) { Write-Log 'permission timeout' } else { Write-Log 'permission no-decision' }
-        }
-    } finally {
-    }
-    if ($decision -eq 'allow') {
-        Write-Out ('{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}' + (Get-StateJson 'running') + '}')
-        Write-Log 'permission allow'
-    } elseif ($decision -eq 'deny') {
-        Write-Out ('{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from SimpleTerm"}}' + (Get-StateJson 'running') + '}')
-        Write-Log 'permission deny'
-    }
-}
-
 # --- usage (#342) ------------------------------------------------------------
 
 function Format-Num($v) {
@@ -789,43 +2387,6 @@ function Read-TailLines([string]$path, [int]$bytes) {
 
 function ConvertFrom-JsonLine([string]$line) {
     try { return ($line | ConvertFrom-Json) } catch { return $null }
-}
-
-# JSON-escaped text with only \" \\ \/ escapes decoded, or '' for others.
-function ConvertFrom-SimpleEscapes([string]$raw) {
-    $sb = New-Object System.Text.StringBuilder
-    for ($i = 0; $i -lt $raw.Length; $i++) {
-        $c = $raw[$i]
-        if ($c -eq '\') {
-            if ($i + 1 -ge $raw.Length) { return '' }
-            $e = $raw[$i + 1]
-            if ($e -ne '\' -and $e -ne '/' -and $e -ne '"') { return '' }
-            $c = $e
-            $i++
-        }
-        [void]$sb.Append($c)
-    }
-    return $sb.ToString()
-}
-
-# A readable file named by a JSON-escaped path from the hook input, or ''.
-function Get-InputFile([string]$raw) {
-    if (-not $raw -or $raw -eq 'null') { return '' }
-    $sb = New-Object System.Text.StringBuilder
-    for ($i = 0; $i -lt $raw.Length; $i++) {
-        $c = $raw[$i]
-        if ($c -eq '\') {
-            if ($i + 1 -ge $raw.Length) { return '' }
-            $e = $raw[$i + 1]
-            if ($e -ne '\' -and $e -ne '/' -and $e -ne '"') { return '' }
-            $c = $e
-            $i++
-        }
-        [void]$sb.Append($c)
-    }
-    $path = $sb.ToString()
-    try { if ([IO.File]::Exists($path)) { return $path } } catch { }
-    return ''
 }
 
 # Claude Code transcript: the newest main-thread assistant usage (input +
@@ -924,6 +2485,8 @@ function Get-ClaudeWindow([string]$model) {
     if ($v -match '^[0-9]{1,18}$' -and [int64]$v -ge 1000 -and [int64]$v -le 999999999999) { return @{ win = [int64]$v; est = $false } }
     if (@('1', 'true', 'TRUE', 'True') -contains [string]$env:CLAUDE_CODE_DISABLE_1M_CONTEXT) { return @{ win = 200000; est = $false } }
     $m = $model.ToLowerInvariant()
+    # A [1m] model names its window itself (exact).
+    if ($m.Contains('[1m]')) { return @{ win = 1000000; est = $false } }
     $big = ($m -match 'claude-fable-') -or ($m -match 'claude-sonnet-([5-9]|[1-9][0-9])') -or
         ($m -match 'claude-opus-(4-[7-9]|[5-9]|[1-9][0-9])') -or ($m -match 'claude-haiku-(5-[5-9]|[6-9]|[1-9][0-9])')
     if ($big) { return @{ win = 1000000; est = $true } }
@@ -931,16 +2494,15 @@ function Get-ClaudeWindow([string]$model) {
 }
 
 function Get-UsageNow {
-    $tpath = Get-InputFile (Get-Field $f 'transcript_path')
-    if ($Agent -eq 'codex') {
+    $tpath = Get-InputFile $Script:TPath
+    if ($Script:Agent -ceq 'codex') {
         if (-not $tpath) { return $null }
         return (Get-CodexUsage $tpath)
     }
-    if ($Agent -ne 'claude') { return $null }
+    if ($Script:Agent -cne 'claude') { return $null }
     $ctx = $null; $src = 'transcript'
-    $model = (Get-Field $f 'to_model')
-    if (-not $model) { $model = Get-Field $f 'model' }
-    $tok = Get-Field $f 'context_tokens'
+    $model = $Script:Model
+    $tok = $Script:CtxTok
     if ((Test-UInt $tok) -and [int64]$tok -gt 0) {
         $ctx = [int64]$tok; $src = 'hook'
     } elseif ($tpath) {
@@ -951,7 +2513,7 @@ function Get-UsageNow {
     $model = $model -replace '[^A-Za-z0-9._:@/\[\]-]', ''
     $w = Get-ClaudeWindow $model
     $u = @{ ctx = $ctx; win = $w.win; src = $src; est = $w.est; base = $null; plan = ''; reached = $false; lims = @() }
-    if ($HookEvent -eq 'StopFailure' -and (Get-Field $f 'error') -eq 'rate_limit') { $u.reached = $true }
+    if ($Script:HookEvent -ceq 'StopFailure' -and $Script:Err -ceq 'rate_limit') { $u.reached = $true }
     # The session's window as last known, "<window|-> <est 0|1> <since>" (as in
     # agent-hook.sh): transcripts drop the [1m] of a 1M session. SessionStart
     # and PostModelSwitch name the model in use and start it over.
@@ -967,7 +2529,7 @@ function Get-UsageNow {
             }
         }
     } catch { }
-    if ($HookEvent -eq 'SessionStart' -or $HookEvent -eq 'PostModelSwitch') { $mw = ''; $me = $true; $ms = Now-Epoch }
+    if ($Script:HookEvent -ceq 'SessionStart' -or $Script:HookEvent -ceq 'PostModelSwitch') { $mw = ''; $me = $true; $ms = Now-Epoch }
     # Optional status line tap (scripts/statusline-tap.sh): exact window, limits.
     $sl = Join-Path $RunDir ('usage.' + $Sid + '.json')
     try {
@@ -1091,7 +2653,7 @@ function Update-Cli {
 # runs this plugin's hooks twice when Claude Code and Grok both have it.
 function Test-Once([string]$key) {
     $path = Join-Path $RunDir ('dd.' + $key)
-    $now = Now-Epoch
+    $now = $Script:Now
     for ($try = 0; $try -lt 2; $try++) {
         try {
             $fs = New-Object IO.FileStream($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
@@ -1106,36 +2668,515 @@ function Test-Once([string]$key) {
             try { [IO.File]::Delete($path) } catch { }
         }
     }
-    Write-Log ('duplicate ' + $HookEvent)
+    Write-Log ('duplicate ' + $Script:HookEvent)
     return $false
 }
 
-# True for the first alert for this question of this session within 30
-# seconds: Claude Code reports one AskUserQuestion twice (PreToolUse and
-# PermissionRequest).
-function Test-AskOnce([string]$question) {
-    $key = 'q.' + (Get-Sha256Hex ($Sid + '|' + $question)).Substring(0, 16)
-    return (Test-Once $key)
+# --- decisions (TDS_AGENT_EVENTS_V2 section 5) -----------------------------------
+
+# A reason the user typed, wrapped as Claude Code reads a user's rejection: a
+# bare reason is read as script output and ignored [measured].
+$ClaudeDeny = 'The user doesn''t want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\n'
+
+# Prints a device decision (allow|deny) in the agent's own format (the v1
+# decisions; Write-V2Decision has the others).
+function Write-Decision([string]$d) {
+    if ($Script:Agent -cne 'claude' -and $Script:Agent -cne 'codex') { return }
+    if ($d -ceq 'allow') {
+        Write-Out ('{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}' + (Get-StateJson 'running') + '}')
+    } elseif ($d -ceq 'deny') {
+        Write-Out ('{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from SimpleTerm"}}' + (Get-StateJson 'running') + '}')
+    }
 }
 
-# --- main ------------------------------------------------------------------
+# Prints decision $act (a decision id, section 4.3) in the agent's format, with
+# X* from its extension (section 5.4). False if there is nothing to print for
+# it here.
+function Write-V2Decision([string]$act) {
+    $a = $Script:Agent
+    if ($act -ceq 'allow' -or $act -ceq 'deny') { Write-Decision $act; return $true }
+    if ($a -ceq 'claude' -and $act -ceq 'allow_scope') {
+        $sg = Get-RawSpan ('permission_suggestions.' + $Script:XOrig)
+        if (-not $sg) { return $false }
+        Write-Out ('{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedPermissions":[' + $sg + ']}}' + (Get-StateJson 'running') + '}')
+        return $true
+    }
+    if ($a -ceq 'claude' -and ($act -ceq 'deny_reason' -or $act -ceq 'plan_refine')) {
+        Write-Out ('{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"' + $ClaudeDeny + $Script:XReason + '"}}' + (Get-StateJson 'running') + '}')
+        return $true
+    }
+    if ($a -ceq 'claude' -and $act -ceq 'answer') {
+        $qs = Get-RawSpan 'tool_input.questions'
+        if (-not $qs -or -not $Script:XAnswers) { return $false }
+        Write-Out ('{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":{"questions":' + $qs + ',"answers":' + $Script:XAnswers + '}}}' + (Get-StateJson 'running') + '}')
+        return $true
+    }
+    if ($a -ceq 'claude' -and $act -ceq 'plan_approve') {
+        $ti = Get-RawSpan 'tool_input'
+        if (-not $ti) { return $false }
+        $up = ''
+        if ($Script:XMode -ceq 'accept_edits') { $up = ',"updatedPermissions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}]' }
+        Write-Out ('{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":' + $ti + $up + '}}' + (Get-StateJson 'running') + '}')
+        return $true
+    }
+    if ($a -ceq 'codex' -and $act -ceq 'deny_reason') {
+        Write-Out ('{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"' + $Script:XReason + '"}}}')
+        return $true
+    }
+    return $false
+}
 
-function Read-Input {
-    if ($Agent -eq 'codex-notify') {
-        if ($ScriptArgs.Count -lt 2) { return '' }
-        $last = [string]$ScriptArgs[$ScriptArgs.Count - 1]
-        if ($last.Length -gt $MaxInput) { return '' }
-        return $last
+# Splits a facts line into path, type, value.
+function Split-Fact([string]$line) {
+    $t1 = $line.IndexOf([char]9)
+    if ($t1 -lt 0) { return @($line, '', '') }
+    $t2 = $line.IndexOf([char]9, $t1 + 1)
+    if ($t2 -lt 0) { return @($line.Substring(0, $t1), $line.Substring($t1 + 1), '') }
+    return @($line.Substring(0, $t1), $line.Substring($t1 + 1, $t2 - $t1 - 1), $line.Substring($t2 + 1))
+}
+
+# The answers of an `answer` decision (E: the event's facts, X: the
+# extension's) in Claude Code's form, or BAD (ANSWER_AWK): an object
+# {question: answer} (a choice by its label, several as an array, typed text as
+# it is, both joined with ", "). Every question must be answered (M11), choices
+# index the original list, typed text only where the question takes it.
+function Get-Answers([string]$factsE, [string]$factsX, [string]$qp, [string]$fq, [string]$fl, [bool]$free, [double]$nq) {
+    $E = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $X = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $XT = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach ($line in $factsE.Split([char]10)) { $f = Split-Fact $line; $E[$f[0]] = $f[2] }
+    foreach ($line in $factsX.Split([char]10)) { $f = Split-Fact $line; $X[$f[0]] = $f[2]; $XT[$f[0]] = $f[1] }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    $PL = @{}
+    $NP = @{}
+    $TX = @{}
+    $QI = @{}
+    $n = 0
+    $bad = $false
+    for ($k = 0; $k -lt 64 -and $X.ContainsKey('answers.' + $k + '.q'); $k++) {
+        $q = $X['answers.' + $k + '.q']
+        if ($XT['answers.' + $k + '.q'] -cne 'r' -or $q -cnotmatch '\A[0-9]+\z' -or [double]$q -ge $nq -or $seen.Contains($q)) { $bad = $true; break }
+        [void]$seen.Add($q)
+        $n++
+        $no = 0
+        while ($no -lt 64 -and ($E.ContainsKey($qp + '.' + $q + '.options.' + $no + '.' + $fl) -or $E.ContainsKey($qp + '.' + $q + '.options.' + $no))) { $no++ }
+        $picks = @()
+        for ($m = 0; $m -lt 64 -and $X.ContainsKey('answers.' + $k + '.pick.' + $m); $m++) {
+            $v = $X['answers.' + $k + '.pick.' + $m]
+            if ($v -cnotmatch '\A[0-9]+\z' -or [double]$v -ge $no) { $bad = $true; break }
+            $b = $qp + '.' + $q + '.options.' + $v
+            $l = ''
+            if ($E.ContainsKey($b + '.' + $fl)) { $l = $E[$b + '.' + $fl] } elseif ($E.ContainsKey($b)) { $l = $E[$b] }
+            $picks += $l
+        }
+        if ($bad) { break }
+        $t = ''
+        if ($XT.ContainsKey('answers.' + $k + '.text') -and $XT['answers.' + $k + '.text'] -ceq 's') { $t = $X['answers.' + $k + '.text'] }
+        if (($t -and -not $free) -or $t.Length -gt 2400 -or ($picks.Count -eq 0 -and -not $t)) { $bad = $true; break }
+        $PL[$k] = $picks
+        $NP[$k] = $picks.Count
+        $TX[$k] = $t
+        $QI[$k] = $q
     }
-    $stream = [Console]::OpenStandardInput()
-    $buf = New-Object byte[] $MaxInput
-    $total = 0
-    while ($total -lt $buf.Length) {
-        $n = $stream.Read($buf, $total, $buf.Length - $total)
-        if ($n -le 0) { break }
-        $total += $n
+    if ($bad -or $n -ne $nq -or $n -eq 0) { return 'BAD' }
+    $o = '{'
+    for ($k = 0; $k -lt $n; $k++) {
+        if ($TX[$k] -or $NP[$k] -eq 1) {
+            $v = ($PL[$k] -join ', ')
+            if ($TX[$k]) { if ($v) { $v += ', ' }; $v += $TX[$k] }
+            $v = '"' + $v + '"'
+        } else {
+            $v = '[' + (($PL[$k] | ForEach-Object { '"' + $_ + '"' }) -join ',') + ']'
+        }
+        if ($k -gt 0) { $o += ',' }
+        $qt = ''
+        $key = $qp + '.' + $QI[$k] + '.' + $fq
+        if ($E.ContainsKey($key)) { $qt = $E[$key] }
+        $o += '"' + $qt + '":' + $v
     }
-    return $Utf8.GetString($buf, 0, $total)
+    return ($o + '}')
+}
+
+# Judges the decision that link $L brought (section 5.5, rq_judge): JV apply
+# (JA the decision id), window (nothing to print: a v1 allow of a question),
+# bad (1, 2, 4), changed (3, 5) or none (the wait ended without one).
+function Invoke-Judge($L) {
+    $Script:JV = 'none'
+    $Script:JA = ''
+    $Script:XReason = ''
+    $Script:XMode = ''
+    $Script:XAnswers = ''
+    $Script:XOrig = ''
+    $jd = $L.poll.r
+    $jx = $L.poll.x
+    $jp = $L.poll.xp
+    $jrq = ''; $jwin = ''; $jcan = ''; $jaff = ''; $jns = 0; $jmodes = ''; $jnq = 0; $jsmap = ''
+    if ($null -ne $L.meta -and $L.meta.Count -gt 0) {
+        if ($L.meta[0].StartsWith('META ', $Ord)) {
+            foreach ($kv in (Split-Words $L.meta[0].Substring(5))) {
+                if ($kv.StartsWith('rq=', $Ord)) { $jrq = $kv.Substring(3) }
+                elseif ($kv.StartsWith('win=', $Ord)) { $jwin = $kv.Substring(4) }
+                elseif ($kv.StartsWith('can=', $Ord)) { $jcan = $kv.Substring(4) }
+                elseif ($kv.StartsWith('aff=', $Ord)) { $jaff = $kv.Substring(4) }
+                elseif ($kv.StartsWith('ns=', $Ord)) { $jns = $kv.Substring(3) }
+                elseif ($kv.StartsWith('modes=', $Ord)) { $jmodes = $kv.Substring(6) }
+                elseif ($kv.StartsWith('nq=', $Ord)) { $jnq = $kv.Substring(3) }
+            }
+        }
+        foreach ($x in $L.meta) { if ($x.StartsWith('#smap' + $Tab + 's' + $Tab, $Ord)) { $jsmap = $x.Substring(8) } }
+    }
+    if ($jd -ceq 'invalid') { $Script:JV = 'bad'; return }
+    if ($jd -cne 'allow' -and $jd -cne 'deny') { return }
+    if ($jx -ceq 'bad') { $Script:JV = 'bad'; return }
+    if ($jx -cne 'ok') {
+        # No extension (an older app, a relay before R2, an alert's quick
+        # action): the decision's default meaning for the request.
+        if ($jd -ceq 'deny') { $Script:JA = 'deny' }
+        elseif ($jwin -ceq 'question') { $Script:JV = 'window'; return }
+        elseif ($jwin -ceq 'plan') { $Script:JA = 'plan_approve' }
+        else { $Script:JA = 'allow' }
+        if ($Script:JA -ceq 'plan_approve' -and $Script:Agent -ceq 'claude') { $Script:XMode = 'default' }
+        if (-not (',' + $jcan + ',').Contains(',' + $Script:JA + ',') -and $jcan) { $Script:JV = 'bad'; return }
+        $Script:JV = 'apply'
+        return
+    }
+    # The extension (section 5.2).
+    $xv = ''; $xr = ''; $xn = ''; $xd = ''; $xq = ''; $xa = ''; $xs = ''; $xm = ''; $xseen = ''
+    $xfacts = (Get-Facts $jp '') -join "`n"
+    foreach ($line in $xfacts.Split([char]10)) {
+        if (-not $line) { continue }
+        $f = Split-Fact $line
+        $xk = $f[0]
+        if ($xk -ceq 'v') { $xv = $f[2] }
+        elseif ($xk -ceq 'rid') { $xr = $f[2] }
+        elseif ($xk -ceq 'nonce') { $xn = $f[2] }
+        elseif ($xk -ceq 'decision') { $xd = $f[2] }
+        elseif ($xk -ceq 'req') { $xq = $f[2] }
+        elseif ($xk -ceq 'act') { $xa = $f[2] }
+        elseif ($xk -ceq 'scope') { if ($f[1] -ceq 'r') { $xs = $f[2] } }
+        elseif ($xk -ceq 'mode') { $xm = $f[2] }
+        elseif ($xk -ceq 'reason') { if ($f[1] -ceq 's') { $Script:XReason = $f[2] } }
+        elseif ($xk.StartsWith('seen.', $Ord)) { $xseen += ' ' + $f[2] }
+    }
+    $nonce = $L.poll.nonce
+    if (-not $nonce) { $nonce = '-' }
+    if ($xv -cne '1' -or $xr -cne $L.poll.rid -or $xn -cne $nonce -or $xd -cne $jd) { $Script:JV = 'bad'; return }
+    # N10: the request the user saw.
+    if (-not $jrq -or $xq -cne $jrq) { $Script:JV = 'changed'; return }
+    if (-not (',' + $jcan + ',').Contains(',' + $xa + ',')) { $Script:JV = 'bad'; return }
+    if (@('allow', 'allow_scope', 'allow_edit', 'answer', 'plan_approve', 'form_accept') -ccontains $xa) {
+        if ($jd -cne 'allow') { $Script:JV = 'bad'; return }
+    } elseif ($jd -cne 'deny') { $Script:JV = 'bad'; return }
+    if ($xa -ceq 'allow_scope') {
+        if (-not (Test-UInt $xs) -or [int64]$xs -ge [int64]$jns) { $Script:JV = 'bad'; return }
+        $w = Split-Words $jsmap
+        if ([int64]$xs -gt $w.Count) { $Script:JV = 'bad'; return }
+        if ([int64]$xs -lt $w.Count) { $Script:XOrig = $w[[int]$xs] }
+    } elseif ($xa -ceq 'plan_approve') {
+        if ($xm) {
+            if ((',' + $jmodes + ',').Contains(',' + $xm + ',')) { $Script:XMode = $xm } else { $Script:JV = 'bad'; return }
+        }
+    } elseif ($xa -ceq 'deny_reason' -or $xa -ceq 'plan_refine') {
+        if (-not $Script:XReason -or $Script:XReason.Length -gt 6000) { $Script:JV = 'bad'; return }
+    } elseif ($xa -ceq 'answer') {
+        $Script:XAnswers = Get-Answers ([string]$Script:FactsText) $xfacts 'tool_input.questions' 'question' 'label' $true ([double]$jnq)
+        if (-not $Script:XAnswers -or $Script:XAnswers -ceq 'BAD') { $Script:XAnswers = ''; $Script:JV = 'bad'; return }
+    }
+    # N10: the other requests that this decision also settles were all seen
+    # (OpenCode only: no other requests here).
+    if ((',' + $jaff + ',').Contains(',' + $xa + ',')) {
+        if (-not (' ' + $xseen + ' ').Contains(' ' + $jrq + ' ')) { $Script:JV = 'changed'; return }
+    }
+    $Script:JA = $xa
+    $Script:JV = 'apply'
+}
+
+# --- waiting for a decision (section 4.6) --------------------------------------
+
+# Sends the request in SPEC as event $ev to the links of $links whose kind is
+# $pass (tunnel, relay or all), all at once: rid $rid, decidable $dec (with a
+# nonce), waitov $waitov, relay time $maxtime (rq_send). Each link's state goes
+# to $L.st: push, nonce, rid, dec, kind, code, fmt; its META to $L.meta.
+function Send-RqPass($links, [string]$pass, [bool]$dec, [string]$waitov, [string]$ev, [int64]$maxtime, [string]$rid) {
+    $pending = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($L in $links) {
+        $link = Read-Link $L.f
+        if ($null -eq $link) { continue }
+        if ($pass -ceq 'tunnel' -and $link.kind -cne 'tunnel') { continue }
+        if ($pass -ceq 'relay' -and $link.kind -ceq 'tunnel') { continue }
+        $rd = $dec
+        $rw = $waitov
+        # A question is decidable only where the receiver takes decisions on
+        # questions (fmt=2; for the relay that is R1). Elsewhere it is an alert,
+        # and one whose window would hide while the hook waits does not wait.
+        if ($ev -ceq 'question' -and $link.fmt -cne '2' -and $rd) {
+            $rd = $false
+            if ($rw -ceq 'hidden') { $rw = 'none' }
+        }
+        $rn = ''
+        if ($rd) {
+            $rn = New-RandomHex 16
+            if ($env:SIMPLETERM_HOOK_TEST -eq '1' -and $env:SIMPLETERM_HOOK_TEST_NONCE) { $rn = $env:SIMPLETERM_HOOK_TEST_NONCE }
+            if (-not (Test-Hex $rn 32)) { $rd = $false; $rn = '' }
+        }
+        $Script:WaitOv = $rw
+        $Script:IngMt = [string]$maxtime
+        try { $op = Start-Ingest $link $rid $ev $rn } catch { $op = @{ seal = $true; link = $link; ev = $ev; meta = $null } }
+        $pending.Add(@{ L = $L; link = $link; op = $op; rn = $rn; rd = $rd; rw = $rw })
+    }
+    $Script:WaitOv = ''
+    $Script:IngMt = ''
+    foreach ($p in $pending) {
+        $r = Complete-Ingest $p.op
+        $meta = $p.op.meta
+        if ($r.code -ceq '400' -and $r.err -ceq 'invalid-nh' -and $p.rn -and $p.link.kind -cne 'tunnel') {
+            # The relay lost R1 (rolled back): the same rid once more, not
+            # decidable, and no wait there (section 2.4).
+            Write-Log ('ingest invalid-nh link=' + (Short $p.link.link) + ': again without a nonce')
+            $p.rd = $false
+            $p.rn = ''
+            $Script:WaitOv = $p.rw
+            $Script:IngMt = [string]$maxtime
+            $op2 = Start-Ingest $p.link $rid $ev ''
+            $Script:WaitOv = ''
+            $Script:IngMt = ''
+            $r2 = Complete-Ingest $op2
+            $r = @{ push = $r2.push; code = $r2.code; err = $r.err }
+            $meta = $op2.meta
+        }
+        $kind = 'relay'
+        if ($p.link.kind -ceq 'tunnel') { $kind = 'tunnel' }
+        $fmt = '1'
+        if ($p.link.fmt -ceq '2') { $fmt = '2' }
+        $p.L.st = @{ push = $r.push; nonce = $p.rn; rid = $rid; dec = $p.rd; kind = $kind; code = $r.code; fmt = $fmt }
+        $p.L.meta = $meta
+        $p.L.link = $p.link
+    }
+}
+
+# Starts waiting on link $L if it took the request to wait on (rq_poll).
+function Start-RqPoll($L) {
+    if ($null -eq $L.st -or $L.st.push -cne 'sent' -or -not $L.st.dec) { return }
+    $L.waiting = $true
+    $L.poll = @{ rid = $L.st.rid; nonce = $L.st.nonce; op = $null; nextAt = [DateTime]::MinValue; started = 0; done = $false; r = 'none'; x = 'none'; xp = '' }
+}
+
+# One step of a link's long poll for the decision (poll_link): on its end,
+# poll.done with r allow, deny, invalid (the dmac does not match) or none; x
+# the decision extension none, bad (its MAC does not match or it does not
+# open) or ok; xp its plaintext when ok.
+function Step-RqPoll($L, [int64]$deadline, [int64]$pollWait) {
+    $P = $L.poll
+    if ($P.done) { return }
+    $link = $L.link
+    if ($null -eq $P.op) {
+        $now = Now-Epoch
+        if ($now -ge $deadline) { $P.done = $true; return }
+        if ([DateTime]::UtcNow -lt $P.nextAt) { return }
+        $w = [Math]::Min($pollWait, $deadline - $now)
+        if ($w -lt 1) { $w = 1 }
+        $P.op = Start-Relay $link 'GET' ('/v1/decision?rid=' + $P.rid + '&wait=' + $w) '' ([int]($w + 10))
+        $P.started = $now
+        return
+    }
+    if (-not (Test-RelayDone $P.op)) { return }
+    $r = Complete-Relay $P.op 8192
+    $P.op = $null
+    $code = $r.code
+    if ($code -eq 200) {
+        $kv = Get-JsonKV $r.body @('status', 'decision', 'dmac', 'dext.v', 'dext.iv', 'dext.ct', 'dext.mac')
+        if ((Get-Field $kv 'status') -ceq 'decided') {
+            $ddec = Get-Field $kv 'decision'
+            $dmac = Get-Field $kv 'dmac'
+            $res = 'invalid'
+            if (($ddec -ceq 'allow' -or $ddec -ceq 'deny') -and (Test-Hex $dmac 64)) {
+                if (Test-SameHex (Get-HmacHex $link.mac ('st1-dec.' + $P.rid + '.' + $ddec + '.' + $P.nonce)) $dmac) { $res = $ddec }
+            }
+            $x = 'none'
+            $xp = ''
+            $dxv = Get-Field $kv 'dext.v'
+            $dxiv = Get-Field $kv 'dext.iv'
+            $dxct = Get-Field $kv 'dext.ct'
+            $dxmac = Get-Field $kv 'dext.mac'
+            if ($res -cne 'invalid' -and ($dxv + $dxiv + $dxct + $dxmac)) {
+                # The extension is MACed with st1-dext. (not the event's st1.),
+                # so an event envelope cannot be passed back as one.
+                $x = 'bad'
+                $ct = $dxct.Replace('\/', '/')
+                if ($ct -cnotmatch '\A[A-Za-z0-9+/=]+\z') { $ct = '' }
+                if ($dxv -ceq '1' -and (Test-Hex $dxiv 32) -and (Test-Hex $dxmac 64) -and $ct -and $ct.Length -le 2944 -and
+                    (Test-SameHex (Get-HmacHex $link.mac ('st1-dext.' + $dxiv + '.' + $ct)) $dxmac)) {
+                    $xp = Open-Dext $link $dxiv $ct
+                    if ($xp) { $x = 'ok' }
+                }
+            }
+            Write-Log ('decision link=' + (Short $link.link) + ' result=' + $res + ' dext=' + $x)
+            $P.r = $res
+            $P.x = $x
+            $P.xp = $xp
+            $P.done = $true
+            return
+        }
+        if ((Now-Epoch) - $P.started -lt 1) { $P.nextAt = [DateTime]::UtcNow.AddSeconds(1) }
+        return
+    }
+    if ($code -eq 404 -or $code -eq 410 -or $code -eq 401 -or $code -eq 403 -or $code -eq 409) {
+        Write-Log ('decision link=' + (Short $link.link) + ' http=' + $code)
+        if ($code -eq 410 -and (Get-Field (Get-JsonKV $r.body @('error')) 'error') -ceq 'revoked') {
+            [void](Write-FileB (Join-Path $RunDir ($link.link + '.revoked')) '')
+        }
+        $P.done = $true
+        return
+    }
+    if ($code -eq 0 -and $link.kind -ceq 'tunnel') {
+        # The app's connection ended (or the port is gone): nothing will
+        # answer there, so stop instead of waiting out the deadline.
+        Write-Log ('decision link=' + (Short $link.link) + ' tunnel-gone')
+        $P.done = $true
+        return
+    }
+    $P.nextAt = [DateTime]::UtcNow.AddSeconds(2)
+}
+
+# A decision from link $L was dropped (bad or changed, section 5.5): that
+# link's wait ends; a tunnel of a v2 app hears it at once and gets the request
+# again under a new rid (3 times at most) (rq_reject).
+function Invoke-RqReject($L, [string]$why, [int64]$start) {
+    Write-Log ('decision link-' + $L.i + ' dropped: ' + $why)
+    if ($L.st.kind -cne 'tunnel' -or $L.st.fmt -cne '2') { return }
+    Send-Result $L.link 'link' $why $L.st.rid ''
+    if ($L.n -ge 3) { return }
+    if (Test-AnsweredLocally $start $Script:Fp) { return }
+    $L.n++
+    $nr = New-RandomHex 8
+    if (-not (Test-Hex $nr 16)) { return }
+    Send-RqPass @($L) 'tunnel' $true '' $Script:RqEv 5 $nr
+    Start-RqPoll $L
+}
+
+# Ends the request: the request-level result to every tunnel that took it, from
+# a detached child ($out; $dl the link whose decision applied, $act) (rq_finish).
+function Complete-Request($links, [string]$out, $dl, [string]$act) {
+    foreach ($L in $links) {
+        if ($null -ne $L.poll -and $null -ne $L.poll.op) { try { $L.poll.op.req.Abort() } catch { } }
+    }
+    if (-not $Script:ReqId) { return }
+    $items = @()
+    foreach ($L in $links) {
+        if ($null -eq $L.st -or $L.st.kind -cne 'tunnel' -or $L.st.code -cne '200') { continue }
+        $fo = $out
+        $fa = $act
+        if ($out -ceq 'applied' -and -not [object]::ReferenceEquals($L, $dl)) { $fo = 'other'; $fa = '' }
+        if ($fo -ceq 'window') { $fa = $Script:RqWin }
+        $items += ((BS $L.f) + $Tab + 'req' + $Tab + $fo + $Tab + $L.st.rid + $Tab + $fa)
+    }
+    if ($items.Count -eq 0) { return }
+    $job = New-Job 'resolved'
+    $job.items = ($items -join "`n")
+    Start-Child $job
+}
+
+# Sends the request in SPEC (ev $ev) the way $mode says (section 4.6) and
+# waits per link; then prints the agent's answer, or nothing (its safe
+# no-decision), and tells the tunnels how the request ended (request_flow).
+#   shared   every link at once, decidable (Claude Code)
+#   hidden   tunnels first; if one answered, the relay only gets an alert
+#            without a nonce; otherwise the relay is decidable (Codex)
+function Invoke-RequestFlow([string]$ev, [string]$mode) {
+    $Script:RqEv = $ev
+    if ($Script:Agent -ceq 'codex') { $cap = Get-ConfInt 'codex_wait' 60 } else { $cap = Get-ConfInt 'claude_wait' 540 }
+    if ($cap -gt 540) { $cap = 540 }
+    $pollWait = Get-ConfInt 'poll_wait' 25
+    if ($pollWait -lt 1 -or $pollWait -gt 25) { $pollWait = 25 }
+    # The cap counts from the hook's start (the tunnel's 5 seconds and the
+    # relay's ingest included, section 4.6).
+    $start = $Script:T0
+    $Script:ResBase = Get-ResLineCount
+    $deadline = $start + $cap
+    $Script:ReqId = ''
+    $Script:RqWin = ''
+    foreach ($line in ([string]$Script:Spec).Split([char]10)) {
+        if ($line.StartsWith('req.id' + $Tab + 's' + $Tab, $Ord)) { $Script:ReqId = $line.Substring(9) }
+        elseif ($line.StartsWith('req.win' + $Tab + 's' + $Tab, $Ord)) { $Script:RqWin = $line.Substring(10) }
+    }
+    $Script:RidUsed = $true
+    $agentPid = Get-AgentPid
+    $links = @()
+    $n = 0
+    foreach ($f in $Script:LinkFiles) {
+        $n++
+        $links += @{ i = $n; f = $f; st = $null; meta = $null; link = $null; n = 0; waiting = $false; poll = $null }
+    }
+    function Get-Remain { $r = $deadline - (Now-Epoch); if ($r -lt 1) { $r = 1 }; if ($r -gt 20) { $r = 20 }; return $r }
+    if ($mode -ceq 'shared') {
+        Send-RqPass $links 'all' $true '' $ev 20 $Script:Rid
+    } elseif ($mode -ceq 'hidden') {
+        Send-RqPass $links 'tunnel' $true '' $ev 5 $Script:Rid
+        $took = $false
+        foreach ($L in $links) { if ($null -ne $L.st -and $L.st.kind -ceq 'tunnel' -and $L.st.code -ceq '200') { $took = $true } }
+        if ($took) {
+            # The app is connected: other devices get an alert without buttons,
+            # so a decision there is never left unheard.
+            $sw = $Script:WaitOv
+            $Script:WaitOv = 'none'
+            Send-Background 'question' $Script:Rid 'relay'
+            $Script:WaitOv = $sw
+        } else {
+            Send-RqPass $links 'relay' $true '' $ev (Get-Remain) $Script:Rid
+        }
+    }
+    foreach ($L in $links) { Start-RqPoll $L }
+
+    $decision = ''
+    $dl = $null
+    $out = 'window'
+    $nextCheck = [DateTime]::MinValue
+    while ($true) {
+        $waiting = $false
+        $ended = $false
+        foreach ($L in $links) {
+            if (-not $L.waiting) { continue }
+            $waiting = $true
+            Step-RqPoll $L $deadline $pollWait
+            if (-not $L.poll.done) { continue }
+            $L.waiting = $false
+            Invoke-Judge $L
+            if ($Script:JV -ceq 'apply' -or $Script:JV -ceq 'window') {
+                if (Test-AnsweredLocally $start $Script:Fp) { $out = 'terminal'; $ended = $true; break }
+                $decision = $Script:JA
+                $dl = $L
+                if ($Script:JV -ceq 'window') { $decision = '' }
+                $ended = $true
+                break
+            }
+            if ($Script:JV -ceq 'bad' -or $Script:JV -ceq 'changed') { Invoke-RqReject $L $Script:JV $start }
+        }
+        if ($ended) { break }
+        if (-not $waiting) { break }
+        if ([DateTime]::UtcNow -ge $nextCheck) {
+            $nextCheck = [DateTime]::UtcNow.AddSeconds(1)
+            if (Test-AnsweredLocally $start $Script:Fp) {
+                Write-Log 'permission answered-at-terminal'
+                $out = 'terminal'
+                break
+            }
+            if ($agentPid -gt 0 -and $null -eq (Get-Process -Id $agentPid -ErrorAction SilentlyContinue)) {
+                Write-Log 'permission agent-gone'
+                $out = 'gone'
+                break
+            }
+            if ((Now-Epoch) -ge $deadline) { Write-Log 'permission timeout'; break }
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    $Script:Logged = $true
+    if ($decision -and (Write-V2Decision $decision)) {
+        Write-Log ('permission ' + $decision)
+        Complete-Request $links 'applied' $dl $decision
+    } else {
+        if ($out -ceq 'window' -and $null -eq $dl) { Write-Log 'permission no-decision' }
+        Complete-Request $links $out $null ''
+    }
 }
 
 function Add-Note([string]$kind, [string]$fp) {
@@ -1147,7 +3188,7 @@ function Add-Note([string]$kind, [string]$fp) {
             [IO.File]::Delete((Join-Path $RunDir ($Sid + '.done')))
             $bg = Join-Path $RunDir ($Sid + '.bg')
             if ([IO.File]::Exists($bg)) {
-                $lines = [IO.File]::ReadAllLines($bg, $Utf8)
+                $lines = [IO.File]::ReadAllLines($bg, $Latin1)
                 if ($lines.Count -gt 1 -and $lines[1] -eq '7501') {
                     $Script:BgSeq = '\u001b]7501;state=clear:id=' + $BgId + '\u0007'
                 }
@@ -1173,7 +3214,7 @@ function Test-BgPaused { return [IO.File]::Exists((Join-Path $RunDir ($Sid + '.b
 function Test-Claude7501 {
     if ($env:TMUX -or $env:STY) { return $false }
     if (@('', '0', 'false', 'FALSE', 'False') -notcontains [string]$env:CLAUDE_CODE_DISABLE_TERMINAL_TITLE) { return $false }
-    $p = Get-InputFile (Get-Field $f 'transcript_path')
+    $p = Get-InputFile $Script:TPath
     if (-not $p) { return $false }
     $v = ''
     try {
@@ -1183,7 +3224,7 @@ function Test-Claude7501 {
             [void]$fs.Seek(-$n, 'End')
             $buf = New-Object byte[] $n
             $read = $fs.Read($buf, 0, $n)
-            $ms = [regex]::Matches($Utf8.GetString($buf, 0, $read), '"version":"([0-9][0-9.]*)"')
+            $ms = [regex]::Matches($Utf8.GetString($buf, 0, $read), '"version" *: *"([0-9][0-9.]*)"')
             if ($ms.Count -gt 0) { $v = $ms[$ms.Count - 1].Groups[1].Value }
         } finally { $fs.Dispose() }
     } catch { return $false }
@@ -1196,8 +3237,7 @@ function Test-Claude7501 {
 # Codex `/goal`: while a goal is active Codex starts the next turn itself and
 # each turn ends with a Stop. The rollout records `thread_goal_updated` with
 # the goal's status; the model ends a goal with an `update_goal` call.
-function Test-CodexGoalActive {
-    $p = Get-InputFile (Get-Field $f 'transcript_path')
+function Test-CodexGoalActive([string]$p) {
     if (-not $p) { return $false }
     $active = $false
     $called = $false
@@ -1208,153 +3248,6 @@ function Test-CodexGoalActive {
         }
     } catch { return $false }
     return ($active -and -not $called)
-}
-
-# The first counted task (or, with only scheduled wake-ups, the first
-# schedule) as a short line for the badge and the pause note.
-function Get-BgSummary {
-    if ($BgN -gt 0) {
-        $m = $BgDesc
-        if (-not $m) { $m = 'task' }
-        if ($BgType) { $m = $BgType + ': ' + $m }
-        if ($BgN -ge 10) { $m += ' (+9 or more)' }
-        elseif ($BgN -gt 1) { $m += ' (+' + ($BgN - 1) + ' more)' }
-    } else {
-        $sch = $CronSched
-        if (-not $sch) { $sch = 'wake-up' }
-        $m = 'scheduled: ' + $sch
-        if ($CronN -gt 1) { $m += ' (+' + ($CronN - 1) + ' more)' }
-    }
-    return (Limit-JsonText $m 80 320)
-}
-
-# The last message and what still runs, as the text of a done: the suffix is
-# kept whole and the message gives way (200 characters, 800 bytes in all).
-function Get-DoneMsg([string]$what) {
-    $sfx = Limit-JsonText ('(still running in the background: ' + $what + ')') 120 480
-    $room = 200 - $sfx.Length - 1
-    if ($Last -and $room -gt 20) {
-        return ((Limit-JsonText $Last $room (800 - $sfx.Length - 1)) + ' ' + $sfx)
-    }
-    return $sfx
-}
-
-# The turn ended and the agent waits for background work or a schedule. Not
-# done: the badge says background (note in $Sid.bg), unless the last message
-# asks the user something ($ask): then the user is told, as question, the
-# badge says waiting, and Claude Code 2.1.295+ gets a blocked OSC 7501 record
-# (kind question) instead of the working one.
-function Invoke-BgPause([bool]$ask) {
-    $m = Get-BgSummary
-    $flag = ''
-    if ($Agent -eq 'claude' -and $env:SIMPLETERM -eq '1' -and (Test-Claude7501)) {
-        $flag = '7501'
-        $e = ''
-        if ($ask) { $t = ConvertFrom-SimpleEscapes (Limit-JsonText $Last 200 800) }
-        else { $t = ConvertFrom-SimpleEscapes $m }
-        if ($t) { $e = [Convert]::ToBase64String($Utf8.GetBytes($t)) }
-        if ($ask) { $Script:BgSeq = '\u001b]7501;state=blocked:id=' + $BgId + ':kind=question' }
-        else { $Script:BgSeq = '\u001b]7501;state=working:id=' + $BgId }
-        if ($e) { $Script:BgSeq += ':msg=' + $e }
-        $Script:BgSeq += '\u0007'
-    }
-    $bgFile = Join-Path $RunDir ($Sid + '.bg')
-    # Line 1: the badge's message (the question when asking), 2: the OSC 7501
-    # flag, 3: the pause's token, 4: `ask` while the badge says waiting.
-    $bm = $m
-    $askMark = ''
-    if ($ask) { $bm = Limit-JsonText $Last 80 320; $askMark = 'ask' }
-    try { [IO.File]::WriteAllText($bgFile, $bm + "`n" + $flag + "`n" + $Rid + "`n" + $askMark + "`n", $Utf8) } catch { }
-    if ($ask) {
-        $Script:Msg = Limit-JsonText $Last 200 800
-        Send-Background 'question'
-        Write-State 'waiting' $Last
-        return
-    }
-    Write-State 'background' $m
-    # Only work that may run for good is left (a dev server): after
-    # bg_done_after seconds (default 600) of the same pause, done once.
-    $wait = Get-ConfInt 'bg_done_after' 600
-    if ($BgN -gt 0 -and $BgFinite -eq 0 -and $wait -gt 0 -and $LinkFiles.Count -gt 0) {
-        $Script:Msg = Get-DoneMsg $m
-        Start-LaterSend 'bg' $wait $bgFile 2 $Rid '' 0
-    }
-}
-
-# Sends done (text Msg) done_delay seconds from now (default 3; 0: at once)
-# unless something of the session happens first: another Stop hook may have
-# kept the agent going, and then its next event (or Stop) comes within
-# moments. The event is made then (fresh rid and time). Only where the agent
-# has such an event to send (Claude Code, Grok Build): Codex registers none
-# that would come within moments, so its default is 0.
-function Send-DoneLater {
-    if ($LinkFiles.Count -eq 0) { return }
-    $dw = 3
-    if ($Agent -eq 'codex') { $dw = 0 }
-    $dw = Get-ConfInt 'done_delay' $dw
-    if ($dw -le 0) { Send-Background 'done'; return }
-    $pendFile = Join-Path $RunDir ($Sid + '.pend')
-    try { [IO.File]::WriteAllText($pendFile, $Rid + "`n", $Utf8) } catch { Send-Background 'done'; return }
-    Start-LaterSend 'pend' $dw $pendFile 0 $Rid '' 0
-}
-
-# --- who started a turn, and what ran before it -----------------------------
-
-# Prompt ids of the turns Grok Build starts itself (static, from the 1.0.70
-# binary); a person's prompt id is a UUID.
-$GrokAutoPrefixes = @('task-completed-', 'bash-completed-', 'monitor-completed-', 'subagent-completed-',
-    'workflow-completed-', 'parent-agent-message-', 'parent-message-', 'notifications-', 'goal-summary-',
-    'goal-classifier-nudge-', 'plan-resume-', 'scheduler-fired-')
-
-# Checksum of the start of a prompt, to compare a scheduled prompt (Stop
-# session_crons) with the prompt a later UserPromptSubmit carries.
-function Get-PromptSum([string]$text) {
-    return (Get-Sha256Hex (Limit-JsonText $text 200 800)).Substring(0, 16)
-}
-
-# True if a person typed the prompt (or we cannot tell), false if the agent
-# started the turn itself: background work reporting back, a scheduled
-# wake-up. Claude Code names it in UserPromptSubmit source where it sends one
-# (2.1.316 sends none): then a task-notification or agent-message prompt, the
-# /loop sentinel, or the prompt of a wake-up listed at the last Stop says so.
-function Get-PromptUser {
-    if ($Agent -eq 'grok') {
-        $promptIdText = Get-Field $f 'promptId'
-        foreach ($pre in $GrokAutoPrefixes) {
-            if ($promptIdText.StartsWith($pre, [StringComparison]::Ordinal)) { return $false }
-        }
-        return $true
-    }
-    $src = Get-Field $f 'source'
-    if ($src -eq 'user' -or $src -eq 'sdk') { return $true }
-    if ($src) { return $false }
-    $pr = Get-Field $f 'prompt'
-    if (-not $pr) { return $true }
-    foreach ($pre in @('<task-notification>', '<agent-message ', '<<autonomous-loop')) {
-        if ($pr.StartsWith($pre, [StringComparison]::Ordinal)) { return $false }
-    }
-    $cronFile = Join-Path $RunDir ($Sid + '.crons')
-    try {
-        if ([IO.File]::Exists($cronFile)) {
-            $sums = ([IO.File]::ReadAllText($cronFile, $Utf8)).Trim() -split ' +'
-            if ($sums -contains (Get-PromptSum $pr)) { return $false }
-        }
-    } catch { }
-    return $true
-}
-
-# Sid.turn: line 1 user or auto (who started this turn), line 2 the ids of the
-# background tasks that already ran when it started (Sid.stopids, the last
-# Stop list), for the Stop that ends it.
-function Write-TurnMark([bool]$user) {
-    $ids = ''
-    try {
-        $idsFile = Join-Path $RunDir ($Sid + '.stopids')
-        if ([IO.File]::Exists($idsFile)) { $ids = ([IO.File]::ReadAllText($idsFile, $Utf8) -split "`n")[0] }
-        $who = 'auto'
-        if ($user) { $who = 'user' }
-        [IO.File]::WriteAllText((Join-Path $RunDir ($Sid + '.turn')), ($who + "`n" + $ids + "`n"), $Utf8)
-    } catch { }
 }
 
 # --- reading the last message of a turn -------------------------------------
@@ -1441,7 +3334,7 @@ function Test-AskText([string]$raw) {
         if ($p -ge 0) { $head += $s.Substring(0, $p + 2); $s = $s.Substring($p + 2) }
         $fence = (([regex]::Matches($head, '```')).Count % 2) -eq 1
     }
-    $lines = (ConvertFrom-JsonEscapes $s) -split "`n"
+    $lines = (ConvertFrom-JsonEscapes (US $s)) -split "`n"
     $kept = New-Object System.Text.StringBuilder
     foreach ($ln in $lines) {
         if ($ln.TrimStart().StartsWith('```', [StringComparison]::Ordinal)) { $fence = -not $fence; continue }
@@ -1875,27 +3768,299 @@ function Test-ServiceCmd([string]$cmd) {
     return $false
 }
 
-# --- the end of a turn ----------------------------------------------------------
+# --- who started a turn, and what ran before it -----------------------------
+
+# Checksum of the start of a prompt, to compare a scheduled prompt (Stop
+# session_crons) with the prompt a later UserPromptSubmit carries.
+function Get-PromptSum([string]$text) {
+    return (Get-Sha256Hex (Limit-Json $text 200 800)).Substring(0, 16)
+}
+
+# PromptBy: who started the turn (user, task, schedule, agent); PromptUser
+# true if a person typed the prompt (or we cannot tell). Claude Code names it
+# in UserPromptSubmit `source` (user and sdk are people; system, loop_wakeup,
+# schedule_wakeup and poll_event are not); where `source` is missing (2.1.316
+# sends none) a <task-notification> or <agent-message> prompt, the /loop
+# sentinel, or the prompt of a wake-up listed at the last Stop (session_crons)
+# says so. Grok Build has no such field: the prompt id of a turn it starts
+# itself begins with a fixed word (static, from the 1.0.70 binary), a
+# person's is a UUID.
+function Set-PromptOrigin {
+    $by = 'user'
+    if ($Script:Agent -ceq 'grok') {
+        $p = $Script:PromptId
+        foreach ($x in @('task-completed-', 'bash-completed-', 'monitor-completed-', 'subagent-completed-', 'workflow-completed-')) {
+            if ($p.StartsWith($x, $Ord)) { $by = 'task' }
+        }
+        if ($p.StartsWith('scheduler-fired-', $Ord)) { $by = 'schedule' }
+        foreach ($x in @('parent-agent-message-', 'parent-message-', 'notifications-', 'goal-summary-', 'goal-classifier-nudge-', 'plan-resume-')) {
+            if ($p.StartsWith($x, $Ord)) { $by = 'agent' }
+        }
+    } else {
+        $src = $Script:Src
+        $pr = $Script:Prompt
+        if ($src -ceq 'user' -or $src -ceq 'sdk') { }
+        elseif ($src -ceq 'loop_wakeup' -or $src -ceq 'schedule_wakeup') { $by = 'schedule' }
+        elseif ($src -ceq 'poll_event') { $by = 'task' }
+        elseif ($src.Length -eq 0) {
+            if ($pr.StartsWith('<task-notification>', $Ord)) { $by = 'task' }
+            elseif ($pr.StartsWith('<agent-message ', $Ord)) { $by = 'agent' }
+            elseif ($pr.StartsWith('<<autonomous-loop', $Ord)) { $by = 'schedule' }
+            elseif ($pr.Length -gt 0) {
+                $cronFile = Join-Path $RunDir ($Script:Sid + '.crons')
+                $t = Read-FileB $cronFile
+                if ($null -ne $t -and (Split-Words $t) -ccontains (Get-PromptSum $pr)) { $by = 'schedule' }
+            }
+        } else { $by = 'agent' }
+    }
+    $Script:PromptBy = $by
+    $Script:PromptUser = ($by -ceq 'user')
+}
+
+# $Sid.turn: line 1 who started this turn, line 2 the ids of the background
+# tasks that already ran when it started ($Sid.stopids, the last Stop's list),
+# for the Stop that ends it.
+function Write-TurnMark {
+    $ids = Read-LineB (Join-Path $RunDir ($Script:Sid + '.stopids')) 0
+    $who = $Script:PromptBy
+    if ($Script:PromptUser) { $who = 'user' }
+    [void](Write-FileB (Join-Path $RunDir ($Script:Sid + '.turn')) ($who + "`n" + $ids + "`n"))
+}
+
+# TurnAt: @-parameters of the end of a turn (TDS_AGENT_EVENTS_V2 section 6.1):
+# end, asks (true|false), late. Who started the turn is the turn's mark; the
+# background tasks and schedules come from the event's facts.
+function Set-TurnAt([string]$end, [string]$asks, [string]$late) {
+    $t = '@.turn' + $Tab + 's' + $Tab + '1' + $Nl + '@.end' + $Tab + 's' + $Tab + $end + $Nl
+    $tb = $Script:TurnBy
+    if (-not $tb) { $tb = Read-LineB (Join-Path $RunDir ($Script:Sid + '.turn')) 0 }
+    if ($tb -ceq 'auto') { $tb = 'agent' }
+    elseif (@('user', 'task', 'schedule', 'agent') -cnotcontains $tb) { $tb = 'unknown' }
+    $t += '@.by' + $Tab + 's' + $Tab + $tb + $Nl
+    if ($asks) { $t += '@.asks' + $Tab + 's' + $Tab + $asks + $Nl }
+    if ($Script:Last) { $t += '@.last' + $Tab + 's' + $Tab + $Script:Last + $Nl }
+    if ($late) { $t += '@.late' + $Tab + 's' + $Tab + $late + $Nl }
+    if ($Script:StopAct -ceq 'true') { $t += '@.hook' + $Tab + 's' + $Tab + 'true' + $Nl }
+    if ($Script:Agent -ceq 'grok') { $t += '@.bgp' + $Tab + 's' + $Tab + 'backgroundTasks' + $Nl + '@.cronp' + $Tab + 's' + $Tab + 'sessionCrons' + $Nl }
+    else { $t += '@.bgp' + $Tab + 's' + $Tab + 'background_tasks' + $Nl + '@.cronp' + $Tab + 's' + $Tab + 'session_crons' + $Nl }
+    $t += '@.prev' + $Tab + 's' + $Tab + $Script:PrevIds + $Nl + '@.svc' + $Tab + 's' + $Tab + $Script:BgSvcIdx + $Nl
+    if ($Script:TGoal) { $t += '@.goal' + $Tab + 's' + $Tab + $Script:TGoal + $Nl }
+    $Script:TurnAt = $t
+}
+
+# The request kind parameter lines (TDS_AGENT_EVENTS_V2 section 4).
+function Set-RkAt([string]$kind, [string]$extra) {
+    $Script:RkAt = '@.rkind' + $Tab + 's' + $Tab + $kind + $Nl + '@.rid' + $Tab + 's' + $Tab + $Script:Rid + $Nl + $extra
+}
+
+# One field of a background task (Stop `background_tasks`, Grok
+# `backgroundTasks`), in document order: a task's id and type come before its
+# description and command. Claude Code 2.1.316 type labels: work that reports
+# back and wakes the agent (subagent, workflow, cloud session, MCP task: they
+# end), work that may run for good (shell, monitor, an idle teammate; and
+# labels we do not know), and its own housekeeping that never wakes it (dream,
+# auto-mode scan, memory import, memory save: not counted). A shell whose
+# command is a service counts in BgSvc.
+function Add-BgField([string]$p, [string]$v) {
+    $d1 = $p.IndexOf('.')
+    $d2 = $p.IndexOf('.', $d1 + 1)
+    $bk = $p.Substring($d1 + 1, $d2 - $d1 - 1)
+    $bf = $p.Substring($d2 + 1)
+    if ($bf -ceq 'id') {
+        if ($v -cmatch '\A[A-Za-z0-9_-]+\z') { $Script:BgIdMap.Add(@($bk, $v)) }
+    } elseif ($bf -ceq 'type') {
+        if (@('dream', 'auto-mode scan', 'memory import', 'memory save') -ccontains $v) { return }
+        if (@('subagent', 'workflow', 'cloud session', 'MCP task') -ccontains $v) { $Script:BgFinite++ }
+        elseif ($v -ceq 'shell') { $Script:BgShells += ' ' + $bk }
+        $Script:BgN++
+        $Script:BgKeep += $bk
+        if (-not $Script:BgPick) { $Script:BgPick = $bk; $Script:BgType = $v }
+    } elseif ($bf -ceq 'description') {
+        if ($bk -ceq $Script:BgPick -and -not $Script:BgDesc) { $Script:BgDesc = $v }
+    } elseif ($bf -ceq 'command') {
+        if ($bk -ceq $Script:BgPick -and -not $Script:BgCmd) { $Script:BgCmd = $v }
+        if ((Test-InList $Script:BgShells $bk) -and (Test-ServiceCmd $v)) { $Script:BgSvc++; $Script:BgSvcIdx += ' ' + $bk }
+    }
+}
+
+# The ids of the counted tasks in BgIds; BgNoId counts those with none.
+function Complete-BgIds {
+    $Script:BgIds = ''
+    $Script:BgNoId = 0
+    foreach ($bk in $Script:BgKeep) {
+        $bi = ''
+        foreach ($pair in $Script:BgIdMap) { if ($pair[0] -ceq $bk) { $bi = $pair[1] } }
+        if ($bi) { $Script:BgIds += ' ' + $bi } else { $Script:BgNoId++ }
+    }
+}
+
+# One field of a scheduled wake-up (Stop `session_crons`, Grok `sessionCrons`):
+# how many, the first one's schedule, and a checksum of each prompt.
+function Add-CronField([string]$p, [string]$v) {
+    $d1 = $p.IndexOf('.')
+    $d2 = $p.IndexOf('.', $d1 + 1)
+    $ck = [int]$p.Substring($d1 + 1, $d2 - $d1 - 1)
+    $cf = $p.Substring($d2 + 1)
+    if ($ck + 1 -gt $Script:CronN) { $Script:CronN = $ck + 1 }
+    if ($cf -ceq 'schedule' -and $ck -eq 0) { $Script:CronSched = $v }
+    if ($cf -ceq 'prompt' -and $v) { $Script:CronSums += ' ' + (Get-PromptSum $v) }
+}
 
 # True if every counted task was already running before the turn began.
-function Test-BgAllOld([string]$prevIds) {
-    if ($BgN -le 0 -or $BgNoId -gt 0) { return $false }
-    $prev = @($prevIds -split ' +')
-    foreach ($bi in $BgIds) { if ($prev -notcontains $bi) { return $false } }
+function Test-BgAllOld {
+    if ($Script:BgN -le 0 -or $Script:BgNoId -gt 0) { return $false }
+    foreach ($bi in (Split-Words $Script:BgIds)) {
+        if (-not (Test-InList $Script:PrevIds $bi)) { return $false }
+    }
     return $true
 }
 
-# A done for the turn that just ended (what: what still runs, if anything).
+# The first counted task (or, with only scheduled wake-ups, the first schedule)
+# as a short line for the badge and the pause note: BgM.
+function Get-BgSummary {
+    if ($Script:BgN -gt 0) {
+        $m = $Script:BgDesc
+        if (-not $m) { $m = $Script:BgCmd }
+        if (-not $m) { $m = 'task' }
+        if ($Script:BgType) { $m = $Script:BgType + ': ' + $m }
+        if ($Script:BgN -ge 10) { $m += ' (+9 or more)' }
+        elseif ($Script:BgN -gt 1) { $m += ' (+' + ($Script:BgN - 1) + ' more)' }
+    } else {
+        $sch = $Script:CronSched
+        if (-not $sch) { $sch = 'wake-up' }
+        $m = 'scheduled: ' + $sch
+        if ($Script:CronN -gt 1) { $m += ' (+' + ($Script:CronN - 1) + ' more)' }
+    }
+    $Script:BgM = Limit-Json $m 80 320
+}
+
+# The last message and what still runs, as the text of a done: the suffix is
+# kept whole and the message gives way (200 characters, 800 bytes in all).
+function Get-DoneMsg([string]$what) {
+    $dm = Limit-Json ('(still running in the background: ' + $what + ')') 120 480
+    $dr = 200 - $dm.Length - 1
+    if ($Script:Last -and $dr -gt 20) {
+        return ((Limit-Json $Script:Last $dr (800 - $dm.Length - 1)) + ' ' + $dm)
+    }
+    return $dm
+}
+
+# Text (JSON-escaped) as standard base64 for an OSC 7501 field; nothing for
+# escapes other than \" \\ \/.
+function ConvertTo-B64Text([string]$text) {
+    $sb = New-Object System.Text.StringBuilder
+    for ($i = 0; $i -lt $text.Length; $i++) {
+        $c = $text[$i]
+        if ([int]$c -eq 92) {
+            if ($i + 1 -ge $text.Length) { return '' }
+            $e = [int]$text[$i + 1]
+            if ($e -ne 92 -and $e -ne 47 -and $e -ne 34) { return '' }
+            $c = $text[$i + 1]
+            $i++
+        }
+        [void]$sb.Append($c)
+    }
+    return [Convert]::ToBase64String($Latin1.GetBytes($sb.ToString()))
+}
+
+# The turn ended and the agent waits for background work or a schedule. Not
+# done: the badge says background (note in $Sid.bg), unless the last message
+# asks the user something ($ask): then the user is told, as question, the badge
+# says waiting, and Claude Code 2.1.295+ gets a blocked OSC 7501 record (kind
+# question) instead of the working one.
+function Invoke-BgPause([bool]$ask) {
+    Get-BgSummary
+    $flag = ''
+    if ($Script:Agent -ceq 'claude' -and $env:SIMPLETERM -eq '1' -and (Test-Claude7501)) {
+        $flag = '7501'
+        if ($ask) {
+            $e = ConvertTo-B64Text (Limit-Json $Script:Last 200 800)
+            $Script:BgSeq = '\u001b]7501;state=blocked:id=' + $BgId + ':kind=question'
+        } else {
+            $e = ConvertTo-B64Text $Script:BgM
+            $Script:BgSeq = '\u001b]7501;state=working:id=' + $BgId
+        }
+        if ($e) { $Script:BgSeq += ':msg=' + $e }
+        $Script:BgSeq += '\u0007'
+    }
+    $bgFile = Join-Path $RunDir ($Script:Sid + '.bg')
+    # Line 1: the badge's message (the question when asking), 2: the OSC 7501
+    # flag, 3: the pause's token, 4: `ask` while the badge says waiting.
+    $bm = $Script:BgM
+    $askMark = ''
+    if ($ask) { $bm = Limit-Json $Script:Last 80 320; $askMark = 'ask' }
+    [void](Write-FileB $bgFile ($bm + "`n" + $flag + "`n" + $Script:Rid + "`n" + $askMark + "`n"))
+    $pend = 'background'
+    if ($Script:BgN -eq 0 -and $Script:CronN -gt 0) { $pend = 'scheduled' }
+    if ($ask) {
+        Set-Msg $Script:Last
+        Set-TurnAt 'background' 'true' ''
+        Initialize-V2 $Script:TurnAt
+        Send-Background 'question'
+        Write-State 'waiting' $Script:Last
+        return
+    }
+    $bgm = $Script:BgM
+    Write-State 'background' $bgm
+    Set-TurnAt $pend $Script:Tasks ''
+    Send-State $pend $Script:TurnAt
+    if ($Script:BgN -gt 0 -and $Script:BgFinite -eq 0) { Invoke-BgLater $Script:Rid $bgm }
+}
+
+# Only work that may run for good is left (a dev server, a monitor, an idle
+# teammate): it may never wake the agent, and then nothing else would come.
+# After bg_done_after seconds (default 600) of the same pause, `done` goes once,
+# saying what still runs. A new turn or another pause ends the wait.
+function Invoke-BgLater([string]$token, [string]$what) {
+    if ($Script:LinkFiles.Count -eq 0) { return }
+    $w = Get-ConfInt 'bg_done_after' 600
+    if ($w -le 0) { return }
+    $Script:Msg = Get-DoneMsg $what
+    $Script:MsgF = $Script:Msg
+    Set-TurnAt 'done' $Script:Tasks 'true'
+    Initialize-V2 $Script:TurnAt
+    Start-LaterSend 'bg' $w (Join-Path $RunDir ($Script:Sid + '.bg')) 2 $token '' 0
+}
+
+# Sends done done_delay seconds from now (default 3; 0: at once) unless
+# something of the session happens first: another Stop hook may have kept the
+# agent going, and then its next event (or Stop) comes within moments. Only
+# where the agent has such an event to send (Claude Code, Grok Build): Codex
+# registers none that would come within moments, so its default is 0.
+function Send-DoneLater {
+    if ($Script:LinkFiles.Count -eq 0) { return }
+    $dw = 3
+    if ($Script:Agent -ceq 'codex') { $dw = 0 }
+    $dw = Get-ConfInt 'done_delay' $dw
+    $pendFile = Join-Path $RunDir ($Script:Sid + '.pend')
+    if ($dw -le 0 -or -not (Write-FileB $pendFile ($Script:Rid + "`n"))) { Send-Background 'done'; return }
+    Start-LaterSend 'pend' $dw $pendFile 0 $Script:Rid '' 0
+}
+
+# A turn ended: housekeeping (the command wrapper, run files a day old).
+function Invoke-TurnEnd {
+    Update-Cli
+    try {
+        $now = [DateTime]::UtcNow
+        foreach ($f in [IO.Directory]::GetFiles($RunDir)) {
+            if (($now - [IO.File]::GetLastWriteTimeUtc($f)).TotalDays -ge 1) { Remove-FileQ $f }
+        }
+    } catch { }
+}
+
+# A done for the turn that just ended ($what: what still runs, if anything).
 function Invoke-StopDone([string]$what) {
-    if ($what) { $Script:Msg = Get-DoneMsg $what } else { $Script:Msg = Limit-JsonText $Last 200 800 }
-    if ((Get-Field $f 'stop_hook_active') -eq 'true') { $Script:XFlag = '1' }
+    if ($what) { $Script:Msg = Get-DoneMsg $what; $Script:MsgF = $Script:Msg } else { Set-Msg $Script:Last }
+    if ($Script:StopAct -ceq 'true') { $Script:XFlags = ',"stop_hook_active":true' }
+    Set-TurnAt 'done' $Script:Tasks ''
+    Initialize-V2 $Script:TurnAt
     Send-DoneLater
     # The turn's done is sent (or pending): Claude Code's idle_prompt, 60 s
     # later, repeats it (the next turn note takes the mark back).
-    try { [IO.File]::WriteAllText((Join-Path $RunDir ($Sid + '.done')), "`n", $Utf8) } catch { }
+    [void](Write-FileB (Join-Path $RunDir ($Script:Sid + '.done')) '')
     Invoke-UsageReport
     Write-State 'done' ''
-    Update-Cli
+    Invoke-TurnEnd
 }
 
 # A Stop (Claude Code, Codex, Grok): done, or not yet. Not done while the agent
@@ -1905,59 +4070,466 @@ function Invoke-StopDone([string]$what) {
 # started itself while a schedule (/loop, cron) is set stays quiet:
 # background with "scheduled: ...". The same as stop_flow in agent-hook.sh.
 function Invoke-StopFlow {
-    $turnUser = $true
-    $prevIds = ''
-    $turnFile = Join-Path $RunDir ($Sid + '.turn')
-    try {
-        if ([IO.File]::Exists($turnFile)) {
-            $tl = [IO.File]::ReadAllText($turnFile, $Utf8) -split "`n"
-            if ($tl.Count -gt 0 -and $tl[0] -eq 'auto') { $turnUser = $false }
-            if ($tl.Count -gt 1) { $prevIds = $tl[1] }
-        }
-        [IO.File]::WriteAllText((Join-Path $RunDir ($Sid + '.stopids')), (($BgIds -join ' ') + "`n"), $Utf8)
-        $cronFile = Join-Path $RunDir ($Sid + '.crons')
-        if ($CronN -gt 0) { [IO.File]::WriteAllText($cronFile, (($CronSums -join ' ') + "`n"), $Utf8) }
-        else { [IO.File]::Delete($cronFile) }
-    } catch { }
-    if ($BgN -eq 0 -and $CronN -eq 0) { Invoke-StopDone ''; return }
-    if ($turnUser -and ($BgN -eq 0 -or (Test-BgAllOld $prevIds))) {
-        if ($BgN -gt 0) { Invoke-StopDone (Get-BgSummary) } else { Invoke-StopDone '' }
+    $Script:TurnUser = $true
+    $Script:PrevIds = ''
+    $Script:TurnBy = ''
+    $turnFile = Join-Path $RunDir ($Script:Sid + '.turn')
+    if ([IO.File]::Exists($turnFile)) {
+        $t1 = Read-LineB $turnFile 0
+        $t2 = Read-LineB $turnFile 1
+        if ($t1 -and $t1 -cne 'user') { $Script:TurnUser = $false }
+        $Script:TurnBy = $t1
+        $Script:PrevIds = $t2
+    }
+    Complete-BgIds
+    [void](Write-FileB (Join-Path $RunDir ($Script:Sid + '.stopids')) ($Script:BgIds + "`n"))
+    $cronFile = Join-Path $RunDir ($Script:Sid + '.crons')
+    if ($Script:CronN -gt 0) { [void](Write-FileB $cronFile ($Script:CronSums + "`n")) }
+    else { Remove-FileQ $cronFile }
+    $Script:Tasks = 'false'
+    if (Test-AskText $Script:Last) { $Script:Tasks = 'true' }
+    if ($Script:BgN -eq 0 -and $Script:CronN -eq 0) { Invoke-StopDone ''; return }
+    if ($Script:TurnUser -and ($Script:BgN -eq 0 -or (Test-BgAllOld))) {
+        Get-BgSummary
+        if ($Script:BgN -gt 0) { Invoke-StopDone $Script:BgM } else { Invoke-StopDone '' }
         return
     }
-    if ($BgN -gt 0 -and $BgSvc -eq $BgN -and ($CronN -eq 0 -or $turnUser)) {
-        Invoke-StopDone (Get-BgSummary)
+    if ($Script:BgN -gt 0 -and $Script:BgSvc -eq $Script:BgN -and ($Script:CronN -eq 0 -or $Script:TurnUser)) {
+        Get-BgSummary
+        Invoke-StopDone $Script:BgM
         return
     }
     Invoke-UsageReport
-    Invoke-BgPause (Test-AskText $Last)
-    Update-Cli
+    Invoke-BgPause ($Script:Tasks -ceq 'true')
+    Invoke-TurnEnd
 }
 
-# The status of a running turn: while a paused session's background subagents
-# run tools, the pause's own badge (`waiting` when the turn paused on a
-# question, `background` otherwise); `running` otherwise.
+# Codex: the plan of turn Tid from the rollout (`item_completed` with item.type
+# Plan, measured on 0.165.0, M2): its text, JSON-escaped, or $null.
+function Get-CodexPlan([string]$path) {
+    if (-not $path -or -not (Test-Id $Script:Tid)) { return $null }
+    $tid = '"turn_id":"' + $Script:Tid + '"'
+    $t = ''
+    foreach ($line in (Read-TailB $path 1048576).Split([char]10)) {
+        if (-not ($line.Contains('"type":"item_completed"') -and $line.Contains($tid))) { continue }
+        $p = $line.IndexOf('"item":{"type":"Plan"', $Ord)
+        if ($p -lt 0) { continue }
+        $r = $line.Substring($p)
+        $q = $r.IndexOf('"text":"', $Ord)
+        if ($q -lt 0) { continue }
+        $t = [regex]::Match($r.Substring($q + 8), '\A(?:[^"\\]|\\[\s\S])*').Value
+    }
+    if (-not $t) { return $null }
+    return $t
+}
+
+# A goal can also end without a trace in the rollout (blocked after an error, a
+# usage or token budget limit, /goal clear), and then no next turn starts. If
+# none started codex_goal_check seconds (default 5) after this Stop, the turn
+# was the last: done goes then.
+function Invoke-CodexGoalLater([string]$gf) {
+    if ($Script:LinkFiles.Count -eq 0) { return }
+    $off = [int64]-1
+    try { $off = (New-Object IO.FileInfo($gf)).Length } catch { return }
+    $w = Get-ConfInt 'codex_goal_check' 5
+    Set-Msg $Script:Last
+    Set-TurnAt 'done' '' ''
+    Initialize-V2 $Script:TurnAt
+    $goalFile = Join-Path $RunDir ($Script:Sid + '.goal')
+    [void](Write-FileB $goalFile ($Script:Rid + "`n"))
+    Start-LaterSend 'goal' $w $goalFile 0 $Script:Rid $gf $off
+}
+
+# Saves this event's facts that a later event of the session needs, with
+# prefix $prefix, in run/$Sid.$name (at most 64 KiB; the line of a long value
+# goes).
+function Save-FactsKeep([string]$prefix, [string]$name, [string]$re) {
+    Initialize-Facts
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($line in ([string]$Script:FactsText).Split([char]10)) {
+        if ($line.Length -gt 65536) { continue }
+        $p = $line
+        $t1 = $line.IndexOf([char]9)
+        if ($t1 -ge 0) { $p = $line.Substring(0, $t1) }
+        if ($p -cmatch $re) { [void]$sb.Append($prefix + $line + "`n") }
+    }
+    $t = $sb.ToString()
+    if ($t.Length -gt 65536) { $t = $t.Substring(0, 65536) }
+    $path = Join-Path $RunDir ($Script:Sid + '.' + $name)
+    if (Write-FileB ($path + '.' + $PID) $t) {
+        try { Remove-FileQ $path; [IO.File]::Move(($path + '.' + $PID), $path) } catch { Remove-FileQ ($path + '.' + $PID) }
+    }
+}
+
+# Facts saved by Save-FactsKeep within $maxAge seconds, added to the facts.
+function Add-FactsFile([string]$name, [int]$maxAge) {
+    $path = Join-Path $RunDir ($Script:Sid + '.' + $name)
+    if (-not [IO.File]::Exists($path)) { return }
+    $mins = [Math]::Floor(($maxAge + 59) / 60)
+    if (([DateTime]::UtcNow - [IO.File]::GetLastWriteTimeUtc($path)).TotalMinutes -ge $mins) { return }
+    Initialize-Facts
+    $t = Read-FileB $path
+    if ($null -eq $t) { $t = '' }
+    $Script:FactsText = [string]$Script:FactsText + "`n" + $t.TrimEnd([char]10)
+}
+
+# True for the first alert for this question of this session within 30
+# seconds: Claude Code reports one AskUserQuestion twice (PreToolUse and
+# PermissionRequest).
+function Get-AskKey {
+    $q = $Script:QText
+    if (-not $q) { $q = $Script:Desc }
+    return ('q.' + (Get-Sha256Hex ($Script:Sid + '|' + $q)).Substring(0, 16))
+}
+
+# The fields of the hook input that the hook reads (the case list of
+# agent-hook.sh), in document order.
+function Read-HookFields($kv) {
+    foreach ($p in $kv.order) {
+        $v = $kv.got[$p]
+        if ($p -cmatch '\A(background_tasks|backgroundTasks)\.[0-9]\.') { Add-BgField $p $v; continue }
+        if ($p -cmatch '\A(session_crons|sessionCrons)\.[0-9]\.') { Add-CronField $p $v; continue }
+        if ($p -ceq 'prompt') { $Script:Prompt = $v }
+        elseif ($p -ceq 'source') { $Script:Src = $v }
+        elseif ($p -ceq 'stop_hook_active') { $Script:StopAct = $v }
+        elseif ($p -ceq 'is_interrupt') { $Script:IsInt = $v }
+        elseif ($p -ceq 'agent_id' -or $p -ceq 'agentId') { $Script:AgentId = $v }
+        elseif ($p -ceq 'agent_type' -or $p -ceq 'agentType' -or $p -ceq 'subagentType') { if (-not $Script:SubType) { $Script:SubType = $v } }
+        elseif ($p -ceq 'parentAgentId' -or $p -ceq 'parent_agent_id') { $Script:SubPar = $v }
+        elseif ($p -ceq 'prompt_id' -or $p -ceq 'turn_id' -or $p -ceq 'message_id' -or $p -ceq 'executionNum') { $Script:Tid = $v }
+        elseif ($p -ceq 'permission_mode' -or $p -ceq 'permissionMode') { $Script:PMode = $v }
+        elseif ($p -ceq 'toolName') { if (-not $Script:Tool) { $Script:Tool = $v } }
+        elseif ($p -ceq 'toolUseId') { $Script:ToolUseId = $v }
+        elseif ($p -ceq 'transcriptPath') { if (-not $Script:TPath) { $Script:TPath = $v } }
+        elseif ($p -ceq 'hook_event_name') { $Script:HookEvent = $v }
+        elseif ($p -ceq 'hookEventName') { if (-not $Script:HookEvent) { $Script:HookEvent = $v } }
+        elseif ($p -ceq 'notification_type' -or $p -ceq 'notificationType') { if (-not $Script:NType) { $Script:NType = $v } }
+        elseif ($p -ceq 'type') { $Script:NType2 = $v }
+        elseif ($p -ceq 'tool_name') { $Script:Tool = $v }
+        elseif ($p -ceq 'tool_input.command' -or $p -ceq 'tool_input.file_path' -or $p -ceq 'tool_input.url') { if (-not $Script:Detail) { $Script:Detail = $v } }
+        elseif ($p -ceq 'tool_input.description') { $Script:Desc = $v }
+        elseif ($p -ceq 'tool_input.questions.0.question') { $Script:QText = $v }
+        elseif ($p -ceq 'session_id' -or $p -ceq 'sessionId') { if (-not $Script:Sid) { $Script:Sid = $v } }
+        elseif ($p -ceq 'cwd') { if (-not $Script:Cwd) { $Script:Cwd = $v } }
+        elseif ($p -ceq 'message' -or $p -ceq 'last_assistant_message' -or $p -ceq 'lastAssistantMessage' -or $p -ceq 'last-assistant-message') { $Script:Last = $v }
+        elseif ($p -ceq 'input-messages.0') { $Script:FirstIn = $v }
+        elseif ($p -ceq 'error') { $Script:Err = $v }
+        elseif ($p -ceq 'transcript_path') { $Script:TPath = $v }
+        elseif ($p -ceq 'context_tokens') { $Script:CtxTok = $v }
+        elseif ($p -ceq 'model' -or $p -ceq 'to_model') { $Script:Model = $v }
+        elseif ($p -ceq 'reason') { $Script:Reason = $v }
+        elseif ($p -ceq 'promptId') { $Script:PromptId = $v; $Script:GKey += '.' + $v; $Script:Tid = $v }
+        elseif ($p -ceq 'timestamp') { $Script:GKey += '.' + $v }
+    }
+}
+
 function Write-Running {
-    $path = Join-Path $RunDir ($Sid + '.bg')
+    $path = Join-Path $RunDir ($Script:Sid + '.bg')
     if ([IO.File]::Exists($path)) {
-        $m = ''
-        $state = 'background'
-        try {
-            $bl = [IO.File]::ReadAllText($path, $Utf8) -split "`n"
-            $m = $bl[0]
-            if ($bl.Count -gt 3 -and $bl[3] -eq 'ask') { $state = 'waiting' }
-        } catch { }
-        Write-State $state $m
+        $m = Read-LineB $path 0
+        if ($m.Length -gt 400) { $m = $m.Substring(0, 400) }
+        if ((Read-LineB $path 3) -ceq 'ask') { Write-State 'waiting' $m } else { Write-State 'background' $m }
     } else {
         Write-State 'running' ''
     }
 }
 
+# --- main ----------------------------------------------------------------
+
+# The event, as the case list at the end of agent-hook.sh; return = finish.
+function Invoke-Event {
+    $ev = $Script:Agent + ':' + $Script:HookEvent
+    if ($ev -ceq 'claude:PermissionRequest' -or $ev -ceq 'codex:PermissionRequest') {
+        if ($Mode -ceq 'signal') {
+            Write-State 'waiting' ('approve ' + $Script:Tool + ': ' + $Script:Detail)
+            return
+        }
+        $rk = 'claude_perm'
+        if ($Script:Agent -ceq 'codex') { $rk = 'codex_perm' }
+        Set-RkAt $rk ('@.oc' + $Tab + 's' + $Tab + $Nl)
+        if ($Script:Tool -ceq 'AskUserQuestion') {
+            # The question's decidable report (section 10.3): this one, not the
+            # PreToolUse before it, which waits ask_delay seconds for it.
+            $q = $Script:QText
+            if (-not $q) { $q = $Script:Desc }
+            Set-Msg $q
+            if (-not (Test-Once (Get-AskKey))) { return }
+            Initialize-V2 $Script:RkAt
+            if ($Script:LinkFiles.Count -gt 0) { Invoke-RequestFlow 'question' 'shared' }
+        } else {
+            $d = $Script:Detail
+            if ($Script:Tool -ceq 'apply_patch') { $d = $Script:Desc; if (-not $d) { $d = 'patch' } }
+            if (-not $d) { $d = $Script:Desc }
+            Set-Msg ('approve ' + $Script:Tool + ': ' + $d)
+            Initialize-V2 $Script:RkAt
+            # Codex hides its prompt while the hook waits (section 4.6).
+            $w = 'shared'
+            if ($Script:Agent -ceq 'codex') { $w = 'hidden' }
+            if ($Script:LinkFiles.Count -gt 0) { Invoke-RequestFlow 'permission' $w }
+        }
+        return
+    }
+    if ($ev -ceq 'claude:PreToolUse') {
+        if ($Script:Tool -ceq 'AskUserQuestion') {
+            Set-Msg $Script:QText
+            Write-State 'waiting' ''
+            # PermissionRequest reports the same question, decidable: it goes
+            # first. This one is the safety net for a question without one.
+            Set-RkAt 'claude_askpre' ''
+            Initialize-V2 $Script:RkAt
+            if ($Script:LinkFiles.Count -gt 0) {
+                $job = New-Job 'ask'
+                $job.wait = [string](Get-ConfInt 'ask_delay' 2)
+                $job.key = Get-AskKey
+                Start-Child $job
+            }
+        }
+        return
+    }
+    if ($ev -ceq 'claude:Notification') {
+        # permission_prompt is ignored: PermissionRequest already reported that
+        # wait (one relay event per agent wait). idle_prompt keeps the done badge.
+        $nt = $Script:NType
+        if ($nt -ceq 'idle_prompt') {
+            # Claude Code sends it 60 s after a turn while only background shells
+            # or monitors run: the work is not waiting for the user.
+            if (Test-BgPaused) { return }
+            # Already told by this turn's done: the prompt repeats it. Without a
+            # done (interrupt, StopFailure, no Stop hook) it stays the safety net.
+            if (Test-TurnDone) { return }
+            Set-Msg $Script:Last
+            Initialize-V2 ''
+            Send-Background 'question'
+        } elseif ($nt -ceq 'elicitation_dialog' -or $nt -ceq 'elicitation_url_dialog' -or $nt -ceq 'agent_needs_input') {
+            # agent_needs_input: another background session of the user's needs
+            # input, not this one: the alert stays, this tab's badge does not.
+            if ($nt -cne 'agent_needs_input') { Write-State 'waiting' '' }
+            Set-Msg $Script:Last
+            Set-RkAt 'claude_notif' ('@.ntype' + $Tab + 's' + $Tab + $nt + $Nl)
+            Initialize-V2 $Script:RkAt
+            Send-Background 'question'
+        }
+        return
+    }
+    if ($ev -ceq 'claude:UserPromptSubmit') {
+        Add-Note 'turn' ''
+        Set-PromptOrigin
+        Write-TurnMark
+        Invoke-UsageReport
+        Write-State 'running' ''
+        Send-State 'running' ''
+        Write-SessTurn 'running' $Script:Prompt
+        return
+    }
+    if ($ev -ceq 'claude:PostToolUse' -or $ev -ceq 'claude:PostToolUseFailure') {
+        if ($Script:HookEvent -ceq 'PostToolUseFailure' -and $Script:IsInt -ceq 'true' -and -not $Script:AgentId) {
+            # Esc during a tool call: the turn is over (no Stop follows). Not when
+            # a subagent's tool was interrupted (agent_id is set): the main
+            # session's wait goes on.
+            Add-Note 'turn' ''
+            Write-State 'idle' ''
+            Set-TurnAt 'interrupt' '' ''
+            Send-State 'idle' $Script:TurnAt
+            Write-SessTurn 'idle' ''
+            return
+        }
+        Add-Note 'tool' $Script:Fp
+        # Context grows with each tool call; look again every 20 seconds at most.
+        $utPath = Join-Path $RunDir ($Script:Sid + '.ut')
+        $ut = Read-LineB $utPath 0
+        $now = $Script:Now
+        if (-not (Test-UInt $ut) -or ($now - [int64]$ut) -ge 20 -or [int64]$ut -gt $now) {
+            [void](Write-FileB $utPath ([string]$now + "`n"))
+            Invoke-UsageReport
+        }
+        Write-Running
+        return
+    }
+    if ($ev -ceq 'claude:SessionStart' -or $ev -ceq 'claude:PostCompact' -or $ev -ceq 'claude:PostModelSwitch') {
+        Invoke-UsageReport
+        Write-UsageOnly
+        if ($Script:HookEvent -ceq 'SessionStart') {
+            Update-Cli
+            Start-Sess
+            if ((Test-SessOk) -and -not [IO.File]::Exists($Script:Sess + '.json')) { Write-SessTurn 'idle' '' }
+        }
+        return
+    }
+    if ($ev -ceq 'claude:SessionEnd' -or $ev -ceq 'grok:SessionEnd') {
+        $since = [DateTime]::UtcNow
+        # The agent is exiting and may take its hooks' children with it: the
+        # send finishes first (here, not in a child).
+        Send-State 'ended' '' -Sync
+        Stop-Sess $since
+        return
+    }
+    if (@('claude:SubagentStart', 'claude:SubagentStop', 'grok:SubagentStart', 'grok:SubagentStop') -ccontains $ev) {
+        if ($Script:HookEvent.EndsWith('Start', $Ord)) { Send-State 'sub_start' '' } else { Send-State 'sub_stop' '' }
+        return
+    }
+    if ($ev -ceq 'claude:Stop' -or $ev -ceq 'codex:Stop') {
+        Add-Note 'turn' ''
+        if ($Script:Last.StartsWith('{\"title\":', $Ord)) { return }
+        $gf = ''
+        if ($Script:Agent -ceq 'codex') { $gf = Get-InputFile $Script:TPath }
+        if ($Script:Agent -ceq 'codex') {
+            $plan = Get-CodexPlan $gf
+            if ($null -ne $plan) {
+                # The turn ended on Codex's "Implement this plan?" (M2): a question,
+                # not a done; answered in Codex's window (keys).
+                Set-Msg $plan
+                Set-RkAt 'codex_plan' ('@.plan' + $Tab + 's' + $Tab + $plan + $Nl)
+                Initialize-V2 $Script:RkAt
+                Send-Background 'question'
+                Invoke-UsageReport
+                Invoke-TurnEnd
+                Write-SessTurn 'idle' ''
+                return
+            }
+            if (Test-CodexGoalActive $gf) {
+                Invoke-UsageReport
+                $Script:TGoal = 'active'
+                Set-TurnAt 'background' '' ''
+                Send-State 'background' $Script:TurnAt
+                $Script:TGoal = ''
+                if ($gf) { Invoke-CodexGoalLater $gf }
+                Invoke-TurnEnd
+                Write-SessTurn 'idle' ''
+                return
+            }
+        }
+        Invoke-StopFlow
+        Write-SessTurn 'idle' ''
+        return
+    }
+    if ($ev -ceq 'claude:StopFailure') {
+        Add-Note 'turn' ''
+        $e = 'error'
+        $te = 'error'
+        if (@('authentication_failed', 'oauth_org_not_allowed', 'cloud_credential_error') -ccontains $Script:Err) { $e = 'auth' }
+        elseif ($Script:Err -ceq 'rate_limit') { $te = 'limit' }
+        Set-Msg ($Script:Err + ': ' + $Script:Last)
+        Set-TurnAt $te '' ''
+        Initialize-V2 $Script:TurnAt
+        Send-Background $e
+        Invoke-UsageReport
+        Write-State 'done' ''
+        Write-SessTurn 'idle' ''
+        return
+    }
+    if ($ev -ceq 'codex:SessionStart' -or $ev -ceq 'codex:PostCompact') {
+        Invoke-UsageReport
+        if ($Script:HookEvent -ceq 'SessionStart') { Start-Sess }
+        return
+    }
+    if ($ev -ceq 'codex:UserPromptSubmit' -or $ev -ceq 'grok:UserPromptSubmit') {
+        # Grok: also the turn it starts itself when background work reports back
+        # (promptId task-completed-<id> or subagent-completed-<id>).
+        Add-Note 'turn' ''
+        Set-PromptOrigin
+        Write-TurnMark
+        Send-State 'running' ''
+        Write-SessTurn 'running' $Script:Prompt
+        return
+    }
+    if ($ev -ceq 'codex:PreToolUse' -or $ev -ceq 'codex:PostToolUse') {
+        # Registered for the session record's heartbeat only (section 8.3).
+        return
+    }
+    if ($ev -ceq 'codex-notify:notify') {
+        if ($Script:NType2 -cne 'agent-turn-complete') { return }
+        if ($Script:FirstIn.StartsWith('Generate a concise, single-line task title', $Ord)) { return }
+        Set-Msg $Script:Last
+        Initialize-V2 ''
+        Send-Background 'done'
+        return
+    }
+    if ($ev -ceq 'grok:PreToolUse') {
+        # Which tool asks next: the Notification of a permission prompt names
+        # none (section 10.2).
+        Save-FactsKeep 'pre.' 'grokpre' '^(toolName|toolUseId|toolInput)'
+        return
+    }
+    if ($ev -ceq 'grok:PostToolUse') {
+        $gp = Join-Path $RunDir ($Script:Sid + '.grokpre')
+        if ($Script:ToolUseId -and [IO.File]::Exists($gp)) {
+            foreach ($line in (Read-FileB $gp).Split([char]10)) {
+                $f = $line.Split([char]9)
+                if ($f.Length -ge 3 -and $f[0] -ceq 'pre.toolUseId' -and $f[2] -ceq $Script:ToolUseId) { Remove-FileQ $gp; break }
+            }
+        }
+        return
+    }
+    if ($ev -ceq 'grok:Notification') {
+        # Grok asks in its own prompt and takes no answer from a hook:
+        # permission_prompt (only while its permission UI waits; also its plan
+        # review, "Plan approval requested"), elicitation_dialog (a question)
+        # and idle_prompt are alerts. The key includes the event's timestamp, the
+        # same in every copy of one event.
+        $nt = $Script:NType
+        if ($nt -ceq 'permission_prompt') { if ($Script:Last.StartsWith('Plan approval requested', $Ord)) { $nt = 'plan' } }
+        elseif ($nt -ceq 'elicitation_dialog') { }
+        elseif ($nt -ceq 'idle_prompt') { if ((Test-BgPaused) -or (Test-TurnDone)) { return } }
+        else { return }
+        $key = (Get-Sha256Hex ($Script:HookEvent + '|' + $Script:Sid + '|' + $Script:NType + '|' + $Script:GKey + '|' + $Script:Last)).Substring(0, 16)
+        if (-not (Test-Once $key)) { return }
+        Set-Msg $Script:Last
+        if ($Script:NType -ceq 'idle_prompt') {
+            Initialize-V2 ''
+        } else {
+            Add-FactsFile 'grokpre' 600
+            Set-RkAt 'grok_notif' ('@.ntype' + $Tab + 's' + $Tab + $nt + $Nl)
+            Initialize-V2 $Script:RkAt
+        }
+        Send-Background 'question'
+        return
+    }
+    if ($ev -ceq 'grok:Stop' -or $ev -ceq 'grok:StopFailure') {
+        # A Stop also comes when the session closes (reason channel_closed or
+        # shutdown); only end_turn ends a turn.
+        if ($Script:HookEvent -ceq 'Stop' -and $Script:Reason -and $Script:Reason -cne 'end_turn') { return }
+        $key = (Get-Sha256Hex ($Script:HookEvent + '|' + $Script:Sid + '|' + $Script:GKey + '|' + $Script:Err + '|' + $Script:Last)).Substring(0, 16)
+        if (-not (Test-Once $key)) { return }
+        Add-Note 'turn' ''
+        # Grok 1.0.70 lists work still in flight in backgroundTasks, as Claude
+        # Code does, and takes the turn up again when it reports back.
+        if ($Script:HookEvent -ceq 'Stop') {
+            Invoke-StopFlow
+        } else {
+            $e = 'error'
+            $te = 'error'
+            if (@('authentication_failed', 'oauth_org_not_allowed', 'cloud_credential_error') -ccontains $Script:Err) { $e = 'auth' }
+            elseif ($Script:Err -ceq 'rate_limit') { $te = 'limit' }
+            Set-Msg ($Script:Err + ': ' + $Script:Last)
+            Set-TurnAt $te '' ''
+            Initialize-V2 $Script:TurnAt
+            Send-Background $e
+            Invoke-TurnEnd
+        }
+        Write-SessTurn 'idle' ''
+        return
+    }
+}
+
 try {
-    switch ($Agent) {
+    $Script:Agent0 = $Agent
+    if ($Mode -eq '__send') {
+        $Script:Rid = ''
+        $Script:Ts = '0'
+        $Script:BgSeq = ''
+        $Script:UsageSeq = ''
+        if ($ScriptArgs.Count -gt 2) { Invoke-Child ([string]$ScriptArgs[2]) }
+        Trim-Log
+        exit 0
+    }
+    switch -CaseSensitive ($Agent) {
         'claude' {
             $App = 'claude-code'
-            # Grok Build runs Claude Code plugins' hooks; it sets GROK_HOOK_EVENT.
-            if ($env:GROK_HOOK_EVENT -and $Mode -ne '__send') { $Agent = 'grok'; $App = 'grok-build' }
+            # GitHub Copilot CLI loads a Claude Code plugin given to it and sets
+            # COPILOT_CLI=1: its hooks are sh-only. Grok Build runs Claude Code
+            # plugins' hooks; it sets GROK_HOOK_EVENT.
+            if ($env:COPILOT_CLI -eq '1') { exit 0 }
+            if ($env:GROK_HOOK_EVENT) { $Agent = 'grok'; $App = 'grok-build' }
         }
         'grok' { $App = 'grok-build' }
         'codex' { $App = 'codex' }
@@ -1967,119 +4539,81 @@ try {
     }
     $Script:UsageSeq = ''
     $Script:BgSeq = ''
-    $Script:LaterJson = ''
     $Script:UsageJson = ''
     $Script:Title = ''
-    $Script:XFlag = ''
-
-    if ($Mode -eq '__send') {
-        Invoke-SendChild
-        Trim-Log
-        exit 0
-    }
-
-    $InputText = ''
-    if ($Agent -ne 'notify') { $InputText = Read-Input }
-    $LinkFiles = @(Get-LinkFiles)
-    if ($LinkFiles.Count -eq 0 -and $env:SIMPLETERM -ne '1') { exit 0 }
-    if (-not [IO.Directory]::Exists($RunDir)) { [void][IO.Directory]::CreateDirectory($RunDir) }
-
-    # Stop `background_tasks` (Claude Code) or `backgroundTasks` (Grok): the first ten tasks.
-    $bgWant = @(foreach ($i in 0..9) { foreach ($k in 'background_tasks', 'backgroundTasks') { "$k.$i.id"; "$k.$i.type"; "$k.$i.description"; "$k.$i.command" } })
-    # session_crons (Claude Code) or sessionCrons (Grok): the first five wake-ups.
-    $cronWant = @(foreach ($i in 0..4) { foreach ($k in 'session_crons', 'sessionCrons') { "$k.$i.id"; "$k.$i.schedule"; "$k.$i.prompt" } })
-    $f = Get-JsonFields $InputText (@('hook_event_name', 'hookEventName', 'notification_type', 'notificationType', 'type',
-        'tool_name', 'tool_input.command', 'tool_input.file_path', 'tool_input.url', 'tool_input.description',
-        'tool_input.questions.0.question', 'session_id', 'sessionId', 'cwd', 'message', 'last_assistant_message',
-        'lastAssistantMessage', 'last-assistant-message', 'input-messages.0', 'error', 'transcript_path', 'context_tokens',
-        'model', 'to_model', 'promptId', 'toolUseId', 'reason', 'timestamp', 'prompt', 'source', 'stop_hook_active',
-        'is_interrupt', 'agent_id') + $bgWant + $cronWant)
-    $HookEvent = Get-Field $f 'hook_event_name'
-    if (-not $HookEvent) { $HookEvent = Get-Field $f 'hookEventName' }
-    if ($Agent -eq 'codex-notify') { $HookEvent = 'notify' }
-    # Grok's camelCase event names (hookEventName), as in agent-hook.sh.
-    if ($Agent -eq 'grok') {
-        if ($HookEvent -eq 'notification') { $HookEvent = 'Notification' }
-        elseif ($HookEvent -eq 'stop') { $HookEvent = 'Stop' }
-        elseif ($HookEvent -eq 'stop_failure') { $HookEvent = 'StopFailure' }
-        elseif ($HookEvent -eq 'user_prompt_submit') { $HookEvent = 'UserPromptSubmit' }
-    }
-    $Tool = Get-Field $f 'tool_name'
-    $Detail = ''
-    foreach ($k in @('tool_input.command', 'tool_input.file_path', 'tool_input.url')) {
-        if (-not $Detail) { $Detail = Get-Field $f $k }
-    }
-    $Desc = Get-Field $f 'tool_input.description'
-    $Last = Get-Field $f 'last_assistant_message'
-    if (-not $Last) { $Last = Get-Field $f 'lastAssistantMessage' }
-    if (-not $Last) { $Last = Get-Field $f 'last-assistant-message' }
-    if (-not $Last) { $Last = Get-Field $f 'message' }
-    $sidRaw = Get-Field $f 'session_id'
-    if (-not $sidRaw) { $sidRaw = Get-Field $f 'sessionId' }
-    $Sid = $sidRaw -replace '[^A-Za-z0-9_-]', '_'
-    if ($Sid.Length -gt 80) { $Sid = $Sid.Substring(0, 80) }
-    if (-not $Sid) { $Sid = 'nosession' }
-
-    $Rid = New-RandomHex 8
-    $Ts = [string](Now-Epoch)
-    if ($env:SIMPLETERM_HOOK_TEST -eq '1') {
-        if ($env:SIMPLETERM_HOOK_TEST_RID) { $Rid = $env:SIMPLETERM_HOOK_TEST_RID }
-        if ($env:SIMPLETERM_HOOK_TEST_TS) { $Ts = $env:SIMPLETERM_HOOK_TEST_TS }
-    }
-    if (-not (Test-Hex $Rid 16)) { $LinkFiles = @() }
-    if (-not (Test-UInt $Ts)) { $Ts = '0' }
-    $CwdBase = Limit-JsonText (Get-Field $f 'cwd') 64 256 -Base
-    $Fp = (Get-Sha256Hex ($Tool + "`t" + (Limit-JsonText $Detail 200 800))).Substring(0, 16)
     $Script:Msg = ''
-    # Stop `background_tasks` (Claude Code) or `backgroundTasks` (Grok): the
-    # first task and up to ten ids.
-    $bgKey = 'background_tasks'
-    if ($Agent -eq 'grok') { $bgKey = 'backgroundTasks' }
-    # Claude Code 2.1.316 type labels: subagent, workflow, cloud session and
-    # MCP task report back (they end); shell, monitor, an idle teammate (and
-    # labels we do not know) may run for good; dream, auto-mode scan, memory
-    # import and memory save are its own housekeeping and never wake it.
-    $BgN = 0
-    $BgFinite = 0
-    $BgType = ''
-    $BgDesc = ''
-    $BgSvc = 0
-    $BgNoId = 0
-    $BgIds = @()
-    for ($i = 0; $i -lt 10; $i++) {
-        $t = Get-Field $f ($bgKey + '.' + $i + '.type')
-        if (-not $t -or @('dream', 'auto-mode scan', 'memory import', 'memory save') -contains $t) { continue }
-        $BgN++
-        if (@('subagent', 'workflow', 'cloud session', 'MCP task') -contains $t) { $BgFinite++ }
-        $bgId = Get-Field $f ($bgKey + '.' + $i + '.id')
-        if ($bgId -cmatch '^[A-Za-z0-9_-]+$') { $BgIds += $bgId } else { $BgNoId++ }
-        $bgCmd = Get-Field $f ($bgKey + '.' + $i + '.command')
-        if ($t -eq 'shell' -and $bgCmd -and (Test-ServiceCmd $bgCmd)) { $BgSvc++ }
-        if (-not $BgType) {
-            $BgType = $t
-            $BgDesc = Get-Field $f ($bgKey + '.' + $i + '.description')
-            if (-not $BgDesc) { $BgDesc = $bgCmd }
+    $Script:MsgF = ''
+    $Script:XFlags = ''
+    $Script:V2 = $false
+    $Script:V2C = $false
+    $Script:FactsText = ''
+    $Script:AT = ''
+    $Script:Spec = ''
+    $Script:V2X = ''
+    $Script:NoMsg = $false
+    $Script:WaitOv = ''
+    $Script:IngMt = ''
+    $Script:ReqId = ''
+    $Script:TurnAt = ''
+    $Script:RkAt = ''
+    $Script:TurnBy = ''
+    $Script:Tasks = ''
+    $Script:TGoal = ''
+    $Script:PrevIds = ''
+    $Script:PromptBy = 'user'
+    $Script:PromptUser = $true
+    $Script:RidUsed = $false
+
+    # The input as bytes (trailing line breaks and NUL bytes dropped, as the
+    # sh hook's command substitution does).
+    $Script:InputB = ''
+    if ($Agent -ceq 'codex-notify') {
+        if ($ScriptArgs.Count -ge 2) {
+            $Script:InputB = BS ([string]$ScriptArgs[$ScriptArgs.Count - 1])
+            if ($Script:InputB.Length -gt $MaxInput) { $Script:InputB = '' }
         }
+    } elseif ($Agent -cne 'notify') {
+        $stream = [Console]::OpenStandardInput()
+        $buf = New-Object byte[] $MaxInput
+        $total = 0
+        while ($total -lt $buf.Length) {
+            $n = $stream.Read($buf, $total, $buf.Length - $total)
+            if ($n -le 0) { break }
+            $total += $n
+        }
+        $Script:InputB = $Latin1.GetString($buf, 0, $total).Replace([string][char]0, '').TrimEnd([char]10)
     }
-    # Scheduled wake-ups: how many, the first one's schedule, a checksum of each prompt.
-    $cronKey = 'session_crons'
-    if ($Agent -eq 'grok') { $cronKey = 'sessionCrons' }
-    $CronN = 0
-    $CronSched = ''
-    $CronSums = @()
-    for ($i = 0; $i -lt 5; $i++) {
-        $cId = Get-Field $f ($cronKey + '.' + $i + '.id')
-        $cSch = Get-Field $f ($cronKey + '.' + $i + '.schedule')
-        $cPr = Get-Field $f ($cronKey + '.' + $i + '.prompt')
-        if (-not ($cId -or $cSch -or $cPr)) { continue }
-        if ($i + 1 -gt $CronN) { $CronN = $i + 1 }
-        if ($i -eq 0) { $CronSched = $cSch }
-        if ($cPr) { $CronSums += (Get-PromptSum $cPr) }
+    # Codex runs PreToolUse and PostToolUse hooks for the session record's
+    # heartbeat only (TDS_AGENT_EVENTS_V2 section 8.3): their large tool input
+    # or output is not read, only its start (session_id and the event come
+    # first).
+    if ($Agent -ceq 'codex' -and $Script:InputB.Length -gt 4096) {
+        $ih = $Script:InputB.Substring(0, 4096)
+        if ($ih.Contains('"hook_event_name":"PreToolUse"') -or $ih.Contains('"hook_event_name":"PostToolUse"')) { $Script:InputB = $ih }
     }
+
+    # Nothing to do without a link or a SimpleTerm session.
+    $Script:LinkFiles = @(Get-LinkFiles)
+    if ($Script:LinkFiles.Count -eq 0 -and $env:SIMPLETERM -ne '1') { exit 0 }
+    # A run directory that cannot be made (a file in its place) leaves the
+    # hook working without its run files, as agent-hook.sh does.
+    try { if (-not [IO.Directory]::Exists($RunDir)) { [void][IO.Directory]::CreateDirectory($RunDir) } } catch { }
+
+    $Script:Rid = New-RandomHex 8
+    $Script:Now = Now-Epoch
+    $Script:Ts = [string]$Script:Now
+    if ($env:SIMPLETERM_HOOK_TEST -eq '1') {
+        if ($env:SIMPLETERM_HOOK_TEST_RID) { $Script:Rid = BS $env:SIMPLETERM_HOOK_TEST_RID }
+        if ($env:SIMPLETERM_HOOK_TEST_TS) { $Script:Ts = BS $env:SIMPLETERM_HOOK_TEST_TS }
+    }
+    if (-not (Test-Hex $Script:Rid 16)) { $Script:Rid = '' }
+    if (-not (Test-UInt $Script:Ts)) { $Script:Ts = '0' }
+    $Script:T0 = $Script:Now
+    if (-not $Script:Rid) { $Script:LinkFiles = @() }
 
     # `simpleterm notify "title" ["body"]`: an OSC 777 notification on this
     # console (in a SimpleTerm session) and a `notify` event to every link.
-    if ($Agent -eq 'notify') {
+    if ($Agent -ceq 'notify') {
         $t = ''
         $b = ''
         if ($ScriptArgs.Count -gt 1) { $t = [string]$ScriptArgs[1] }
@@ -2091,198 +4625,95 @@ try {
             try { [Console]::Out.Write([string][char]27 + ']777;notify;' + $t + ';' + $b + [string][char]7); [Console]::Out.Flush() } catch { }
         }
         # Already within the limits; escaping can double the bytes, not the count.
-        $Script:Title = ConvertTo-JsonText $t 64 512
-        $Script:Msg = ConvertTo-JsonText $b 200 1600
-        $cwd = (Get-Location).Path
-        $CwdBase = Limit-JsonText (ConvertTo-JsonText $cwd 4096 16384) 64 256 -Base
+        $Script:Title = ConvertTo-JsonB (BS $t) 64 512
+        $Script:Msg = ConvertTo-JsonB (BS $b) 200 1600
+        $Script:CwdBase = ConvertTo-JsonB (BS (Get-Location).Path) 64 256 -Base
         Send-Background 'notify'
         Trim-Log
         exit 0
     }
 
+    # Fields of the agent's event JSON. Agents name the same things differently
+    # (Grok sends camelCase and snake_case).
+    $want = @()
+    if ($Agent -ceq 'claude') {
+        # background_tasks (Claude Code Stop): the first ten tasks. session_crons
+        # (the first five): scheduled wake-ups. prompt/source tell who started a
+        # turn; stop_hook_active and is_interrupt are flags. agent_id is there
+        # only when a subagent's own tool call fires the hook.
+        $want = @('hook_event_name', 'notification_type', 'tool_name', 'tool_input.command', 'tool_input.file_path', 'tool_input.url',
+            'tool_input.description', 'tool_input.questions.0.question', 'session_id', 'cwd', 'message', 'last_assistant_message', 'error',
+            'transcript_path', 'context_tokens', 'model', 'to_model', 'prompt', 'source', 'stop_hook_active', 'is_interrupt', 'agent_id',
+            'prompt_id', 'permission_mode', 'agent_type', 'reason', 'request_id', 'oc', 'parent_session_id', 'message_id', 'title')
+        foreach ($i in 0..9) { foreach ($k in @('id', 'type', 'description', 'command')) { $want += 'background_tasks.' + $i + '.' + $k } }
+        foreach ($i in 0..4) { foreach ($k in @('id', 'schedule', 'prompt')) { $want += 'session_crons.' + $i + '.' + $k } }
+    } elseif ($Agent -ceq 'codex') {
+        $want = @('hook_event_name', 'tool_name', 'tool_input.command', 'tool_input.file_path', 'tool_input.description', 'session_id', 'cwd',
+            'last_assistant_message', 'transcript_path', 'stop_hook_active', 'turn_id', 'permission_mode', 'prompt', 'source')
+    } elseif ($Agent -ceq 'codex-notify') {
+        $want = @('type', 'cwd', 'last-assistant-message', 'input-messages.0')
+    } elseif ($Agent -ceq 'grok') {
+        # backgroundTasks (Grok's Stop, camelCase): the first ten tasks.
+        # sessionCrons (the first five): scheduled wake-ups; a prompt id that is
+        # not a person's marks a turn Grok started itself.
+        $want = @('hook_event_name', 'hookEventName', 'notificationType', 'sessionId', 'cwd', 'message', 'lastAssistantMessage', 'error', 'reason',
+            'promptId', 'timestamp', 'prompt', 'stop_hook_active', 'permissionMode', 'agentId', 'agent_id', 'agentType', 'subagentType', 'toolName',
+            'toolUseId', 'transcriptPath', 'transcript_path')
+        foreach ($i in 0..9) { foreach ($k in @('id', 'type', 'description', 'command')) { $want += 'backgroundTasks.' + $i + '.' + $k } }
+        foreach ($i in 0..4) { foreach ($k in @('id', 'schedule', 'prompt')) { $want += 'sessionCrons.' + $i + '.' + $k } }
+    }
+    foreach ($v in @('HookEvent', 'NType', 'Tool', 'Detail', 'Desc', 'Sid', 'Cwd', 'Last', 'Err', 'QText', 'FirstIn', 'NType2', 'TPath',
+            'CtxTok', 'Model', 'GKey', 'Reason', 'Prompt', 'Src', 'StopAct', 'IsInt', 'AgentId', 'PromptId', 'ToolUseId', 'SubType', 'SubPar',
+            'Tid', 'PMode', 'BgPick', 'BgType', 'BgDesc', 'BgCmd', 'BgShells', 'BgSvcIdx', 'BgIds', 'CronSched', 'CronSums', 'BgM')) {
+        Set-Variable -Name $v -Value '' -Scope Script
+    }
+    $Script:BgN = 0
+    $Script:BgFinite = 0
+    $Script:BgSvc = 0
+    $Script:BgNoId = 0
+    $Script:CronN = 0
+    $Script:BgKeep = New-Object 'System.Collections.Generic.List[string]'
+    $Script:BgIdMap = New-Object 'System.Collections.Generic.List[object]'
+    $kv = Get-JsonKV $Script:InputB $want
+    $f = $kv
+    Read-HookFields $kv
+
+    if ($Agent -ceq 'codex-notify') { $Script:HookEvent = 'notify' }
+    # Grok's camelCase event names (hookEventName), as in agent-hook.sh.
+    if ($Agent -ceq 'grok') {
+        if ($Script:HookEvent -ceq 'notification') { $Script:HookEvent = 'Notification' }
+        elseif ($Script:HookEvent -ceq 'stop') { $Script:HookEvent = 'Stop' }
+        elseif ($Script:HookEvent -ceq 'stop_failure') { $Script:HookEvent = 'StopFailure' }
+        elseif ($Script:HookEvent -ceq 'user_prompt_submit') { $Script:HookEvent = 'UserPromptSubmit' }
+    }
+    $Script:RawSid = $Script:Sid
+    $Script:Sid = [regex]::Replace($Script:Sid, '[^A-Za-z0-9_-]', '_')
+    if ($Script:Sid.Length -gt 80) { $Script:Sid = $Script:Sid.Substring(0, 80) }
+    if (-not $Script:Sid) { $Script:Sid = 'nosession' }
+    $Script:DirV = $Script:Cwd
+    # A subagent (its own hook events carry its id; section 7).
+    $Script:SubId = ''
+    if (Test-Id $Script:AgentId) { $Script:SubId = $Script:AgentId }
+    $Script:CwdBase = Limit-Json $Script:Cwd 64 256 -Base
+    $Script:CwdBaseF = Limit-Json $Script:Cwd 100000 400000 -Base
+    $Script:Fp = (Get-Sha256Hex ($Script:Tool + "`t" + (Limit-Json $Script:Detail 200 800))).Substring(0, 16)
+    $Sid = $Script:Sid
+
     # A done waits done_delay seconds (Send-DoneLater) in case another Stop
     # hook keeps the agent going; any later event of the main thread ends that
-    # wait. Only the Stop events that send a done themselves leave it be, and
-    # so do the events of a subagent (agent_id is set, foreground or
-    # background): its tool calls carry the session id and are no sign of the
-    # main thread going on.
-    if (@('claude:Stop', 'codex:Stop', 'grok:Stop') -notcontains ($Agent + ':' + $HookEvent) -and -not (Get-Field $f 'agent_id')) {
-        try { [IO.File]::Delete((Join-Path $RunDir ($Sid + '.pend'))) } catch { }
+    # wait. Only the turn-end events that send a done themselves leave it be
+    # (a newer one replaces it), and so do the events of a subagent (agent_id
+    # is set, foreground or background): its tool calls carry the session id
+    # and are no sign of the main thread going on.
+    $ev0 = $Agent + ':' + $Script:HookEvent
+    if (@('claude:Stop', 'codex:Stop', 'grok:Stop') -cnotcontains $ev0 -and $Script:HookEvent -cne 'SessionEnd' -and -not $Script:AgentId) {
+        Remove-FileQ (Join-Path $RunDir ($Script:Sid + '.pend'))
     }
-
-    switch ($Agent + ':' + $HookEvent) {
-        { $_ -eq 'claude:PermissionRequest' -or $_ -eq 'codex:PermissionRequest' } {
-            if ($Mode -eq 'signal') {
-                Write-State 'waiting' ('approve ' + $Tool + ': ' + $Detail)
-            } elseif ($Tool -eq 'AskUserQuestion') {
-                $q = Get-Field $f 'tool_input.questions.0.question'
-                if (-not $q) { $q = $Desc }
-                $Script:Msg = Limit-JsonText $q 200 800
-                if (Test-AskOnce $q) { Send-Background 'question' }
-            } else {
-                $d = $Detail
-                if ($Tool -eq 'apply_patch') { $d = $Desc; if (-not $d) { $d = 'patch' } }
-                if (-not $d) { $d = $Desc }
-                $Script:Msg = Limit-JsonText ('approve ' + $Tool + ': ' + $d) 200 800
-                if ($LinkFiles.Count -gt 0) { Invoke-PermissionFlow }
-            }
-            break
-        }
-        'claude:PreToolUse' {
-            if ($Tool -eq 'AskUserQuestion') {
-                $q = Get-Field $f 'tool_input.questions.0.question'
-                $Script:Msg = Limit-JsonText $q 200 800
-                if (Test-AskOnce $q) { Send-Background 'question' }
-                Write-State 'waiting' ''
-            }
-            break
-        }
-        'claude:Notification' {
-            # permission_prompt is ignored: PermissionRequest already reported that
-            # wait (one relay event per agent wait). idle_prompt keeps the done badge.
-            $nt = Get-Field $f 'notification_type'
-            if ($nt -eq 'idle_prompt') {
-                # Claude Code sends it 60 s after a turn while only background
-                # shells or monitors run: the work is not waiting for the user.
-                if (Test-BgPaused) { break }
-                # Already told by this turn's done: the prompt repeats it. Without
-                # a done (interrupt, StopFailure, no Stop hook) it stays the safety net.
-                if (Test-TurnDone) { break }
-                $Script:Msg = Limit-JsonText (Get-Field $f 'message') 200 800
-                Send-Background 'question'
-            } elseif ($nt -eq 'elicitation_dialog' -or $nt -eq 'elicitation_url_dialog') {
-                Write-State 'waiting' ''
-                $Script:Msg = Limit-JsonText (Get-Field $f 'message') 200 800
-                Send-Background 'question'
-            } elseif ($nt -eq 'agent_needs_input') {
-                # Another background session of the user's needs input, not
-                # this one: the alert stays, this tab's badge does not change.
-                $Script:Msg = Limit-JsonText (Get-Field $f 'message') 200 800
-                Send-Background 'question'
-            }
-            break
-        }
-        'claude:UserPromptSubmit' {
-            Add-Note 'turn' ''
-            Write-TurnMark (Get-PromptUser)
-            Invoke-UsageReport
-            Write-State 'running' ''
-            break
-        }
-        { $_ -eq 'claude:PostToolUse' -or $_ -eq 'claude:PostToolUseFailure' } {
-            if ($HookEvent -eq 'PostToolUseFailure' -and (Get-Field $f 'is_interrupt') -eq 'true' -and -not (Get-Field $f 'agent_id')) {
-                # Esc during a tool call: the turn is over (no Stop follows).
-                # Not when a subagent's tool was interrupted (agent_id is
-                # set): the main session's wait goes on.
-                Add-Note 'turn' ''
-                Write-State 'idle' ''
-                break
-            }
-            Add-Note 'tool' $Fp
-            # Context grows with each tool call; look again every 20 seconds at most.
-            $utPath = Join-Path $RunDir ($Sid + '.ut')
-            $ut = ''
-            try { if ([IO.File]::Exists($utPath)) { $ut = [IO.File]::ReadAllText($utPath).Trim() } } catch { }
-            $now = Now-Epoch
-            if (-not (Test-UInt $ut) -or ($now - [int64]$ut) -ge 20 -or [int64]$ut -gt $now) {
-                try { [IO.File]::WriteAllText($utPath, [string]$now, $Utf8) } catch { }
-                Invoke-UsageReport
-            }
-            Write-Running
-            break
-        }
-        { $_ -eq 'claude:SessionStart' -or $_ -eq 'claude:PostCompact' -or $_ -eq 'claude:PostModelSwitch' -or
-          $_ -eq 'codex:SessionStart' -or $_ -eq 'codex:PostCompact' } {
-            Invoke-UsageReport
-            Write-UsageOnly
-            if ($HookEvent -eq 'SessionStart') { Update-Cli }
-            break
-        }
-        { $_ -eq 'claude:Stop' -or $_ -eq 'codex:Stop' } {
-            Add-Note 'turn' ''
-            if ($Last.StartsWith('{\"title\":')) { break }
-            if ($Agent -eq 'codex' -and (Test-CodexGoalActive)) {
-                Invoke-UsageReport
-                # A goal can end without a trace in the rollout (blocked, a
-                # budget or usage limit, /goal clear): if no next turn started
-                # codex_goal_check seconds (default 5) later, this was the last.
-                $roll = Get-InputFile (Get-Field $f 'transcript_path')
-                if ($roll -and $LinkFiles.Count -gt 0) {
-                    $goalFile = Join-Path $RunDir ($Sid + '.goal')
-                    try {
-                        [IO.File]::WriteAllText($goalFile, $Rid + "`n", $Utf8)
-                        $Script:Msg = Limit-JsonText $Last 200 800
-                        Start-LaterSend 'goal' (Get-ConfInt 'codex_goal_check' 5) $goalFile 0 $Rid $roll ((Get-Item -LiteralPath $roll).Length)
-                    } catch { }
-                }
-                Update-Cli
-                break
-            }
-            Invoke-StopFlow
-            break
-        }
-        'claude:StopFailure' {
-            Add-Note 'turn' ''
-            $err = Get-Field $f 'error'
-            $ev = 'error'
-            if ($err -eq 'authentication_failed' -or $err -eq 'oauth_org_not_allowed' -or $err -eq 'cloud_credential_error') { $ev = 'auth' }
-            $Script:Msg = Limit-JsonText ($err + ': ' + (Get-Field $f 'last_assistant_message')) 200 800
-            Send-Background $ev
-            Invoke-UsageReport
-            Write-State 'done' ''
-            break
-        }
-        'grok:UserPromptSubmit' {
-            # Also the turn Grok starts itself when background work reports back.
-            Add-Note 'turn' ''
-            Write-TurnMark (Get-PromptUser)
-            break
-        }
-        'grok:Notification' {
-            # Grok asks in its own prompt and takes no answer from a hook:
-            # permission_prompt and idle_prompt are alerts. The key includes
-            # the event's timestamp, the same in every copy of one event.
-            $nt = Get-Field $f 'notificationType'
-            if (-not $nt) { $nt = Get-Field $f 'notification_type' }
-            if (@('permission_prompt', 'idle_prompt') -notcontains $nt) { break }
-            if ($nt -eq 'idle_prompt' -and ((Test-BgPaused) -or (Test-TurnDone))) { break }
-            $key = (Get-Sha256Hex ($HookEvent + '|' + $Sid + '|' + $nt + '|' + (Get-Field $f 'promptId') + '|' + (Get-Field $f 'timestamp') + '|' + $Last)).Substring(0, 16)
-            if (-not (Test-Once $key)) { break }
-            $Script:Msg = Limit-JsonText $Last 200 800
-            Send-Background 'question'
-            break
-        }
-        { $_ -eq 'grok:Stop' -or $_ -eq 'grok:StopFailure' } {
-            # A Stop also comes when the session closes (reason channel_closed
-            # or shutdown); only end_turn ends a turn.
-            $reason = Get-Field $f 'reason'
-            if ($HookEvent -eq 'Stop' -and $reason -and $reason -ne 'end_turn') { break }
-            $err = Get-Field $f 'error'
-            $key = (Get-Sha256Hex ($HookEvent + '|' + $Sid + '|' + (Get-Field $f 'promptId') + '|' + (Get-Field $f 'timestamp') + '|' + $err + '|' + $Last)).Substring(0, 16)
-            if (-not (Test-Once $key)) { break }
-            Add-Note 'turn' ''
-            # Grok 1.0.70 lists work still in flight in backgroundTasks, as
-            # Claude Code does, and takes the turn up again when it reports back.
-            if ($HookEvent -eq 'Stop') {
-                Invoke-StopFlow
-            } else {
-                $ev = 'error'
-                if ($err -eq 'authentication_failed' -or $err -eq 'oauth_org_not_allowed' -or $err -eq 'cloud_credential_error') { $ev = 'auth' }
-                $Script:Msg = Limit-JsonText ($err + ': ' + $Last) 200 800
-                Send-Background $ev
-            }
-            break
-        }
-        'codex-notify:notify' {
-            if ((Get-Field $f 'type') -ne 'agent-turn-complete') { break }
-            if ((Get-Field $f 'input-messages.0').StartsWith('Generate a concise, single-line task title')) { break }
-            $Script:Msg = Limit-JsonText (Get-Field $f 'last-assistant-message') 200 800
-            Send-Background 'done'
-            break
-        }
-    }
+    # The heartbeat of the session's record (section 8.2): every hook event.
+    if (@('UserPromptSubmit', 'SessionStart', 'SessionEnd') -cnotcontains $Script:HookEvent) { Update-SessBeat }
+    Invoke-Event
 } catch {
-    Write-Log ('error ' + $_.Exception.GetType().Name)
+    Write-Log ('error ' + $_.Exception.GetType().Name + ' ' + $_.InvocationInfo.ScriptLineNumber)
 }
 Trim-Log
 exit 0
