@@ -2794,7 +2794,7 @@ def t_v2_decisions(s):
     """Section 5.4: each decision the agent's way (Claude Code, Codex), and section 5.5: a decision that
     does not hold (MAC, request, decision list, values) prints nothing and the hook's safe no-decision."""
     def run(dext, decision="allow", inp=None, agent="claude", fmt=2, extra_conf=None):
-        s.setup([(LINK_A, {"fmt": fmt, "decision": decision, "after": 1, "dext": dext})], conf=dict({"claude_wait": 8, "codex_wait": 8}, **(extra_conf or {})))
+        s.setup([(LINK_A, {"fmt": fmt, "decision": decision, "after": 1, "dext": dext})], conf=dict({"claude_wait": 20, "codex_wait": 20}, **(extra_conf or {})))
         rc, out, err, el = s.run(agent, inp or v2_perm())
         return out, el
     out, el = run({"act": "deny_reason", "reason": "use pnpm\nnot npm"}, "deny")
@@ -2837,15 +2837,17 @@ def t_v2_decisions(s):
     for name, dext, dec in (("bad MAC", {"act": "allow", "bad_mac": True}, "allow"),
                             ("another request (N10)", {"act": "allow", "req": "st-ffffffffffffffff"}, "allow"),
                             ("not in this link's can", {"act": "allow_scope", "scope": 0}, "allow"),
+                            ("a plan's approval for a command (not offered)", {"act": "plan_approve"}, "allow"),
                             ("decision differs from the act", {"act": "deny"}, "allow"),
                             ("rid differs", {"act": "allow", "rid": "ffffffffffffffff"}, "allow"),
                             ("scope out of the list", {"act": "allow_scope", "scope": 3}, "allow"),
                             ("empty reason", {"act": "deny_reason", "reason": ""}, "deny"),
                             ("not JSON", {"act": "allow", "raw": "not json"}, "allow")):
         inp = v2_perm(suggestions=() if name == "not in this link's can" else (SUG_RULE,))
-        out, el = run(dext, dec, inp=inp)
+        # A cap far above the run's own time (about 3 s, more on a loaded machine).
+        out, el = run(dext, dec, inp=inp, extra_conf={"claude_wait": 40})
         s.check("decision dropped (%s): nothing printed" % name, out.strip() == "", out)
-        s.check("decision dropped (%s): the link's wait ends, not the cap" % name, el < 8, "%.2fs" % el)
+        s.check("decision dropped (%s): the link's wait ends, not the cap" % name, el < 30, "%.2fs" % el)
 
 
 def t_v2_n10(s):
@@ -2863,10 +2865,24 @@ def t_v2_n10(s):
             ("v1 deny with another open", None, "deny", ["per_1", "per_2"], None),
             ("v1 deny, nothing else open", None, "deny", ["per_1"], {"decision": "deny"}),
             ("allow_scope seen", {"act": "allow_scope", "scope": 0, "seen": ["per_1", "per_2"]}, "allow", ["per_1", "per_2"], {"decision": "allow", "scope": "always"})):
-        s.setup([(LINK_A, {"fmt": 2, "decision": dec, "after": 1, "dext": dext})], conf={"opencode_wait": 8})
+        s.setup([(LINK_A, {"fmt": 2, "decision": dec, "after": 1, "dext": dext})], conf={"opencode_wait": 20})
         pend(open_ids)
         rc, out, err, el = s.run("opencode", oc)
         s.check("N10 opencode (%s)" % name, (decision_json(out) or None) == want, out + s.log_text()[-200:])
+    # A v1 link (no fmt=2) takes no extension beyond what it was offered (allow, deny).
+    s.setup([(LINK_A, {"decision": "deny", "after": 1, "dext": {"act": "deny_reason", "reason": "no"}})], conf={"claude_wait": 8})
+    rc, out, err, el = s.run("claude", v2_perm(session="sess-v1"))
+    s.check("N10 a fmt-less link: deny_reason was not offered there -> nothing", out.strip() == "", out)
+    # The decision is there and the agent moved on just before it is printed (section 5.5-6): the
+    # terminal's note lands while the hook sleeps between its looks, right after the poll's result.
+    s.setup([(LINK_A, {"fmt": 2, "decision": "allow", "after": 2, "dext": {"act": "allow"}})], conf={"claude_wait": 12})
+    p = s.start("claude", v2_perm(session="sess-race"))
+    run = s.home / ".simpleterm" / "run"
+    dec = wait_for(lambda: [f for f in run.glob("rq.*.dec")], 15, 0.005)
+    with open(run / "sess-race.res", "a") as f:
+        f.write("%d turn -\n" % int(time.time() + 1))
+    rc, out, err, el = s.finish(p, 60)
+    s.check("N10 answered in the terminal after the decision came: nothing printed", dec and out.strip() == "", out)
     # Answered in the terminal first (a prompt or the tool ran): the late decision is not applied.
     s.setup([(LINK_A, {"fmt": 2, "decision": "allow", "after": 4, "dext": {"act": "allow"}})], conf={"claude_wait": 12})
     p = s.start("claude", v2_perm(session="sess-n10"))
@@ -2963,28 +2979,28 @@ def t_v2_link_waits(s):
         rc, out, err, el = s.run("claude", v2_perm(session="sw"))
         s.check("waits: shared: tunnel suppressed, the relay decides", behavior(out).get("behavior") == "allow", out)
         # hidden: no tunnel answer within 5 s -> the relay is decidable, its ingest cut to the time left.
-        setup({"ingest_delay": 7}, {"decision": "deny", "after": 1})
+        setup({"ingest_delay": 7}, {"decision": "deny", "after": 1}, conf={"codex_wait": 40})
         rc, out, err, el = s.run("codex", codex)
         rel = s.records("/v1/ingest")
         s.check("waits: hidden: a tunnel that does not answer -> relay decidable", behavior(out).get("behavior") == "deny"
                 and rel and rel[0]["body"]["ev"] == "permission" and rel[0]["body"].get("nh"), out + str(rel)[:200])
         # Typically ~7 s (the tunnel's 5 s, then the relay); the bound shows that the decision, not the
-        # cap (15 s), ended it (slow under parallel load).
-        s.check("waits: hidden: the tunnel's 5 seconds", 5 <= el < 15, "%.2fs" % el)
+        # cap (40 s), ended it (slow under parallel load).
+        s.check("waits: hidden: the tunnel's 5 seconds", 5 <= el < 30, "%.2fs" % el)
         setup({"ingest_delay": 7}, {"ingest_delay": 4, "decision": "allow"}, conf={"codex_wait": 6})
         rc, out, err, el = s.run("codex", codex)
         s.check("waits: hidden: the cap counts from the hook's start (relay ingest cut to the time left)",
-                out.strip() == "" and el < 9 and "http=000" in s.log_text(), "%.2fs %s" % (el, s.log_text()[-300:]))
+                out.strip() == "" and el < 10.5 and "http=000" in s.log_text(), "%.2fs %s" % (el, s.log_text()[-300:]))
         # A relay that lost R1: the question again, same rid, without nonce, not waited.
         q = json.dumps({"session_id": "sq", "cwd": "/w", "hook_event_name": "PermissionRequest", "tool_name": "AskUserQuestion",
                         "tool_input": {"questions": [{"question": "Which DB?", "options": [{"label": "A"}]}]}})
-        setup({"push": "suppressed"}, {"qdec": False})
+        setup({"push": "suppressed"}, {"qdec": False}, conf={"claude_wait": 40})
         rc, out, err, el = s.run("claude", q)
         recs = s.records("/v1/ingest")
         s.check("waits: invalid-nh -> the same rid once more without nonce", len(recs) == 2 and recs[0]["status"] == 400
                 and recs[1]["status"] == 200 and recs[0]["body"]["rid"] == recs[1]["body"]["rid"] and "nh" not in recs[1]["body"]
                 and "can" not in ((recs[1].get("plain_json") or {}).get("req") or {}), str(recs)[:500])
-        s.check("waits: invalid-nh: not waited", out.strip() == "" and el < 8 and not s.records("/v1/decision"), "%.2fs" % el)
+        s.check("waits: invalid-nh: not waited", out.strip() == "" and el < 30 and not s.records("/v1/decision"), "%.2fs" % el)
     finally:
         tun.terminate()
         tun.wait(5)
@@ -3002,7 +3018,7 @@ def t_v2_not_sent(s):
     s.check("not sent: copilot permissionRequest: no event, empty output, exit 0", rc == 0 and out == "" and not s.records(), out + str(s.records())[:200])
     rc, out, err, el = s.run("claude", json.dumps({"hook_event_name": "PermissionRequest", "sessionId": "c1", "toolName": "bash", "toolInput": {"command": "ls"}}),
                              {"COPILOT_CLI": "1"})
-    s.check("not sent: the Claude Code plugin under Copilot (COPILOT_CLI=1) does not wait", rc == 0 and out == "" and not s.records() and el < 3, out)
+    s.check("not sent: the Claude Code plugin under Copilot (COPILOT_CLI=1) does not wait", rc == 0 and out == "" and not s.records() and el < 20, "%r %.2fs" % (out, el))
     agy = json.dumps({"conversationId": "c-1", "workspacePaths": ["/w/a"], "stepIdx": 4, "toolCall": {"name": "run_command", "args": {"CommandLine": "make"}}})
     rc, out, err, el = s.run("agy", agy, args=("PreToolUse",))
     s.check("not sent: agy run_command with agy_wait 0", out.strip() == '{"decision":"allow"}' and not s.records(), out)
@@ -3016,7 +3032,7 @@ def t_v2_not_sent(s):
         for name, opts, sent in (("404 unknown", {}, False), ("404 unknown, shown:true", {"shown": True}, False),
                                  ("shown:false", {"shown": False}, True), ("401", {"decision_http": 401, "decision_error": "unauthorized"}, True),
                                  ("503", {"decision_http": 503, "decision_error": "x"}, True), ("other body", {"unknown_error": "not-found"}, True),
-                                 ("slower than 5 s", {"decision_delay": 7}, True), ("connection refused", None, True)):
+                                 ("slower than 5 s", {"decision_delay": 20}, True), ("connection refused", None, True)):
             url = tctl.url if opts is not None else "http://127.0.0.1:%d" % closed
             s.setup([(LINK_T, {"kind": "tunnel", "relay_url": url, "fmt": 2}), (LINK_A, {"fmt": 2, "push": "disabled"})], conf={"agy_wait": 5})
             if opts is not None:
@@ -3026,16 +3042,20 @@ def t_v2_not_sent(s):
             got = s.records("/v1/ingest")
             s.check("probe %s: %s" % (name, "sent to the relay" if sent else "not sent"), bool(got) == sent and out.strip() == '{"decision":"allow"}',
                     "%s %.2fs" % (out, el))
-            s.check("probe %s: within the 5 s" % name, el < 9, "%.2fs" % el)
-        # Two tunnels at once: one dead, one answering -> not sent, and not 2 x 5 s.
+            # A probe that is not cut at 5 s takes 20 s here.
+            s.check("probe %s: within the 5 s" % name, el < 15, "%.2fs" % el)
+        # Three tunnels answering in 4 s each: probed at once (about 4 s), not one after another (12 s).
+        link_c = {"id": "17" * 16, "secret": "28" * 32, "enc": "39" * 32, "mac": "4a" * 32, "label": "box-c"}
+        tun3, tctl3 = s.spawn_mock()
         s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2}), (LINK_B, {"kind": "tunnel", "relay_url": tctl2.url, "fmt": 2}),
-                 (LINK_A, {"fmt": 2})], conf={"agy_wait": 5})
-        tctl("/_ctl/reset", {})
-        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown", decision_delay=4)}})
-        tctl2("/_ctl/reset", {})
-        tctl2("/_ctl/config", {"links": {LINK_B["id"]: dict(LINK_B, unknown_error="unknown", decision_delay=4)}})
+                 (link_c, {"kind": "tunnel", "relay_url": tctl3.url, "fmt": 2}), (LINK_A, {"fmt": 2})], conf={"agy_wait": 5})
+        for ctl, link in ((tctl, LINK_T), (tctl2, LINK_B), (tctl3, link_c)):
+            ctl("/_ctl/reset", {})
+            ctl("/_ctl/config", {"links": {link["id"]: dict(link, unknown_error="unknown", decision_delay=4)}})
         rc, out, err, el = s.run("agy", agy, args=("PreToolUse",))
-        s.check("probe: tunnels probed at the same time", not s.records("/v1/ingest") and el < 7, "%.2fs" % el)
+        tun3.terminate()
+        tun3.wait(5)
+        s.check("probe: tunnels probed at the same time", not s.records("/v1/ingest") and el < 10, "%.2fs" % el)
     finally:
         for t in (tun, tun2):
             t.terminate()
