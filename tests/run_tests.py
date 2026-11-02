@@ -1393,14 +1393,16 @@ def t_small_audit_fixes(s):
     s.check("AskUserQuestion: the badge still says waiting for the repeat", seqs(out) == "\x1b]9;simpleterm:state=waiting\x07", repr(out))
 
     # Gemini CLI: AfterAgent with "[no response text]" is an API error, a cancel or a loop, not a finished answer.
-    s.ctl("/_ctl/reset", {})
-    base = {"session_id": "gm9", "cwd": "/w/site", "hook_event_name": "AfterAgent", "prompt": "refactor x", "stop_hook_active": False}
-    s.run("gemini", json.dumps(dict(base, prompt_response="[no response text]")))
-    rec = wait_for(lambda: ingests(s), 20)
-    s.check("gemini: no response text -> error, not done", rec and rec[0]["body"]["ev"] == "error" and not ingests(s, "done"), str(ingests(s))[:300])
-    s.ctl("/_ctl/reset", {})
-    s.run("gemini", json.dumps(dict(base, prompt_response="Refactored.")))
-    s.check("gemini: an answer -> done", wait_for(lambda: ingests(s, "done"), 20))
+    # (Gemini CLI runs the sh hook only; the PowerShell hook has no gemini agent.)
+    if s.kind != "ps1":
+        s.ctl("/_ctl/reset", {})
+        base = {"session_id": "gm9", "cwd": "/w/site", "hook_event_name": "AfterAgent", "prompt": "refactor x", "stop_hook_active": False}
+        s.run("gemini", json.dumps(dict(base, prompt_response="[no response text]")))
+        rec = wait_for(lambda: ingests(s), 20)
+        s.check("gemini: no response text -> error, not done", rec and rec[0]["body"]["ev"] == "error" and not ingests(s, "done"), str(ingests(s))[:300])
+        s.ctl("/_ctl/reset", {})
+        s.run("gemini", json.dumps(dict(base, prompt_response="Refactored.")))
+        s.check("gemini: an answer -> done", wait_for(lambda: ingests(s, "done"), 20))
 
     # Claude Code: agent_needs_input is another background session's: the alert, but this tab's badge stays.
     s.ctl("/_ctl/reset", {})
