@@ -2875,14 +2875,23 @@ def t_v2_n10(s):
     s.check("N10 a fmt-less link: deny_reason was not offered there -> nothing", out.strip() == "", out)
     # The decision is there and the agent moved on just before it is printed (section 5.5-6): the
     # terminal's note lands while the hook sleeps between its looks, right after the poll's result.
-    s.setup([(LINK_A, {"fmt": 2, "decision": "allow", "after": 2, "dext": {"act": "allow"}})], conf={"claude_wait": 12})
-    p = s.start("claude", v2_perm(session="sess-race"))
-    run = s.home / ".simpleterm" / "run"
-    dec = wait_for(lambda: [f for f in run.glob("rq.*.dec")], 15, 0.005)
-    with open(run / "sess-race.res", "a") as f:
-        f.write("%d turn -\n" % int(time.time() + 1))
-    rc, out, err, el = s.finish(p, 60)
-    s.check("N10 answered in the terminal after the decision came: nothing printed", dec and out.strip() == "", out)
+    # An attempt counts only if the hook had not taken the decision yet when the note was written
+    # (its result file still there); otherwise the hook was first and the attempt is repeated.
+    got = None
+    for attempt in range(6):
+        s.setup([(LINK_A, {"fmt": 2, "decision": "allow", "after": 2, "dext": {"act": "allow"}})], conf={"claude_wait": 30})
+        p = s.start("claude", v2_perm(session="sess-race%d" % attempt))
+        run = s.home / ".simpleterm" / "run"
+        dec = wait_for(lambda: [f for f in run.glob("rq.*.dec")], 30, 0.005)
+        with open(run / ("sess-race%d.res" % attempt), "a") as f:
+            f.write("%d turn -\n" % int(time.time() + 1))
+        first = bool(dec) and any(f.exists() for f in dec)
+        rc, out, err, el = s.finish(p, 60)
+        if first:
+            got = out
+            break
+    s.check("N10 answered in the terminal after the decision came: nothing printed", got is not None and got.strip() == "",
+            "no attempt where the note came first" if got is None else got)
     # Answered in the terminal first (a prompt or the tool ran): the late decision is not applied.
     s.setup([(LINK_A, {"fmt": 2, "decision": "allow", "after": 4, "dext": {"act": "allow"}})], conf={"claude_wait": 12})
     p = s.start("claude", v2_perm(session="sess-n10"))
@@ -2896,8 +2905,6 @@ def t_v2_link_results(s):
     """Section 5.5 link results: a dropped decision ends only that link's wait; a v2 tunnel hears it at
     once (resolved, scope link) and gets the request again under a new rid, 3 times at most; an older
     tunnel neither. Section 5.6: the request-level result names the last rid each tunnel got."""
-    if s.kind == "ps1" and False:
-        return
     tun, tctl = s.spawn_mock()
     try:
         def setup(tunnel_opts, relay_opts, fmt=2, conf=None):
@@ -2926,7 +2933,8 @@ def t_v2_link_results(s):
         s.check("link result: request-level resolved (applied) names the last rid", req and req[0]["out"] == "applied"
                 and req[0]["rrid"] == rids[1] and req[0].get("act") == "allow", str(res))
         # The tunnel keeps failing: 3 resends at most, and the relay's wait goes on to its decision.
-        setup({"decisions": [dict(bad) for _ in range(6)]}, {"decision": "deny", "after": 7})
+        # (The relay decides late enough for all three resends, also on a loaded machine.)
+        setup({"decisions": [dict(bad) for _ in range(6)]}, {"decision": "deny", "after": 15}, conf={"claude_wait": 40})
         rc, out, err, el = s.run("claude", v2_perm(session="lr2"))
         s.check("link results: the relay's decision still applies", behavior(out).get("behavior") == "deny", out + s.log_text()[-300:])
         wait_for(lambda: len(tun_ingests("resolved")) >= 5, 10)
@@ -3110,7 +3118,8 @@ def t_v2_sessions(s):
     j = json.loads(rec.read_text()) if rec.exists() else {}
     s.check("session: record on a prompt", j.get("sid") == sid and j.get("state") == "running" and j.get("last_prompt") == "Run the tests"
             and j.get("dir") == "/home/me/api" and j.get("pm") == "acceptEdits" and j.get("title") == "Run the tests" and j.get("title_src") == "prompt", str(j))
-    s.check("session: modes 700/600", oct(sd.stat().st_mode & 0o777) == "0o700" and oct(rec.stat().st_mode & 0o777) == "0o600")
+    if s.kind != "ps1":  # Unix modes; the PowerShell hook runs on Windows (as in t_log)
+        s.check("session: modes 700/600", oct(sd.stat().st_mode & 0o777) == "0o700" and oct(rec.stat().st_mode & 0o777) == "0o600")
     old = time.time() - 20
     os.utime(beat, (old, old))
     s.run("claude", ev("PostToolUse", tool_name="Bash", tool_input={"command": "ls"}), env)
