@@ -36,7 +36,7 @@ if ($ScriptArgs.Count -gt 1) { $Mode = [string]$ScriptArgs[1] }
 $MaxInput = 262144
 $MaxLinks = 16
 # The plugin release of this script (the manifests carry the same).
-$HookVersion = '0.3.2'
+$HookVersion = '0.4.0'
 # Bumped when the ~/.simpleterm/bin/simpleterm.cmd wrapper must be rewritten.
 $CliRev = 2
 $Inv = [Globalization.CultureInfo]::InvariantCulture
