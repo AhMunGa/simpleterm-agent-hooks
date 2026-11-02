@@ -1,0 +1,19 @@
+{
+  "name": "simpleterm-copilot",
+  "version": "0.3.2",
+  "description": "SimpleTerm agent hooks for GitHub Copilot CLI: alerts in the SimpleTerm app when Copilot waits for you, finishes or fails",
+  "author": {
+    "name": "AhMunGa",
+    "url": "https://github.com/AhMunGa"
+  },
+  "homepage": "https://github.com/AhMunGa/simpleterm-agent-hooks",
+  "repository": "https://github.com/AhMunGa/simpleterm-agent-hooks",
+  "license": "MIT",
+  "keywords": [
+    "simpleterm",
+    "ssh",
+    "notifications",
+    "hooks"
+  ],
+  "hooks": "hooks.json"
+}

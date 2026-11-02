@@ -1,7 +1,10 @@
 #!/bin/sh
-# SimpleTerm agent hook v1 (POSIX sh), part of the simpleterm-agent-hooks
-# plugin; see README.md and docs/tech_specs/TDS_AGENT_ALERTS.md (sections 5
-# and 6) of the SimpleTerm app for the contract.
+# SimpleTerm agent hook (POSIX sh), part of the simpleterm-agent-hooks
+# plugin; see README.md and, in the SimpleTerm app repository,
+# docs/tech_specs/TDS_AGENT_ALERTS.md (sections 5 and 6: relay protocol v1,
+# hooks, SSH tunnel) and docs/tech_specs/TDS_AGENT_EVENTS_V2.md (event and
+# decision format v2: request contents, decision lists, decision extensions,
+# results, states, session records) for the contract.
 #
 #   sh agent-hook.sh claude          Claude Code hook (event JSON on stdin). Run
 #                                    by Grok Build (GROK_HOOK_EVENT set) it acts
@@ -15,10 +18,13 @@
 #   sh agent-hook.sh grok            Grok Build hook (event JSON on stdin)
 #   sh agent-hook.sh opencode        OpenCode, from the plugin's bridge
 #                                    (Claude-shaped event JSON on stdin)
+#   sh agent-hook.sh copilot EVENT   GitHub Copilot CLI hook (event JSON on
+#                                    stdin; the event is not in it)
 #   sh agent-hook.sh notify T [B]    `simpleterm notify` (simpleterm-notify.sh)
 #
 # Turns agent events into end-to-end encrypted relay events and, for
-# permission requests, waits for a decision made on a SimpleTerm device.
+# permission requests, questions and plans, waits for a decision made on a
+# SimpleTerm device.
 # Needs curl and openssl; without them it does nothing. It never evaluates
 # its input, prints only agent-defined JSON on stdout, and always exits 0.
 # Anything that goes wrong leaves the agent's own terminal prompt in charge.
@@ -218,6 +224,13 @@ function hexv(h,   k, v, c) {
   print out
 }'
 
+# MSG (v1, cut) and MSGF (whole: the v2 builder cuts it and records the
+# cut, TDS_AGENT_EVENTS_V2 section 2.2) from JSON-escaped text.
+setmsg() {
+  MSGF=$1
+  MSG=$(json_trim "$1" 200 800)
+}
+
 json_trim() { # value maxu maxb [mode]
   printf '%s\n' "$1" | awk -v maxu="$2" -v maxb="$3" -v mode="${4:-}" "$JSON_TRIM" 2>/dev/null
 }
@@ -338,7 +351,7 @@ seal() {
 
 # Loads one link file into L_*; returns 1 if it is unusable.
 load_link() { # file
-  L_FILE=$1 L_RELAY='' L_LINK='' L_SECRET='' L_ENC='' L_MAC='' L_LABEL='' L_V='' L_KIND=''
+  L_FILE=$1 L_RELAY='' L_LINK='' L_SECRET='' L_ENC='' L_MAC='' L_LABEL='' L_V='' L_KIND='' L_FMT=''
   [ -f "$1" ] || return 1
   size=$(wc -c <"$1" 2>/dev/null) || return 1
   [ "${size:-99999}" -le 4096 ] 2>/dev/null || { log "link-skip too-large"; return 1; }
@@ -354,12 +367,16 @@ load_link() { # file
       mac=*) L_MAC=${line#mac=} ;;
       label=*) L_LABEL=${line#label=} ;;
       kind=*) L_KIND=${line#kind=} ;;
+      fmt=*) L_FMT=${line#fmt=} ;;
     esac
   done <"$1"
   [ "$L_V" = 1 ] || { log "link-skip version"; return 1; }
   # kind=tunnel: the app's end of its SSH connection, forwarded to a loopback
   # port for as long as that connection lives (TDS section 6.5).
   [ "$L_KIND" = tunnel ] || L_KIND=''
+  # fmt=2: the receiver takes decision extensions and decidable questions
+  # (TDS_AGENT_EVENTS_V2 section 1.2). Anything else is an older receiver.
+  [ "$L_FMT" = 2 ] || L_FMT=''
   is_hex "$L_LINK" 32 && is_hex "$L_SECRET" 64 && is_hex "$L_ENC" 64 && is_hex "$L_MAC" 64 ||
     { log "link-skip fields"; return 1; }
   L_RELAY=${L_RELAY%/}
@@ -420,9 +437,15 @@ resp_get() { # file wanted-paths
 
 # --- event payload ---------------------------------------------------------
 
-# Builds the section 5.2 plaintext for the loaded link. `usage` carries
-# USAGE_JSON instead of a message; `notify` adds a title.
+# Builds the plaintext for the loaded link: the section 5.2 (v1) fields
+# only for notify, usage and test; the v2 fields (TDS_AGENT_EVENTS_V2) too
+# for every other event once V2=1 (SPEC). `usage` carries USAGE_JSON instead
+# of a message; `notify` adds a title.
 plaintext() { # rid ev nonce
+  case $2 in
+    notify | usage | test) ;;
+    *) if [ "$V2" = 1 ]; then v2_plain "$@"; return; fi ;;
+  esac
   host=$(json_text "$L_LABEL" 64 256)
   p='{"v":1,"rid":"'$1'","ev":"'$2'","app":"'$APP'","host":"'$host'","cwd":"'$CWD_BASE'"'
   case $2 in
@@ -436,30 +459,50 @@ plaintext() { # rid ev nonce
   printf '%s,"ts":%s}' "$p" "$TS"
 }
 
-# Sends one event to one link; prints the push result or an error code.
-ingest_one() { # rid ev nonce outfile
+# Sends one event to one link; prints "<push result or http<code>> <http
+# code> <error code or ->". ING_MT caps the relay's time (the tunnel's is 5).
+ingest_raw() { # rid ev nonce outfile
   nh=''
   [ -n "$3" ] && nh=$(sha256_hex "$3")
-  seal "$(plaintext "$1" "$2" "$3")" || { log "seal-failed link=$(printf %.8s "$L_LINK")"; return 1; }
+  pt=$(plaintext "$1" "$2" "$3")
+  # Test only: the plaintext before it is sealed, to compare the sh and the
+  # PowerShell hook byte for byte (TDS_AGENT_EVENTS_V2 section 2.2): one
+  # file per event and link in directory SIMPLETERM_HOOK_TEST_PLAIN.
+  [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ -n "${SIMPLETERM_HOOK_TEST_PLAIN:-}" ] && [ -d "$SIMPLETERM_HOOK_TEST_PLAIN" ] &&
+    printf '%s' "$pt" >"$SIMPLETERM_HOOK_TEST_PLAIN/$(printf %.8s "$L_LINK").$2.$1.$$"
+  if [ -z "$pt" ] || ! seal "$pt"; then
+    log "seal-failed link=$(printf %.8s "$L_LINK")"
+    printf 'seal 000 -'
+    return 1
+  fi
   body='{"v":1,"rid":"'$1'","ev":"'$2'"'
   [ -n "$nh" ] && body=$body',"nh":"'$nh'"'
   body=$body',"env":'$ENV_JSON'}'
   # A tunnel answers at once or not at all (a dead port may belong to
   # something else by now); the relay may hold the request a few seconds.
-  mt=20
-  [ "$L_KIND" = tunnel ] && mt=5
+  mt=${ING_MT:-20}
+  is_uint "$mt" && [ "$mt" -ge 1 ] || mt=1
+  [ "$mt" -le 20 ] || mt=20
+  [ "$L_KIND" = tunnel ] && [ "$mt" -gt 5 ] && mt=5
   code=$(http POST /v1/ingest "$body" "$mt" "$4")
-  push=''
+  push='' err=''
   case $code in
-    200)
-      push=$(resp_get "$4" push | sed -n 's/^push=//p')
-      ;;
+    200) push=$(resp_get "$4" push | sed -n 's/^push=//p' | tr -cd 'a-z-') ;;
     410) printf '' 2>/dev/null >"$RUN_DIR/$L_LINK.revoked" ;;
+    400) err=$(resp_get "$4" error | sed -n 's/^error=//p' | tr -cd 'a-zA-Z-') ;;
   esac
   rm -f "$4"
   log "ingest ev=$2 link=$(printf %.8s "$L_LINK") http=$code push=${push:--}"
-  printf '%s' "${push:-http$code}"
+  printf '%s %s %s' "${push:-http$code}" "$code" "${err:--}"
   [ "$code" = 200 ]
+}
+
+# Sends one event to one link; prints the push result or an error code.
+ingest_one() { # rid ev nonce outfile
+  io=$(ingest_raw "$@")
+  ior=$?
+  printf '%s' "${io%% *}"
+  return $ior
 }
 
 # Sends event $1 to every link in the background and returns at once.
@@ -471,6 +514,9 @@ send_bg() { # ev [rid] [all|tunnel|relay] [file text]
   [ -n "$LINKS" ] || return 0
   sb_rid=${2:-$RID}
   sb_scope=${3:-all}
+  # One rid per event: a receiver shows a rid once (send_state takes a new
+  # one when this run's rid went out already).
+  [ "$sb_rid" = "$RID" ] && RID_USED=1
   sb_file=${4:-} sb_text=${5:-}
   [ -n "$sb_rid" ] || return 0
   # Ignored before the fork, so the sender also outlives a terminal that
@@ -482,12 +528,1197 @@ send_bg() { # ev [rid] [all|tunnel|relay] [file text]
       printf '%s\n' "$LINKS" | while IFS= read -r f; do
         load_link "$f" || continue
         if [ "$L_KIND" = tunnel ]; then [ "$pass" = tunnel ] || continue; else [ "$pass" = relay ] || continue; fi
-        ingest_one "$sb_rid" "$1" '' "$RUN_DIR/ing.$$.$sb_rid.$(printf %.8s "$L_LINK")" >/dev/null &&
+        ingest_one "$sb_rid" "$1" '' "$RUN_DIR/ing.$$.$sb_rid.$1.$(printf %.8s "$L_LINK")" >/dev/null &&
           [ -n "$sb_file" ] && printf '%s\n' "$sb_text" >"$sb_file" 2>/dev/null
       done
     done
     trim_log
   ) </dev/null >/dev/null 2>&1 &
+}
+
+# --- event format v2 (TDS_AGENT_EVENTS_V2) ---------------------------------------
+
+TAB=$(printf '\t')
+NL='
+'
+# Normalizing and cutting JSON-escaped text (section 2.2), shared by the
+# programs below; CTRLRE is set in their BEGIN.
+NORM_FN='
+function nhex(h,   k, v, c) {
+  v = 0; h = tolower(h)
+  if (length(h) != 4) return -1
+  for (k = 1; k <= 4; k++) {
+    c = index("0123456789abcdef", substr(h, k, 1))
+    if (c == 0) return -1
+    v = v * 16 + c - 1
+  }
+  return v
+}
+# JSON-escaped string content s, normalized (TDS_AGENT_EVENTS_V2 section
+# 2.2): escapes stay as received; control characters and the escapes that
+# stand for them become a space (keepnl keeps \n, \t, \u000a and \u0009);
+# lone surrogates and bytes that are not UTF-8 become a space; a broken
+# escape ends the text. In 512-byte pieces, so that long values stay linear
+# in awks that measure a string on every substr().
+function jnorm(s, keepnl,   n, pos, buf, out, co, i, bl, lim, c, e, v, v2, unit, step, w, ok, j, x, stop) {
+  n = length(s)
+  if (n == 0) return ""
+  pos = 1; buf = ""; out = ""; stop = 0
+  while (!stop && (pos <= n || buf != "")) {
+    if (pos <= n) { buf = buf substr(s, pos, 512); pos += 512 }
+    bl = length(buf); i = 1; co = ""
+    lim = (pos > n) ? bl : bl - 12
+    while (i <= lim) {
+      c = substr(buf, i, 1); step = 1; unit = c
+      if (c == "\\") {
+        e = substr(buf, i + 1, 1); step = 2
+        if (e == "u") {
+          v = nhex(substr(buf, i + 2, 4))
+          if (v < 0) { stop = 1; break }
+          unit = substr(buf, i, 6); step = 6
+          if (v >= 55296 && v <= 56319) {
+            v2 = -1
+            if (substr(buf, i + 6, 2) == "\\u") v2 = nhex(substr(buf, i + 8, 4))
+            if (v2 >= 56320 && v2 <= 57343) { unit = substr(buf, i, 12); step = 12 }
+            else unit = " "
+          } else if (v >= 56320 && v <= 57343) unit = " "
+          else if (keepnl && (v == 10 || v == 9)) unit = unit
+          else if (v < 32 || (v >= 127 && v <= 159) || v == 8232 || v == 8233) unit = " "
+        } else if (e == "\"" || e == "\\" || e == "/") unit = c e
+        else if (keepnl && (e == "n" || e == "t")) unit = c e
+        else if (e == "") { stop = 1; break }
+        else unit = " "
+      } else if (c >= "\300") {
+        w = 0
+        if (c < "\340") w = 2; else if (c < "\360") w = 3; else if (c < "\370") w = 4
+        ok = (w > 0)
+        for (j = 1; ok && j < w; j++) {
+          x = substr(buf, i + j, 1)
+          if (x < "\200" || x >= "\300") ok = 0
+        }
+        if (ok) {
+          unit = substr(buf, i, w); step = w
+          if (c == "\302" && substr(unit, 2, 1) < "\240") unit = " "
+        } else unit = " "
+      } else if (c < " " || c >= "\177") unit = " "
+      co = co unit; i += step
+    }
+    out = out co
+    buf = substr(buf, i)
+  }
+  return out
+}
+# The longest start of normalized content s with at most maxu units (an
+# escape, a surrogate pair escape or a UTF-8 character is one) and maxb
+# bytes, never splitting a unit.
+function ucut(s, maxu, maxb,   n, pos, buf, out, co, i, bl, lim, c, step, u, b, done) {
+  n = length(s)
+  if (n <= maxb && n <= maxu) return s
+  pos = 1; buf = ""; out = ""; u = 0; b = 0; done = 0
+  while (!done && (pos <= n || buf != "")) {
+    if (pos <= n) { buf = buf substr(s, pos, 512); pos += 512 }
+    bl = length(buf); i = 1; co = ""
+    lim = (pos > n) ? bl : bl - 12
+    while (i <= lim) {
+      c = substr(buf, i, 1)
+      if (c == "\\") {
+        step = 2
+        if (substr(buf, i + 1, 1) == "u") {
+          step = 6
+          c = nhex(substr(buf, i + 2, 4))
+          if (c >= 55296 && c <= 56319) step = 12
+        }
+      } else if (c >= "\360") step = 4
+      else if (c >= "\340") step = 3
+      else if (c >= "\300") step = 2
+      else step = 1
+      if (u + 1 > maxu || b + step > maxb) { done = 1; break }
+      co = co substr(buf, i, step); u++; b += step; i += step
+    }
+    out = out co
+    if (done) break
+    buf = substr(buf, i)
+  }
+  return out
+}
+# Raw text as the content of a JSON string: \ and " escaped, control
+# characters (tab and line breaks too) as spaces. In pieces, as jnorm.
+function jesc(t,   n, pos, out, co, piece, k, c) {
+  n = length(t); pos = 1; out = ""
+  while (pos <= n) {
+    piece = substr(t, pos, 512); pos += 512
+    gsub(CTRLRE, " ", piece)
+    co = ""
+    while ((k = match(piece, /[\\"]/)) > 0) {
+      c = substr(piece, k, 1)
+      co = co substr(piece, 1, k - 1) "\\" c
+      piece = substr(piece, k + 1)
+    }
+    out = out co piece
+  }
+  return out
+}
+'
+
+# Facts of the agent's event JSON (stdin), one line per scalar:
+# `path TAB s|r TAB value` (strings JSON-escaped as received, never decoded),
+# and for a few containers (tool_input and the like) `path TAB j TAB text`:
+# the container's own text as the content of a JSON string (\ and " escaped,
+# control characters as spaces). With rawp set, only that container's text,
+# raw (control characters as spaces), for an answer that hands it back.
+JSON_FACTS='
+function fpath(   d, p) {
+  p = ""
+  for (d = 1; d <= JD; d++) p = p (d > 1 ? "." : "") JK[d]
+  return p
+}
+function femit(p, t, v) {
+  if (FN_OUT >= 20000) return
+  FN_OUT++
+  if (t == "s") gsub(CTRLRE, " ", v)
+  printf "%s\t%s\t%s\n", p, t, v
+}
+function fspan(p) { return (p in SPANW) || p ~ /^permission_suggestions\.[0-9]+$/ }
+BEGIN {
+  CTRLRE = "[" sprintf("%c", 1) "-" sprintf("%c", 31) sprintf("%c", 127) "]"
+  n = split("tool_input,tool_input.questions,requested_schema,toolCall.args.Arguments,toolInput,toolArgs", W, ",")
+  for (k = 1; k <= n; k++) SPANW[W[k]] = 1
+  if (rawp != "") { split("", SPANW); SPANW[rawp] = 1 }
+}
+{ s = s $0 "\n" }
+END {
+  len = length(s); i = 1; JD = 0
+  while (i <= len) {
+    c = substr(s, i, 1)
+    if (c == " " || c == "\t" || c == "\n" || c == "\r") { i++; continue }
+    if (c == ",") {
+      if (JD > 0) { if (JT[JD] == "a") JK[JD]++; else JE[JD] = 1 }
+      i++; continue
+    }
+    if (c == ":") { if (JD > 0) JE[JD] = 0; i++; continue }
+    if (c == "{" || c == "[") {
+      p = (JD > 0) ? fpath() : ""
+      JD++
+      if (c == "{") { JT[JD] = "o"; JK[JD] = ""; JE[JD] = 1 }
+      else { JT[JD] = "a"; JK[JD] = 0; JE[JD] = 0 }
+      SPS[JD] = 0
+      if (p != "" && fspan(p)) { SPS[JD] = i; SPP[JD] = p }
+      i++; continue
+    }
+    if (c == "}" || c == "]") {
+      if (JD > 0) {
+        if (SPS[JD] > 0 && rawp != "" && SPP[JD] == rawp) {
+          t = substr(s, SPS[JD], i - SPS[JD] + 1)
+          gsub(CTRLRE, " ", t)
+          print t
+          exit
+        }
+        if (SPS[JD] > 0 && rawp == "") femit(SPP[JD], "j", jesc(substr(s, SPS[JD], i - SPS[JD] + 1)))
+        SPS[JD] = 0
+        JD--
+      }
+      i++; continue
+    }
+    if (c == "\"") {
+      j = i + 1
+      while (j <= len) {
+        seg = substr(s, j, 512)
+        m = match(seg, /["\\]/)
+        if (m == 0) { j += length(seg); continue }
+        j += m - 1
+        if (substr(s, j, 1) == "\\") { j += 2; continue }
+        break
+      }
+      if (j > len) break
+      str = substr(s, i + 1, j - i - 1)
+      i = j + 1
+      if (JD > 0 && JT[JD] == "o" && JE[JD]) { JK[JD] = str; continue }
+      if (JD > 0 && rawp == "") femit(fpath(), "s", str)
+      continue
+    }
+    j = i
+    while (j <= len && index(" \t\r\n,:}]", substr(s, j, 1)) == 0) j++
+    if (JD > 0 && rawp == "") femit(fpath(), "r", substr(s, i, j - i))
+    i = j
+  }
+}
+'
+
+# The v2 fields of an event (section 3) as spec lines `path TAB o|a|s|r TAB
+# value`, from the facts and `@.<key>` parameters (strings, JSON-escaped):
+# common fields, the request (section 4; rkind names how this agent asked),
+# the end of a turn (section 6.1), a state (6.2) or a result (5.6). Lines
+# starting with # are notes for the waiting hook (#smap: the original index
+# of each Claude scope).
+V2_SPEC='
+function fs(p) { return (p in FT && FT[p] != "r") ? FV[p] : "" }
+function fr(p) { return (p in FT && FT[p] == "r" && FV[p] != "null") ? FV[p] : "" }
+function P(k) { return fs("@." k) }
+function out(p, t, v) { printf "%s\t%s\t%s\n", p, t, v }
+function S(p, v, keep) { if (v != "") out(p, "s", jnorm(v, keep)) }
+function R(p, v) { if (v != "") out(p, "r", v) }
+function B(p, v) { if (v == "true" || v == "false") out(p, "r", v) }
+function O(p) { out(p, "o", "") }
+function A(p) { out(p, "a", "") }
+function isid(v) { return v ~ /^[A-Za-z0-9._:-]+$/ && length(v) <= 128 }
+# The first non-empty string fact among the comma list of paths.
+function first(list,   L, n, k) {
+  n = split(list, L, ",")
+  for (k = 1; k <= n; k++) if (fs(L[k]) != "") return fs(L[k])
+  return ""
+}
+# A list of decision ids as a JSON array: CAN (space list) at path p.
+function ids(p, list,   L, n, k, m) {
+  n = split(list, L, " ")
+  if (n == 0) return
+  A(p); m = 0
+  for (k = 1; k <= n; k++) out(p "." m++, "s", L[k])
+}
+function inlist(list, v) { return index(" " list " ", " " v " ") > 0 }
+
+# --- asks -----------------------------------------------------------------
+function ask_shell(cmd, desc) { O("req.ask"); S("req.ask.cmd", cmd, 1); S("req.ask.desc", desc, 1) }
+function ask_path(p) { O("req.ask"); S("req.ask.path", p, 1) }
+function ask_web(url, prompt) { O("req.ask"); S("req.ask.url", url, 1); S("req.ask.prompt", prompt, 1) }
+function ask_mcp(server, tool, args) { O("req.ask"); S("req.ask.server", server, 1); S("req.ask.tool", tool, 1); S("req.ask.args", args, 0) }
+function ask_text(t) { if (t == "") return; O("req.ask"); S("req.ask.text", t, 1) }
+# mcp__<server>__<tool> (Claude, Codex) or <server>__<tool> (Grok): MS, MT.
+function mcp_split(name, pre,   r) {
+  MS = ""; MT = ""
+  r = substr(name, length(pre) + 1)
+  if (index(r, "__") == 0) return 0
+  MS = substr(r, 1, index(r, "__") - 1); MT = substr(r, index(r, "__") + 2)
+  return MS != "" && MT != ""
+}
+# Questions under prefix qp (qp.N...), with the field names of the agent.
+function ask_qs(qp, fq, fh, fm, fopt, fl, fd, free, multitrue,   n, k, m, l, base, ob) {
+  O("req.ask"); A("req.ask.qs"); n = 0
+  for (k = 0; k < 64; k++) {
+    base = qp "." k
+    if (!((base "." fq) in FT) && !((base "." fh) in FT) && !((base "." fopt ".0." fl) in FT) && !((base "." fopt ".0") in FT)) break
+    O("req.ask.qs." n)
+    S("req.ask.qs." n ".q", fs(base "." fq), 1)
+    S("req.ask.qs." n ".h", fs(base "." fh), 1)
+    m = fr(base "." fm)
+    if (m == "" && multitrue != "" && fs(base "." fm) == multitrue) m = "true"
+    out("req.ask.qs." n ".multi", "r", m == "true" ? "true" : "false")
+    out("req.ask.qs." n ".free", "r", free ? "true" : (fr(base ".custom") == "true" ? "true" : "false"))
+    A("req.ask.qs." n ".opts")
+    for (m = 0; m < 64; m++) {
+      ob = base "." fopt "." m
+      if (fl != "" && (ob "." fl) in FT) l = fs(ob "." fl)
+      else if (ob in FT) l = fs(ob)
+      else break
+      O("req.ask.qs." n ".opts." m)
+      S("req.ask.qs." n ".opts." m ".l", l, 1)
+      if (fl != "") S("req.ask.qs." n ".opts." m ".d", fs(ob "." fd), 1)
+    }
+    n++
+  }
+  NQ = n
+}
+# Codex apply_patch: the files it touches, lines added and removed.
+function ask_codex_patch(t,   L, n, k, x, files, nf, add, del, path) {
+  O("req.ask"); n = split(t, L, /\\n/); nf = 0; add = 0; del = 0; path = ""
+  for (k = 1; k <= n; k++) {
+    x = L[k]
+    if (x ~ /^\*\*\* (Add|Update|Delete) File: /) {
+      sub(/^\*\*\* (Add|Update|Delete) File: /, "", x)
+      if (path == "") path = x
+      files[++nf] = x
+    } else if (x ~ /^\+/ && x !~ /^\+\+\+/) add++
+    else if (x ~ /^-/ && x !~ /^---/) del++
+  }
+  S("req.ask.path", path, 1)
+  if (nf > 1) { A("req.ask.files"); for (k = 1; k <= nf; k++) S("req.ask.files." (k - 1), files[k], 1) }
+  O("req.ask.change"); out("req.ask.change.form", "s", "patch"); out("req.ask.change.fmt", "s", "codex")
+  S("req.ask.change.text", t, 1)
+  out("req.ask.add", "r", add); out("req.ask.del", "r", del)
+}
+function change_replace(old, new, all) {
+  O("req.ask.change"); out("req.ask.change.form", "s", "replace")
+  S("req.ask.change.old", old, 1); S("req.ask.change.new", new, 1); B("req.ask.change.all", all)
+}
+function change_write(content) { O("req.ask.change"); out("req.ask.change.form", "s", "write"); S("req.ask.change.content", content, 1) }
+function change_patch(text) { if (text == "") return; O("req.ask.change"); out("req.ask.change.form", "s", "patch"); out("req.ask.change.fmt", "s", "unified"); S("req.ask.change.text", text, 1) }
+
+# Claude permission_suggestions -> scopes (addDirectories left out: undoing
+# it does not stop the next redirect from asking). SMAP: original indexes.
+function claude_scopes(   k, j, t, lab, beh, n, x) {
+  n = 0; SMAP = ""
+  for (k = 0; k < 16; k++) {
+    if (!(("permission_suggestions." k ".type") in FT)) break
+    t = fs("permission_suggestions." k ".type"); beh = fs("permission_suggestions." k ".behavior")
+    if (t == "addDirectories" || t == "removeDirectories") continue
+    if ((t == "addRules" || t == "replaceRules") && beh != "" && beh != "allow") continue
+    lab = ""
+    if (t == "addRules" || t == "replaceRules") {
+      for (j = 0; j < 16; j++) {
+        x = fs("permission_suggestions." k ".rules." j ".toolName")
+        if (x == "") break
+        if (fs("permission_suggestions." k ".rules." j ".ruleContent") != "") x = x "(" fs("permission_suggestions." k ".rules." j ".ruleContent") ")"
+        lab = lab (lab == "" ? "" : ", ") x
+      }
+      SK[n] = "rule"
+    } else if (t == "setMode") { lab = fs("permission_suggestions." k ".mode"); SK[n] = "mode" }
+    else { lab = t; SK[n] = "other" }
+    if (lab == "") continue
+    SL[n] = lab; SD[n] = fs("permission_suggestions." k ".destination"); SMAP = SMAP " " k
+    n++
+  }
+  NS = n
+}
+function scopes(   k) {
+  if (NS == 0) return
+  A("req.scopes")
+  for (k = 0; k < NS; k++) {
+    O("req.scopes." k); S("req.scopes." k ".label", SL[k], 1); out("req.scopes." k ".kind", "s", SK[k]); S("req.scopes." k ".dest", SD[k], 1)
+  }
+}
+
+# --- requests ---------------------------------------------------------------
+function req(rk,   id, win, tool, wait, can, t, v, others, no, k, oc, aff) {
+  id = ""; win = "other"; tool = ""; wait = "shared"; can = ""; NS = 0; NQ = 0; SMAP = ""
+  rid = P("rid")
+  if (rk == "claude_perm" || rk == "claude_askpre") {
+    tool = fs("tool_name")
+    if (tool == "Bash") win = "shell"
+    else if (tool == "Edit" || tool == "Write" || tool == "MultiEdit") win = "edit"
+    else if (tool == "WebFetch") win = "web"
+    else if (tool ~ /^mcp__/ && mcp_split(tool, "mcp__")) win = "mcp"
+    else if (tool == "AskUserQuestion") win = "question"
+    else if (tool == "ExitPlanMode") win = "plan"
+    if (win == "question") can = "answer deny deny_reason"
+    else if (win == "plan") can = "plan_approve plan_refine deny"
+    else { claude_scopes(); can = "allow" (NS > 0 ? " allow_scope" : "") " deny deny_reason" }
+  } else if (rk == "claude_notif") {
+    t = P("ntype"); wait = "none"
+    win = (t == "elicitation_dialog") ? "form" : (t == "elicitation_url_dialog") ? "login" : "other"
+  } else if (rk == "codex_perm") {
+    tool = fs("tool_name"); wait = "hidden"
+    if (tool == "Bash") win = "shell"
+    else if (tool == "apply_patch") win = "edit"
+    else if (tool ~ /^mcp__/ && mcp_split(tool, "mcp__")) win = "mcp"
+    can = "allow deny deny_reason"
+  } else if (rk == "codex_plan") {
+    win = "plan"; wait = "none"
+  } else if (rk == "oc_perm") {
+    oc = P("oc"); tool = fs("tool_name")
+    if (isid(fs("request_id"))) id = fs("request_id")
+    if (tool == "bash" || tool == "shell") win = "shell"
+    else if (tool == "edit" || tool == "write") win = "edit"
+    no = 0; while (no < 64 && (("others." no) in FT)) no++
+    v = ""
+    for (k = 0; k < 64; k++) {
+      t = fs((oc == "2" ? "save." : "always.") k)
+      if (t == "") break
+      v = v (v == "" ? "" : " ") t
+    }
+    if (v != "") { NS = 1; SL[0] = v; SK[0] = "pattern"; SD[0] = (oc == "2") ? "project" : (oc == "1.0" ? "session" : "process") }
+    can = "allow" (NS ? " allow_scope" : "") " deny"
+    if (oc != "1.0" && !(oc == "1.19" && no > 0)) can = can " deny_reason"
+  } else if (rk == "oc_question") {
+    win = "question"; tool = "question"
+    if (isid(fs("request_id"))) id = fs("request_id")
+    can = "answer deny"
+  } else if (rk == "oc_form") {
+    win = "question"; tool = "question"; wait = "none"
+    if (isid(fs("request_id"))) id = fs("request_id")
+  } else if (rk == "agy_tool" || rk == "agy_ask") {
+    tool = fs("toolCall.name"); wait = (rk == "agy_ask") ? "none" : "hidden"
+    if (tool == "run_command") win = "shell"
+    else if (tool == "write_file" || tool == "edit_file") win = "edit"
+    else if (tool == "read_file") win = "read"
+    else if (tool == "call_mcp_tool") win = "mcp"
+    else if (tool == "ask_question") win = "question"
+    if (rk == "agy_tool") can = "allow deny deny_reason"
+  } else if (rk == "agy_plan") {
+    win = "plan"; tool = fs("plan.toolCall.name"); wait = P("wait")
+    can = "plan_approve"
+  } else if (rk == "cop_notif") {
+    wait = "none"; t = fs("message")
+    if (fs("notification_type") == "elicitation_dialog") win = "question"
+    else if (t ~ /^Run command: /) win = "shell"
+    else if (t ~ /^Edit file: /) win = "edit"
+    else if (t ~ /^Fetch URL: /) win = "web"
+    else if (t ~ /^Use MCP tool: /) win = "mcp"
+  } else if (rk == "cop_plan") {
+    win = "plan"; tool = fs("toolName"); wait = "none"
+  } else if (rk == "grok_notif") {
+    wait = "none"; tool = fs("pre.toolName")
+    if (isid(fs("pre.toolUseId"))) id = fs("pre.toolUseId")
+    t = P("ntype")
+    if (t == "plan" || tool == "exit_plan_mode") win = "plan"
+    else if (t == "elicitation_dialog" || tool == "ask_user_question") win = "question"
+    else if (tool == "run_terminal_command" || tool == "run_terminal_cmd" || tool == "Bash") win = "shell"
+    else if (tool == "write" || tool == "search_replace" || tool == "edit_file") win = "edit"
+    else if (tool == "web_fetch") win = "web"
+    else if (tool == "read_file") win = "read"
+    else if (tool != "" && mcp_split(tool, "")) win = "mcp"
+  }
+  if (id == "") id = "st-" rid
+  O("req")
+  out("req.id", "s", id)
+  t = (rk == "agy_tool" || rk == "agy_ask") ? fr("stepIdx") : (rk == "agy_plan") ? fr("plan.stepIdx") : ""
+  if (isid(t)) out("req.nid", "s", t)
+  out("req.win", "s", win)
+  S("req.tool", tool, 1)
+  out("req.wait", "s", wait)
+  # what is asked
+  if (rk == "claude_perm" || rk == "claude_askpre") {
+    if (win == "shell") ask_shell(fs("tool_input.command"), fs("tool_input.description"))
+    else if (win == "edit") {
+      ask_path(fs("tool_input.file_path"))
+      if (tool == "Edit") change_replace(fs("tool_input.old_string"), fs("tool_input.new_string"), fr("tool_input.replace_all"))
+      else if (tool == "Write") change_write(fs("tool_input.content"))
+    }
+    else if (win == "web") ask_web(fs("tool_input.url"), fs("tool_input.prompt"))
+    else if (win == "mcp") ask_mcp(MS, MT, fs("tool_input"))
+    else if (win == "question") ask_qs("tool_input.questions", "question", "header", "multiSelect", "options", "label", "description", 1, "")
+    else if (win == "plan") { O("req.ask"); S("req.ask.text", fs("tool_input.plan"), 1); S("req.ask.file", fs("tool_input.planFilePath"), 1) }
+    else ask_text(first("tool_input.description,tool_input.command,tool_input.file_path,tool_input.url,tool_input.prompt"))
+  } else if (rk == "claude_notif") {
+    t = fs("message")
+    if (win == "other") ask_text(t)
+    else if (t != "") { O("req.ask"); S("req.ask.msg", t, 1) }
+  } else if (rk == "codex_perm") {
+    if (win == "shell") ask_shell(fs("tool_input.command"), fs("tool_input.description"))
+    else if (win == "edit") ask_codex_patch(fs("tool_input.command"))
+    else if (win == "mcp") ask_mcp(MS, MT, fs("tool_input"))
+    else ask_text(first("tool_input.description,tool_input.command"))
+  } else if (rk == "codex_plan") ask_text(fs("@.plan"))
+  else if (rk == "oc_perm") {
+    if (win == "shell") ask_shell(first("metadata.command,tool_input.command"), "")
+    else if (win == "edit") {
+      O("req.ask"); S("req.ask.path", first("metadata.filepath,metadata.files.0.file,patterns.0,resources.0"), 1)
+      if (("metadata.files.1.file") in FT) { A("req.ask.files"); for (k = 0; k < 64 && (("metadata.files." k ".file") in FT); k++) S("req.ask.files." k, fs("metadata.files." k ".file"), 1) }
+      change_patch(first("metadata.diff,metadata.files.0.patch"))
+    } else ask_text(fs("tool_input.command"))
+  } else if (rk == "oc_question") ask_qs("questions", "question", "header", "multiple", "options", "label", "description", 1, "")
+  else if (rk == "oc_form") ask_qs("form.fields", "description", "title", "type", "options", "label", "description", 0, "multiselect")
+  else if (rk == "agy_tool" || rk == "agy_ask") {
+    if (win == "shell") ask_shell(fs("toolCall.args.CommandLine"), "")
+    else if (win == "edit") {
+      ask_path(fs("toolCall.args.Path"))
+      if (tool == "edit_file") change_replace(fs("toolCall.args.Target"), fs("toolCall.args.Replacement"), "")
+      else change_write(fs("toolCall.args.Content"))
+    }
+    else if (win == "read") ask_path(fs("toolCall.args.Path"))
+    else if (win == "mcp") ask_mcp(fs("toolCall.args.ServerName"), fs("toolCall.args.ToolName"), fs("toolCall.args.Arguments"))
+    else if (win == "question") ask_qs("toolCall.args.questions", "question", "header", "is_multi_select", "options", "label", "description", 0, "")
+  } else if (rk == "agy_plan") { O("req.ask"); S("req.ask.text", first("plan.toolCall.args.Content,plan.toolCall.args.ArtifactMetadata.Summary"), 1); S("req.ask.file", fs("plan.toolCall.args.Path"), 1) }
+  else if (rk == "cop_notif") {
+    t = fs("message")
+    if (win == "shell") ask_shell(substr(t, 14), "")
+    else if (win == "edit") ask_path(substr(t, 12))
+    else if (win == "web") ask_web(substr(t, 12), "")
+    else if (win == "mcp") {
+      v = substr(t, 15)
+      if (index(v, "/") > 0) ask_mcp(substr(v, 1, index(v, "/") - 1), substr(v, index(v, "/") + 1), "")
+      else ask_text(t)
+    }
+    else if (win == "question") {
+      v = fs("pre.toolArgs.message")
+      O("req.ask"); A("req.ask.qs"); O("req.ask.qs.0"); S("req.ask.qs.0.q", v != "" ? v : t, 1)
+      out("req.ask.qs.0.multi", "r", "false"); out("req.ask.qs.0.free", "r", "false"); A("req.ask.qs.0.opts"); NQ = 1
+    }
+    else ask_text(t)
+  } else if (rk == "cop_plan") ask_text(fs("toolArgs.summary"))
+  else if (rk == "grok_notif") {
+    if (win == "shell") ask_shell(fs("pre.toolInput.command"), fs("pre.toolInput.description"))
+    else if (win == "edit" || win == "read") ask_path(first("pre.toolInput.file_path,pre.toolInput.path,pre.toolInput.target_file"))
+    else if (win == "web") ask_web(fs("pre.toolInput.url"), fs("pre.toolInput.prompt"))
+    else if (win == "mcp") ask_mcp(MS, MT, fs("pre.toolInput"))
+    else if (win == "question" && (("pre.toolInput.questions.0.question") in FT)) ask_qs("pre.toolInput.questions", "question", "header", "multiSelect", "options", "label", "description", 0, "")
+    else ask_text(fs("message"))
+  }
+  # what may be decided (the full list; the builder narrows it per link)
+  ids("req.can", can)
+  scopes()
+  if (win == "plan" && rk == "claude_perm") { A("req.modes"); out("req.modes.0", "s", "default"); out("req.modes.1", "s", "accept_edits") }
+  if (rk == "oc_perm" && P("oc") != "1.0" && no > 0) {
+    aff = ""
+    if (inlist(can, "allow_scope")) aff = "allow_scope"
+    aff = aff (aff == "" ? "" : " ") "deny"
+    if (inlist(can, "deny_reason")) aff = aff " deny_reason"
+    ids("req.affects", aff)
+    A("req.others")
+    for (k = 0; k < no; k++) if (isid(fs("others." k))) out("req.others." k, "s", fs("others." k))
+  }
+  if (SMAP != "") out("#smap", "s", SMAP)
+}
+
+# --- the end of a turn -------------------------------------------------------
+function bgkind(t) {
+  if (t == "subagent" || t == "shell" || t == "monitor" || t == "workflow" || t == "teammate") return t
+  if (t == "cloud session") return "cloud"
+  if (t == "MCP task") return "mcp_task"
+  return "other"
+}
+function turn(   bp, cp, k, n, t, id, base) {
+  O("turn")
+  S("turn.end", P("end")); S("turn.by", P("by"))
+  B("turn.asks", P("asks"))
+  S("turn.last", P("last"), 1)
+  B("turn.late", P("late")); B("turn.hook", P("hook"))
+  bp = P("bgp")
+  if (bp != "" && ((bp ".0.type") in FT || (bp ".0.id") in FT)) {
+    A("turn.bg"); n = 0
+    for (k = 0; k < 64; k++) {
+      base = bp "." k
+      if (!((base ".type") in FT) && !((base ".id") in FT)) break
+      t = fs(base ".type")
+      if (t == "dream" || t == "auto-mode scan" || t == "memory import" || t == "memory save") continue
+      O("turn.bg." n)
+      id = fs(base ".id")
+      if (id ~ /^[A-Za-z0-9_-]+$/ && length(id) <= 64) out("turn.bg." n ".id", "s", id)
+      else id = ""
+      out("turn.bg." n ".kind", "s", bgkind(t))
+      S("turn.bg." n ".name", first(base ".agent_type," base ".agentType"), 1)
+      S("turn.bg." n ".desc", fs(base ".description"), 1)
+      S("turn.bg." n ".cmd", fs(base ".command"), 1)
+      if (id != "") out("turn.bg." n ".new", "r", inlist(P("prev"), id) ? "false" : "true")
+      if (t == "shell") out("turn.bg." n ".svc", "r", inlist(P("svc"), k) ? "true" : "false")
+      S("turn.bg." n ".st", fs(base ".status"), 1)
+      n++
+    }
+  }
+  cp = P("cronp")
+  if (cp != "" && (cp ".0.schedule") in FT) {
+    A("turn.crons")
+    for (k = 0; k < 64 && ((cp "." k ".schedule") in FT); k++) {
+      O("turn.crons." k); S("turn.crons." k ".sched", fs(cp "." k ".schedule"), 1); S("turn.crons." k ".prompt", fs(cp "." k ".prompt"), 1)
+    }
+  }
+  S("turn.goal", P("goal"))
+}
+
+BEGIN { FS = "\t"; CTRLRE = "[" sprintf("%c", 1) "-" sprintf("%c", 31) sprintf("%c", 127) "]" }
+{
+  t = $2; v = substr($0, length($1) + length(t) + 3)
+  if (!($1 in FT)) { FT[$1] = t; FV[$1] = v }
+}
+END {
+  out("fmt", "r", "2")
+  S("pv", P("pv")); S("av", P("av")); S("avs", P("avs")); S("sid", P("sid")); S("tid", P("tid"))
+  if (P("sub.id") != "") { O("sub"); S("sub.id", P("sub.id")); S("sub.type", P("sub.type"), 1); S("sub.name", P("sub.name"), 1); S("sub.parent", P("sub.parent")); B("sub.bg", P("sub.bg")) }
+  S("dir", P("dir"))
+  if (P("cfg.var") != "" && P("cfg.path") != "") { O("cfg"); S("cfg.var", P("cfg.var")); S("cfg.path", P("cfg.path")) }
+  S("pm", P("pm")); S("mux", P("mux")); R("tms", P("tms"))
+  if (P("rkind") != "") req(P("rkind"))
+  if (P("turn") == "1") turn()
+  S("st", P("st"))
+  if (P("res.scope") != "") {
+    O("res"); S("res.scope", P("res.scope")); S("res.req", P("res.req")); S("res.rrid", P("res.rrid")); S("res.out", P("res.out")); S("res.act", P("res.act")); S("res.win", P("res.win"))
+  }
+}
+'
+
+# Builds the plaintext for one link from the v1 fields (`=key TAB value`) and
+# the spec: the link's variant of the request (section 4.3), then the field
+# limits and the deterministic cuts of section 2.2 (the PowerShell hook does
+# the same, byte for byte). Prints the plaintext, then META lines.
+V2_BUILD='
+# V2 plaintext builder (TDS_AGENT_EVENTS_V2 sections 2.1, 2.2, 3): the v1
+# fields (lines "=key TAB value") and the v2 spec (lines "path TAB type TAB
+# value", types o a s r) for one link (kind tunnel|relay, fmt2, dec: whether
+# it carries a nonce, waitov) in; the plaintext out, and META lines.
+function gpath(p,   n, Q, k, g) {
+  n = split(p, Q, ".")
+  g = ""
+  for (k = 1; k <= n; k++) g = g (k > 1 ? "." : "") (Q[k] ~ /^[0-9]+$/ ? "#" : Q[k])
+  return g
+}
+function kill(i,   k) {
+  if (ND[i]) return
+  ND[i] = 1
+  for (k = 1; k <= NC[i]; k++) kill(CH[i, k])
+}
+function live(i,   k, n) { n = 0; for (k = 1; k <= NC[i]; k++) if (!ND[CH[i, k]]) n++; return n }
+function lastlive(i,   k) { for (k = NC[i]; k >= 1; k--) if (!ND[CH[i, k]]) return CH[i, k]; return 0 }
+function node(p) { return (p in IDX && !ND[IDX[p]]) ? IDX[p] : 0 }
+function ser(i,   s, k, c, f) {
+  if (NT[i] == "s") return "\"" NV[i] "\""
+  if (NT[i] == "r") return NV[i]
+  s = (NT[i] == "o") ? "{" : "["
+  f = 1
+  for (k = 1; k <= NC[i]; k++) {
+    c = CH[i, k]
+    if (ND[c]) continue
+    s = s (f ? "" : ",") (NT[i] == "o" ? "\"" NK[c] "\":" : "") ser(c)
+    f = 0
+  }
+  return s ((NT[i] == "o") ? "}" : "]")
+}
+# The cut record (section 2.2 step 6).
+function rec(path, val) {
+  if (path in REC) return
+  REC[path] = 1
+  if (PLUS > 0 || CLIVE >= 16) { PLUS++; return }
+  CN++; CK[CN] = path; CV[CN] = val; CLIVE++
+}
+function unrec(path,   k, pre) {
+  pre = path "."
+  for (k = 1; k <= CN; k++) {
+    if (CDEAD[k]) continue
+    if (substr(CK[k], 1, length(pre)) == pre) { CDEAD[k] = 1; CLIVE-- }
+  }
+}
+function cutjson(   s, k, f) {
+  if (CLIVE == 0 && PLUS == 0) return ""
+  s = ",\"cut\":{"; f = 1
+  for (k = 1; k <= CN; k++) {
+    if (CDEAD[k]) continue
+    s = s (f ? "" : ",") "\"" CK[k] "\":" CV[k]; f = 0
+  }
+  if (PLUS > 0) s = s (f ? "" : ",") "\"+\":" PLUS
+  return s "}"
+}
+function plain(   s, k, c) {
+  s = "{\"v\":1,\"rid\":\"" V1["rid"] "\",\"ev\":\"" V1["ev"] "\",\"app\":\"" V1["app"] "\",\"host\":\"" HOST "\",\"cwd\":\"" CWD "\""
+  if ("title" in V1) s = s ",\"title\":\"" TITLE "\""
+  if ("msg" in V1) s = s ",\"msg\":\"" MSG "\""
+  s = s V1["xflags"]
+  if (dec && V1["nonce"] != "") s = s ",\"nonce\":\"" V1["nonce"] "\""
+  for (k = 1; k <= NC[0]; k++) {
+    c = CH[0, k]
+    if (!ND[c]) s = s ",\"" NK[c] "\":" ser(c)
+  }
+  return s cutjson() ",\"ts\":" V1["ts"] "}"
+}
+function size() { return length(plain()) }
+# Removes decision id d from req.can.
+function nocan(d,   i, k) {
+  i = node("req.can")
+  if (!i) return
+  for (k = 1; k <= NC[i]; k++) if (!ND[CH[i, k]] && NV[CH[i, k]] == d) kill(CH[i, k])
+}
+function cankeep(list,   i, k) {
+  i = node("req.can")
+  if (!i) return
+  for (k = 1; k <= NC[i]; k++) if (!ND[CH[i, k]] && index(" " list " ", " " NV[CH[i, k]] " ") == 0) kill(CH[i, k])
+}
+function hascan(d,   i, k) {
+  i = node("req.can")
+  if (!i) return 0
+  for (k = 1; k <= NC[i]; k++) if (!ND[CH[i, k]] && NV[CH[i, k]] == d) return 1
+  return 0
+}
+function drop(p) { if (node(p)) kill(IDX[p]) }
+# Section 2.2 field limits: STR[generic path] "tunnel relay" bytes (- not
+# sent to the relay), CNT the same for arrays.
+function limits() {
+  split("", STR); split("", CNT)
+  STR["dir"] = "1024 -"; STR["cfg"] = "0 -"; STR["cfg.path"] = "1024 -"
+  STR["avs"] = "0 -"; STR["tid"] = "0 -"; STR["pm"] = "0 -"; STR["tms"] = "0 -"; STR["req.nid"] = "0 -"
+  STR["req.tool"] = "128 128"; STR["req.ask.cmd"] = "8192 400"; STR["req.ask.desc"] = "1024 200"
+  STR["req.ask.path"] = "1024 256"; STR["req.ask.file"] = "1024 256"; STR["req.ask.files.#"] = "1024 256"
+  STR["req.ask.change"] = "0 -"; STR["req.ask.change.old"] = "12288 -"; STR["req.ask.change.new"] = "12288 -"
+  STR["req.ask.change.content"] = "24576 -"; STR["req.ask.change.text"] = "24576 -"
+  STR["req.ask.url"] = "2048 400"; STR["req.ask.prompt"] = "1024 -"
+  STR["req.ask.server"] = "128 128"; STR["req.ask.tool"] = "128 128"; STR["req.ask.args"] = "4096 -"
+  STR["req.ask.msg"] = "1024 200"; STR["req.ask.schema"] = "8192 -"
+  # A plan is long; any other text short.
+  STR["req.ask.text"] = (node("req.win") && NV[IDX["req.win"]] == "plan") ? "24576 600" : "1024 200"
+  STR["req.ask.qs.#.q"] = "400 160"; STR["req.ask.qs.#.h"] = "64 32"
+  STR["req.ask.qs.#.opts.#.l"] = "200 64"; STR["req.ask.qs.#.opts.#.d"] = "600 -"
+  STR["req.scopes.#.label"] = "200 80"; STR["sub.type"] = "64 64"; STR["sub.name"] = "64 64"
+  STR["turn.last"] = "4000 -"; STR["turn.bg.#.name"] = "64 32"; STR["turn.bg.#.desc"] = "200 80"
+  STR["turn.bg.#.cmd"] = "200 80"; STR["turn.crons"] = "0 -"; STR["turn.crons.#.sched"] = "64 -"
+  STR["turn.crons.#.prompt"] = "200 -"
+  CNT["req.ask.files"] = "32 4"; CNT["req.ask.qs"] = "8 4"; CNT["req.ask.qs.#.opts"] = "16 8"
+  CNT["req.scopes"] = "8 4"; CNT["req.others"] = "32 8"; CNT["turn.bg"] = "16 3"; CNT["turn.crons"] = "8 -"
+}
+function lim(tab, g,   L) {
+  if (!(g in tab)) return 0
+  split(tab[g], L, " ")
+  return (kind == "tunnel") ? L[1] : L[2]
+}
+function v1cut(key, v, mu, mb,   c) {
+  c = ucut(v, mu, mb)
+  if (length(c) < length(v)) rec(key, length(v))
+  return c
+}
+BEGIN { FS = "\t"; N = 0; NT[0] = "o"; NC[0] = 0 }
+/^=/ { V1[substr($1, 2)] = substr($0, length($1) + 2); next }
+/^#/ { META[++NM] = $0; next }
+{
+  p = $1; t = $2; v = substr($0, length(p) + length(t) + 3)
+  if (p in IDX) next
+  k = 0
+  while (match(substr(p, k + 1), /\./)) k += RSTART
+  par = (k > 0) ? substr(p, 1, k - 1) : ""
+  if (par != "" && !(par in IDX)) next
+  pi = (par == "") ? 0 : IDX[par]
+  if (NT[pi] != "o" && NT[pi] != "a") next
+  N++; IDX[p] = N; NP[N] = p; NT[N] = t; NV[N] = v; NK[N] = substr(p, k + 1); NC[N] = 0
+  NC[pi]++; CH[pi, NC[pi]] = N
+}
+END {
+  limits()
+  budget = (kind == "tunnel") ? 32768 : 2048
+  # variant of this link (section 4.3)
+  if (waitov != "" && node("req.wait")) NV[IDX["req.wait"]] = waitov
+  if (!dec) { drop("req.can"); drop("req.scopes"); drop("req.modes"); drop("req.affects"); drop("req.others") }
+  else if (!fmt2) {
+    win = node("req.win") ? NV[IDX["req.win"]] : ""
+    if (win == "plan") { cankeep("plan_approve deny"); drop("req.modes") }
+    else cankeep("allow deny")
+    drop("req.scopes")
+    if (node("req.others") && live(IDX["req.others"]) > 0) cankeep("allow")
+    drop("req.affects"); drop("req.others")
+  }
+  # step 0: field limits, in serialization order (v1 fields first)
+  HOST = v1cut("host", jnorm(V1["host"], 0), 64, 256)
+  CWD = v1cut("cwd", jnorm(V1["cwd"], 0), 64, 256)
+  if ("title" in V1) TITLE = v1cut("title", jnorm(V1["title"], 0), 64, 256)
+  if ("msg" in V1) MSG = v1cut("msg", jnorm(V1["msg"], 0), 200, 800)
+  for (i = 1; i <= N; i++) {
+    if (ND[i]) continue
+    g = gpath(NP[i])
+    if (NT[i] == "a" || NT[i] == "o") {
+      if (kind == "relay" && (g in STR) && lim(STR, g) == "-") { kill(i); continue }
+      if (NT[i] == "a" && (g in CNT)) {
+        c = lim(CNT, g)
+        if (c == "-") { kill(i); continue }
+        n = 0
+        for (k = 1; k <= NC[i]; k++) {
+          if (ND[CH[i, k]]) continue
+          n++
+          if (n > c + 0) kill(CH[i, k])
+        }
+        if (n > c + 0) {
+          rec(NP[i], n)
+          if (g == "req.ask.qs") nocan("answer")
+        }
+      }
+      continue
+    }
+    if (!(g in STR)) continue
+    c = lim(STR, g)
+    if (c == "-") { kill(i); continue }
+    if (c + 0 > 0 && length(NV[i]) > c + 0) {
+      rec(NP[i], length(NV[i]))
+      NV[i] = ucut(NV[i], 1000000000, c + 0)
+    }
+  }
+  for (i = 1; i <= N; i++) ORIG[i] = live(i)
+  # step 1: the last item of the first non-empty array
+  split("req.others turn.bg req.scopes req.ask.qs", ARR, " ")
+  while (size() > budget) {
+    done = 0
+    for (a = 1; a <= 4 && !done; a++) {
+      i = node(ARR[a])
+      if (!i || live(i) == 0) continue
+      c = lastlive(i)
+      unrec(NP[c]); kill(c)
+      rec(ARR[a], ORIG[i])
+      if (ARR[a] == "req.ask.qs") nocan("answer")
+      if (live(i) == 0) {
+        if (ARR[a] == "req.scopes") { kill(i); nocan("allow_scope") }
+        if (ARR[a] == "req.others") { kill(i); drop("req.affects") }
+      }
+      done = 1
+    }
+    if (!done) break
+  }
+  # step 2: whole objects
+  split("req.ask req.scopes req.modes turn sub req", OBJ, " ")
+  for (a = 1; a <= 6 && size() > budget; a++) {
+    i = node(OBJ[a])
+    if (!i) continue
+    b = length(ser(i))
+    unrec(OBJ[a]); kill(i)
+    rec(OBJ[a], b)
+    if (OBJ[a] == "req.ask") { nocan("answer"); nocan("allow_scope") }
+    if (OBJ[a] == "req.scopes") nocan("allow_scope")
+  }
+  print plain()
+  m = "META"
+  i = node("req")
+  if (i) {
+    m = m " rq=" (node("req.id") ? NV[IDX["req.id"]] : "") " win=" (node("req.win") ? NV[IDX["req.win"]] : "")
+    s = ""; i = node("req.can")
+    if (i) for (k = 1; k <= NC[i]; k++) if (!ND[CH[i, k]]) s = s (s == "" ? "" : ",") NV[CH[i, k]]
+    m = m " can=" s
+    s = ""; i = node("req.affects")
+    if (i) for (k = 1; k <= NC[i]; k++) if (!ND[CH[i, k]]) s = s (s == "" ? "" : ",") NV[CH[i, k]]
+    m = m " aff=" s
+    i = node("req.scopes"); m = m " ns=" (i ? live(i) : 0)
+    s = ""; i = node("req.modes")
+    if (i) for (k = 1; k <= NC[i]; k++) if (!ND[CH[i, k]]) s = s (s == "" ? "" : ",") NV[CH[i, k]]
+    m = m " modes=" s
+    s = ""; i = node("req.ask.qs")
+    m = m " nq=" (i ? live(i) : 0)
+  }
+  print m
+  for (k = 1; k <= NM; k++) print META[k]
+}
+'
+
+V2=0 V2C=0 FACTS='' AT='' SPEC='' MSGF='' NOMSG='' WAITOV='' METAF='' ING_MT=''
+RAWSID='' TID='' PMODE='' DIRV='' SUBID='' SUBTYPE='' SUBPAR='' OCV='' CWD_BASEF='' T0=0 V2X=''
+
+# Adds the @-parameter $1 (JSON-escaped value $2, nothing if empty).
+at() { [ -n "${2:-}" ] || return 0; AT="$AT@.$1${TAB}s$TAB$2$NL"; }
+
+# FACTS of the event, once.
+v2_facts() {
+  [ -n "$FACTS" ] && return 0
+  FACTS=$(printf '%s' "$INPUT" | awk "$NORM_FN$JSON_FACTS" 2>/dev/null)
+}
+
+# The raw text of container $1 of the event (an answer hands it back).
+raw_span() { printf '%s' "$INPUT" | awk -v rawp="$1" "$NORM_FN$JSON_FACTS" 2>/dev/null; }
+
+# SPEC from FACTS, AT and the extra parameter lines $1; V2=1.
+v2_spec() {
+  v2_facts
+  SPEC=$( { printf '%s\n' "$FACTS"; printf '%s' "$AT"; printf '%s' "${1:-}"; } | awk "$NORM_FN$V2_SPEC" 2>/dev/null)
+  V2=1
+}
+
+# The plaintext of SPEC for the loaded link (plaintext()); META to METAF.
+v2_plain() { # rid ev nonce
+  vf=0
+  [ "$L_FMT" = 2 ] && vf=1
+  vd=0
+  [ -n "$3" ] && vd=1
+  vx=''
+  [ "$2" = done ] && vx=${XFLAGS:-}
+  vo=$( {
+    printf '=rid\t%s\n=ev\t%s\n=app\t%s\n=host\t%s\n=cwd\t%s\n' "$1" "$2" "$APP" "$(json_text "$L_LABEL" 100000 100000)" "$CWD_BASEF"
+    [ -n "$NOMSG" ] || printf '=msg\t%s\n' "$MSGF"
+    printf '=xflags\t%s\n=nonce\t%s\n=ts\t%s\n' "$vx" "$3" "$TS"
+    printf '%s\n' "$SPEC"
+  } | awk -v kind="${L_KIND:-relay}" -v fmt2="$vf" -v dec="$vd" -v waitov="$WAITOV" "$NORM_FN$V2_BUILD" 2>/dev/null)
+  [ -n "$METAF" ] && printf '%s\n' "$vo" | sed 1d >"$METAF" 2>/dev/null
+  printf '%s\n' "$vo" | sed -n 1p
+}
+
+# The agent's version for a cached `--version` (D13): its executable's path
+# and the version, in run/ver.<name>; run again in the background when the
+# executable is newer than the cache or moved. The output format is not
+# measured (M16): the first dotted number is taken.
+ver_cache() { # executable-name
+  vb=$(command -v "$1" 2>/dev/null) || return 0
+  case $vb in /*) ;; *) return 0 ;; esac
+  vc=$RUN_DIR/ver.$1
+  vp=$(sed -n 1p "$vc" 2>/dev/null)
+  [ "$vp" = "$vb" ] && AV=$(sed -n 2p "$vc" 2>/dev/null)
+  [ "$vp" = "$vb" ] && ! [ "$vb" -nt "$vc" ] && return 0
+  ( set -C; printf '' >"$vc.lock" ) 2>/dev/null || return 0
+  trap '' HUP
+  (
+    "$vb" --version </dev/null >"$vc.out" 2>/dev/null &
+    vk=$!
+    ( sleep 15; kill "$vk" 2>/dev/null ) &
+    wait "$vk" 2>/dev/null
+    v=$(head -c 4096 "$vc.out" 2>/dev/null | awk 'match($0, /[0-9]+[.][0-9]+[0-9A-Za-z.+_-]*/) { print substr($0, RSTART, RLENGTH); exit }')
+    case $v in '' | *[!0-9A-Za-z.+_-]*) ;; *) printf '%s\n%s\n' "$vb" "$v" >"$vc.tmp" && mv -f "$vc.tmp" "$vc" ;; esac
+    rm -f "$vc.out" "$vc.tmp" "$vc.lock"
+  ) </dev/null >/dev/null 2>&1 &
+}
+
+# AV and AVS: the agent's version and where it came from (section 10.1).
+v2_version() {
+  AV='' AVS=''
+  case $AGENT in
+    claude)
+      vf=$(input_file "$TPATH")
+      [ -n "$vf" ] && AV=$(tail -c 65536 "$vf" 2>/dev/null | awk '
+        { s = $0; while (match(s, /"version"[ ]*:[ ]*"[0-9][0-9A-Za-z.+_-]*"/)) { v = substr(s, RSTART, RLENGTH - 1); s = substr(s, RSTART + RLENGTH); sub(/.*"/, "", v) } }
+        END { print v }')
+      AVS=transcript
+      ;;
+    codex)
+      vf=$(input_file "$TPATH")
+      [ -n "$vf" ] && AV=$(head -c 65536 "$vf" 2>/dev/null | awk 'match($0, /"cli_version"[ ]*:[ ]*"[^"]*"/) { v = substr($0, RSTART, RLENGTH - 1); sub(/.*"/, "", v); print v; exit }')
+      AVS=rollout
+      ;;
+    copilot) AV=${COPILOT_CLI_BINARY_VERSION:-} AVS=env ;;
+    opencode | agy | grok) ver_cache "$AGENT"; AVS=cache ;;
+  esac
+  case $AV in '' | *[!0-9A-Za-z.+_-]*) AV='' ;; esac
+  [ "${#AV}" -le 32 ] || AV=''
+}
+
+is_id() { # value: section 3 id format
+  case $1 in '' | *[!A-Za-z0-9._:-]*) return 1 ;; esac
+  [ "${#1}" -le 128 ]
+}
+
+# Codex: the last turn's approval and sandbox policy from the rollout, as
+# its permission mode (`on-request/read-only`).
+codex_pm() {
+  vf=$(input_file "$TPATH")
+  [ -n "$vf" ] || return 0
+  tail -c 262144 "$vf" 2>/dev/null | awk '
+    /"type":"turn_context"/ {
+      a = ""; b = ""
+      if (match($0, /"approval_policy":"[A-Za-z0-9._-]*"/)) { a = substr($0, RSTART + 19, RLENGTH - 20) }
+      if (match($0, /"sandbox_policy":[{]"type":"[A-Za-z0-9._-]*"/)) { b = substr($0, RSTART + 26, RLENGTH - 27) }
+      if (a != "") pm = a (b != "" ? "/" b : "")
+    }
+    END { print pm }'
+}
+
+# The common fields (section 3) as @-parameters, once per run.
+v2_common() {
+  [ "$V2C" = 1 ] && return 0
+  V2C=1
+  at pv "$HOOK_VERSION"
+  v2_version
+  at av "$AV"
+  [ -n "$AV" ] && at avs "$AVS"
+  vs=$RAWSID
+  # An OpenCode subagent's request comes from its own (child) session.
+  if [ -n "$SUBPAR_SESSION" ] && is_id "$SUBPAR_SESSION" && is_id "$RAWSID"; then
+    vs=$SUBPAR_SESSION SUBID=$RAWSID SUBTYPE=${SUBTYPE:-subagent}
+  fi
+  is_id "$vs" && at sid "$vs"
+  is_id "$TID" && at tid "$TID"
+  if is_id "$SUBID"; then
+    at sub.id "$SUBID"
+    at sub.type "$SUBTYPE"
+    is_id "$SUBPAR" && at sub.parent "$SUBPAR"
+  fi
+  case $DIRV in /* | [A-Za-z]:'\\'*) at dir "$DIRV" ;; esac
+  cv='' cp=''
+  case $AGENT in
+    claude) [ -n "${CLAUDE_CONFIG_DIR:-}" ] && cv=CLAUDE_CONFIG_DIR cp=$CLAUDE_CONFIG_DIR ;;
+    codex) [ -n "${CODEX_HOME:-}" ] && [ "${CODEX_HOME%/}" != "$HOME/.codex" ] && cv=CODEX_HOME cp=$CODEX_HOME ;;
+    grok) [ -n "${GROK_HOME:-}" ] && [ "${GROK_HOME%/}" != "$HOME/.grok" ] && cv=GROK_HOME cp=$GROK_HOME ;;
+    copilot) [ -n "${COPILOT_HOME:-}" ] && cv=COPILOT_HOME cp=$COPILOT_HOME ;;
+    opencode)
+      if [ "$OCV" != 2 ]; then
+        if [ -n "${OPENCODE_CONFIG_DIR:-}" ]; then cv=OPENCODE_CONFIG_DIR cp=$OPENCODE_CONFIG_DIR
+        elif [ -n "${OPENCODE_CONFIG:-}" ]; then cv=OPENCODE_CONFIG cp=$OPENCODE_CONFIG
+        elif [ -n "${XDG_CONFIG_HOME:-}" ] && [ "${XDG_CONFIG_HOME%/}" != "$HOME/.config" ]; then cv=XDG_CONFIG_HOME cp=$XDG_CONFIG_HOME
+        fi
+      fi
+      ;;
+  esac
+  if [ -n "$cv" ] && [ -n "$cp" ]; then
+    at cfg.var "$cv"
+    at cfg.path "$(json_text "$cp" 100000 100000)"
+  fi
+  [ "$AGENT" = codex ] && PMODE=$(codex_pm)
+  case $PMODE in '' | *[!A-Za-z0-9._:/-]*) ;; *) [ "${#PMODE}" -le 48 ] && at pm "$PMODE" ;; esac
+  if [ "$AGENT" = opencode ] && [ "$OCV" = 2 ]; then at mux unknown
+  elif [ -n "${TMUX:-}" ]; then at mux tmux
+  elif [ -n "${STY:-}" ]; then at mux screen
+  fi
+}
+
+# Event time in milliseconds where `date` has them (GNU), for `tms`.
+v2_tms() {
+  if [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ -n "${SIMPLETERM_HOOK_TEST_TMS:-}" ]; then
+    printf '%s' "$SIMPLETERM_HOOK_TEST_TMS"
+    return 0
+  fi
+  vt=$(date +%s%3N 2>/dev/null)
+  case $vt in *[!0-9]*) ;; ?????????????) printf '%s' "$vt" ;; esac
+}
+
+# Prepares SPEC for an event: the common fields, `tms`, and the extra
+# parameter lines $1 (request kind, end of a turn, state, result).
+v2_prep() { # [extra lines]
+  v2_common
+  V2X=${1:-}
+  v2_spec "$V2X@.tms${TAB}s$TAB$(v2_tms)$NL"
+}
+
+# --- states and results to the tunnel (sections 6.2, 5.6) -----------------------
+
+has_tunnel() {
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case $(head -c 4096 "$f" 2>/dev/null) in *kind=tunnel*) return 0 ;; esac
+  done <<EOF
+$LINKS
+EOF
+  return 1
+}
+
+# A state event (section 6.2) to the tunnels, when the session's state
+# changed, one a second at most (a change within the second goes a second
+# later unless another replaced it). $2: extra parameter lines (the turn).
+send_state() { # st [extra]
+  [ -n "$LINKS" ] && has_tunnel || return 0
+  sf=$RUN_DIR/$SID.st
+  sl=$(cat "$sf" 2>/dev/null)
+  [ "${sl%% *}" = "$1" ] && [ "$1" != sub_start ] && [ "$1" != sub_stop ] && return 0
+  srid=$RID
+  if [ "${RID_USED:-0}" = 1 ]; then
+    srid=$(rand_hex 8)
+    is_hex "$srid" 16 || return 0
+  fi
+  printf '%s %s %s\n' "$1" "$NOW" "$srid" >"$sf" 2>/dev/null
+  ss=$SPEC sx=$V2X sm=$NOMSG
+  v2_prep "${2:-}@.st${TAB}s$TAB$1$NL"
+  NOMSG=1
+  if [ "${sl#* }" != "$sl" ] && [ "$(printf '%s' "$sl" | cut -d' ' -f2)" = "$NOW" ]; then
+    trap '' HUP
+    (
+      sleep 1
+      [ "$(cut -d' ' -f3 "$sf" 2>/dev/null)" = "$srid" ] || exit 0
+      later_send state tunnel
+    ) </dev/null >/dev/null 2>&1 &
+  else
+    send_bg state "$srid" tunnel
+  fi
+  SPEC=$ss V2X=$sx NOMSG=$sm
+}
+
+# --- session records (section 8.2) --------------------------------------------
+
+# Only sessions started in SimpleTerm (SIMPLETERM=1), with an id that can
+# be resumed; OpenCode 2.x not at all (D14: its service's environment is the
+# first TUI's).
+sess_ok() {
+  [ "${SIMPLETERM:-}" = 1 ] || return 1
+  [ "$AGENT" = opencode ] && [ "$OCV" = 2 ] && return 1
+  case $AGENT in claude | codex | grok | agy | copilot | opencode) ;; *) return 1 ;; esac
+  is_id "$RAWSID" || return 1
+  SESS_DIR=$ST_DIR/sessions/$APP
+  case $RAWSID in
+    *:*) SESS_NAME=$(sha256_hex "$RAWSID" | cut -c1-32) ;;
+    *) SESS_NAME=$RAWSID ;;
+  esac
+  [ -n "$SESS_NAME" ] || return 1
+  SESS=$SESS_DIR/$SESS_NAME
+}
+
+# The session's last hook event: <name>.beat's modification time (touched
+# when 30 seconds old, or always with $1 = force).
+sess_beat() { # [force]
+  sess_ok || return 0
+  bt=$RUN_DIR/$SID.beatts
+  if [ "${1:-}" != force ]; then
+    t=$(cat "$bt" 2>/dev/null)
+    is_uint "$t" && [ $((NOW - t)) -le 30 ] && [ "$t" -le "$NOW" ] && [ -f "$SESS.beat" ] && return 0
+  fi
+  mkdir -p "$SESS_DIR" 2>/dev/null && chmod 700 "$ST_DIR/sessions" "$SESS_DIR" 2>/dev/null
+  touch "$SESS.beat" 2>/dev/null && printf '%s\n' "$NOW" >"$bt" 2>/dev/null
+}
+
+# The session's title and where it came from (section 10.7): SESS_TITLE
+# (JSON-escaped), SESS_TSRC.
+sess_title() {
+  SESS_TITLE='' SESS_TSRC=''
+  tf=$(input_file "$TPATH")
+  case $AGENT in
+    claude)
+      [ -n "$tf" ] && SESS_TITLE=$(tail -c 262144 "$tf" 2>/dev/null | awk '
+        /"type":"ai-title"/ && match($0, /"aiTitle":"([^"\\]|\\.)*"/) { t = substr($0, RSTART + 11, RLENGTH - 12) }
+        END { print t }')
+      SESS_TSRC=ai
+      ;;
+    codex)
+      ci=${CODEX_HOME:-$HOME/.codex}/session_index.jsonl
+      [ -f "$ci" ] && SESS_TITLE=$(tail -c 262144 "$ci" 2>/dev/null | awk -v id="\"$RAWSID\"" '
+        index($0, "\"id\":" id) && match($0, /"thread_name":"([^"\\]|\\.)*"/) { t = substr($0, RSTART + 15, RLENGTH - 16) }
+        END { print t }')
+      SESS_TSRC=ai
+      ;;
+    grok)
+      [ -n "$tf" ] && [ -f "${tf%/*}/summary.json" ] && SESS_TITLE=$(head -c 65536 "${tf%/*}/summary.json" | awk -v want=generated_title "$JSON_GET" 2>/dev/null | sed -n 's/^generated_title=//p')
+      SESS_TSRC=ai
+      ;;
+    copilot)
+      [ -n "$tf" ] && [ -f "${tf%/*}/workspace.yaml" ] &&
+        SESS_TITLE=$(json_text "$(sed -n 's/^name: *//p' "${tf%/*}/workspace.yaml" 2>/dev/null | head -n 1 | sed "s/^[\"']//; s/[\"']\$//")" 120 400)
+      # The session's name: a model-made title (interactive), else the first prompt.
+      SESS_TSRC=ai
+      ;;
+    opencode) SESS_TITLE=$OCTITLE SESS_TSRC=ai ;;
+  esac
+  [ -n "$SESS_TITLE" ] || SESS_TSRC=''
+}
+
+# Writes the session's record (state running|idle; $2 the prompt): a temp
+# file renamed into place, 4096 bytes at most. Keeps started_at, the last
+# prompt and a title it cannot find again from the record before.
+sess_write() { # state [prompt]
+  sess_ok || return 0
+  mkdir -p "$SESS_DIR" 2>/dev/null && chmod 700 "$ST_DIR/sessions" "$SESS_DIR" 2>/dev/null
+  old=$(head -c 4096 "$SESS.json" 2>/dev/null)
+  ow=''
+  [ -n "$old" ] && ow=$(printf '%s' "$old" | awk -v want=started_at,last_prompt,title,title_src "$JSON_GET" 2>/dev/null)
+  so=$(printf '%s\n' "$ow" | sed -n 's/^started_at=//p')
+  is_uint "$so" || so=$NOW
+  lp=$(json_trim "${2:-}" 200 800)
+  [ -n "$lp" ] || lp=$(printf '%s\n' "$ow" | sed -n 's/^last_prompt=//p')
+  sess_title
+  ti=$(json_trim "$SESS_TITLE" 120 400) ts=$SESS_TSRC
+  if [ -z "$ti" ]; then
+    ti=$(printf '%s\n' "$ow" | sed -n 's/^title=//p') ts=$(printf '%s\n' "$ow" | sed -n 's/^title_src=//p')
+  fi
+  if [ -z "$ti" ] && [ -n "$lp" ]; then ti=$(json_trim "$lp" 120 400) ts=prompt; fi
+  case $ts in ai | user | prompt) ;; *) ts='' ;; esac
+  [ -n "$ts" ] || ti=''
+  j='{"v":1,"app":"'$APP'"'
+  [ -n "$AV" ] && j=$j',"av":"'$AV'"'
+  j=$j',"sid":"'$RAWSID'"'
+  case $DIRV in /* | [A-Za-z]:'\\'*) j=$j',"dir":"'$(json_trim "$DIRV" 100000 1024)'"' ;; esac
+  [ -n "$ti" ] && j=$j',"title":"'$ti'","title_src":"'$ts'"'
+  [ -n "$lp" ] && j=$j',"last_prompt":"'$lp'"'
+  j=$j',"last_at":'$NOW',"started_at":'$so
+  tp=$(input_file "$TPATH")
+  case $tp in /*) j=$j',"tpath":"'$(json_text "$tp" 100000 1024)'"' ;; esac
+  case $PMODE in '' | *[!A-Za-z0-9._:/-]*) ;; *) [ "${#PMODE}" -le 48 ] && j=$j',"pm":"'$PMODE'"' ;; esac
+  for kv in $(printf '%s' "$AT" | sed -n "s/^@\\.cfg\\.var${TAB}s${TAB}/var=/p"); do cvv=${kv#var=}; done
+  cpp=$(printf '%s' "$AT" | sed -n "s/^@\\.cfg\\.path${TAB}s${TAB}//p")
+  [ -n "${cvv:-}" ] && [ -n "$cpp" ] && j=$j',"cfg":{"var":"'$cvv'","path":"'$(json_trim "$cpp" 100000 1024)'"}'
+  j=$j',"state":"'$1'"'
+  if [ "$AGENT" = opencode ] && [ "$OCV" = 2 ]; then j=$j',"mux":"unknown"'
+  elif [ -n "${TMUX:-}" ]; then j=$j',"mux":"tmux"'
+  elif [ -n "${STY:-}" ]; then j=$j',"mux":"screen"'
+  fi
+  j=$j'}'
+  [ "${#j}" -le 4096 ] || return 0
+  printf '%s\n' "$j" >"$SESS.json.$$" 2>/dev/null && chmod 600 "$SESS.json.$$" 2>/dev/null && mv -f "$SESS.json.$$" "$SESS.json" 2>/dev/null
+  rm -f "$SESS.json.$$" 2>/dev/null
+  sess_keep
+}
+
+# A session starts or is resumed: no `.ended` any more.
+sess_start() { # [prompt]
+  sess_ok || return 0
+  sess_beat force
+  rm -f "$SESS.ended" 2>/dev/null
+}
+
+# The session ended: `.ended`, unless the record's .beat is newer than this
+# event (it was resumed meanwhile: a late end must not mark it ended).
+sess_end() {
+  sess_ok || return 0
+  [ -f "$SESS.beat" ] && [ -f "$RUN_DIR/t0.$$" ] && [ "$SESS.beat" -nt "$RUN_DIR/t0.$$" ] && return 0
+  mkdir -p "$SESS_DIR" 2>/dev/null && chmod 700 "$ST_DIR/sessions" "$SESS_DIR" 2>/dev/null
+  printf '' 2>/dev/null >"$SESS.ended"
+}
+
+# Keeps records whose last activity (.beat or the record, the later) is
+# within 30 days, 200 at most (D11); at most once in ten minutes.
+sess_keep() {
+  kf=$RUN_DIR/sessions.keep
+  t=$(cat "$kf" 2>/dev/null)
+  is_uint "$t" && [ $((NOW - t)) -lt 600 ] && [ "$t" -le "$NOW" ] && return 0
+  printf '%s\n' "$NOW" >"$kf" 2>/dev/null
+  # Newest first by the later of .beat and .json: the first time a name
+  # appears in `ls -t` is its last activity.
+  ls -t "$ST_DIR"/sessions/*/*.beat "$ST_DIR"/sessions/*/*.json 2>/dev/null | awk '
+    { b = $0; sub(/\.(beat|json)$/, "", b) }
+    !(b in seen) { seen[b] = 1; n++; if (n > 200) print b }' | while IFS= read -r b; do
+    rm -f "$b.json" "$b.beat" "$b.ended" 2>/dev/null
+  done
+  find "$ST_DIR/sessions" -type f \( -name '*.json' -o -name '*.beat' \) -mtime +30 2>/dev/null | while IFS= read -r f; do
+    b=${f%.*}
+    # Both old (or gone) before the record goes.
+    [ -n "$(find "$b.json" "$b.beat" -mtime -31 2>/dev/null)" ] && continue
+    rm -f "$b.json" "$b.beat" "$b.ended" 2>/dev/null
+  done
 }
 
 # --- terminal sequence (Claude Code only, SimpleTerm sessions only) ---------
@@ -523,9 +1754,33 @@ conf_int() { # key default
   printf '%s' "$v"
 }
 
-# Long-polls one link for the decision on $1 and writes allow/deny/invalid.
+# The decision response $1: DST DDEC DMAC and the decision extension's
+# envelope DXV DXIV DXCT DXMAC (section 5.1; at the end of the response, so
+# the first 8 KiB are read; an older hook reads only 4 KiB).
+resp_decision() {
+  DST='' DDEC='' DMAC='' DXV='' DXIV='' DXCT='' DXMAC=''
+  [ -f "$1" ] || return 0
+  while IFS= read -r kv; do
+    case $kv in
+      status=*) DST=${kv#status=} ;;
+      decision=*) DDEC=${kv#decision=} ;;
+      dmac=*) DMAC=${kv#dmac=} ;;
+      dext.v=*) DXV=${kv#dext.v=} ;;
+      dext.iv=*) DXIV=${kv#dext.iv=} ;;
+      dext.ct=*) DXCT=${kv#dext.ct=} ;;
+      dext.mac=*) DXMAC=${kv#dext.mac=} ;;
+    esac
+  done <<EOF
+$(head -c 8192 "$1" 2>/dev/null | awk -v want=status,decision,dmac,dext.v,dext.iv,dext.ct,dext.mac "$JSON_GET" 2>/dev/null)
+EOF
+}
+
+# Long-polls one link for the decision on rid $1 and writes $3: line 1
+# allow, deny, invalid (the dmac does not match) or none; line 2 the decision
+# extension: none, bad (its MAC does not match or it does not open) or ok;
+# line 3 its plaintext when ok.
 poll_link() { # rid nonce outfile deadline
-  cpid='' r=none
+  cpid='' r=none x=none xp=''
   trap 'kill "$cpid" 2>/dev/null; exit 0' TERM
   resp="$RUN_DIR/dec.$$.$1.$(printf %.8s "$L_LINK")"
   while :; do
@@ -544,30 +1799,33 @@ poll_link() { # rid nonce outfile deadline
     code=$(cat "$resp.code" 2>/dev/null)
     case $code in
       200)
-        st='' dec='' dmac=''
-        while IFS= read -r kv; do
-          case $kv in
-            status=*) st=${kv#status=} ;;
-            decision=*) dec=${kv#decision=} ;;
-            dmac=*) dmac=${kv#dmac=} ;;
-          esac
-        done <<EOF
-$(resp_get "$resp" status,decision,dmac)
-EOF
-        if [ "$st" = decided ]; then
+        resp_decision "$resp"
+        if [ "$DST" = decided ]; then
           r=invalid
-          case $dec in
+          case $DDEC in
             allow | deny)
-              is_hex "$dmac" 64 &&
-                [ "$(hmac_hex "$L_MAC" "st1-dec.$1.$dec.$2")" = "$dmac" ] && r=$dec
+              is_hex "$DMAC" 64 &&
+                [ "$(hmac_hex "$L_MAC" "st1-dec.$1.$DDEC.$2")" = "$DMAC" ] && r=$DDEC
               ;;
           esac
-          log "decision link=$(printf %.8s "$L_LINK") result=$r"
+          if [ "$r" != invalid ] && [ -n "$DXV$DXIV$DXCT$DXMAC" ]; then
+            # The extension is MACed with st1-dext. (not the event's st1.),
+            # so an event envelope cannot be passed back as one.
+            x=bad
+            DXCT=$(printf '%s' "$DXCT" | sed 's#\\/#/#g')
+            case $DXCT in '' | *[!A-Za-z0-9+/=]*) DXCT='' ;; esac
+            if [ "$DXV" = 1 ] && is_hex "$DXIV" 32 && is_hex "$DXMAC" 64 && [ -n "$DXCT" ] && [ "${#DXCT}" -le 2944 ] &&
+              [ "$(hmac_hex "$L_MAC" "st1-dext.$DXIV.$DXCT")" = "$DXMAC" ]; then
+              xp=$(printf '%s' "$DXCT" | openssl enc -d -aes-256-cbc -K "$L_ENC" -iv "$DXIV" -a -A 2>/dev/null | head -c 4096 | tr -d '\n\r')
+              [ -n "$xp" ] && x=ok
+            fi
+          fi
+          log "decision link=$(printf %.8s "$L_LINK") result=$r dext=$x"
           break
         fi
         [ $(($(date +%s) - now)) -ge 1 ] || sleep 1
         ;;
-      404 | 410 | 401 | 403)
+      404 | 410 | 401 | 403 | 409)
         log "decision link=$(printf %.8s "$L_LINK") http=$code"
         [ "$code" = 410 ] && [ "$(resp_get "$resp" error)" = 'error=revoked' ] &&
           printf '' 2>/dev/null >"$RUN_DIR/$L_LINK.revoked"
@@ -586,7 +1844,7 @@ EOF
     esac
   done
   rm -f "$resp" "$resp.code"
-  printf '%s\n' "$r" >"$3.tmp" && mv -f "$3.tmp" "$3"
+  printf '%s\n%s\n%s\n' "$r" "$x" "$xp" >"$3.tmp" && mv -f "$3.tmp" "$3"
 }
 
 # Prints the agent's PID: the nearest ancestor that is not a shell (hooks
@@ -625,8 +1883,16 @@ EOF
   return 1
 }
 
+# --- decisions (TDS_AGENT_EVENTS_V2 section 5) -----------------------------------
+
+# A reason the user typed, wrapped as Claude Code reads a user's rejection:
+# a bare reason is read as script output and ignored [measured].
+CLAUDE_DENY='The user doesn'"'"'t want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\n'
+# What an Antigravity Stop hook says to go on with an approved plan.
+AGY_PLAN_OK='The user approved the plan in SimpleTerm. Implement it now.'
+
 # Prints a device decision (allow|deny) or the no-decision answer (none) in
-# the agent's own format.
+# the agent's own format (the v1 decisions; v2_emit has the others).
 emit_decision() {
   case $AGENT:$1 in
     claude:allow | codex:allow)
@@ -648,7 +1914,372 @@ emit_decision() {
   esac
 }
 
-permission_flow() {
+# The answers of an `answer` decision (lines E: the event's facts, X: the
+# extension's) in the agent's form, or BAD: Claude Code takes an object
+# {question: answer} (a choice by its label, several as an array, typed text
+# as it is, both joined with ", "), the OpenCode bridge a list per question.
+# Every question must be answered (M11), choices index the original list,
+# typed text only where the question takes it.
+ANSWER_AWK='
+BEGIN { FS = "\t" }
+$1 == "E" { E[$2] = substr($0, length($1) + length($2) + length($3) + 4); next }
+$1 == "X" { X[$2] = substr($0, length($1) + length($2) + length($3) + 4); XT[$2] = $3; next }
+function lab(q, v,   b) { b = qp "." q ".options." v; return ((b "." fl) in E) ? E[b "." fl] : E[b] }
+END {
+  n = 0; bad = 0
+  for (k = 0; k < 64 && (("answers." k ".q") in X); k++) {
+    q = X["answers." k ".q"]
+    if (XT["answers." k ".q"] != "r" || q !~ /^[0-9]+$/ || q + 0 >= nq || (q in SEEN)) { bad = 1; break }
+    SEEN[q] = 1; n++
+    no = 0
+    while (no < 64 && (((qp "." q ".options." no "." fl) in E) || ((qp "." q ".options." no) in E))) no++
+    np = 0
+    for (m = 0; m < 64 && (("answers." k ".pick." m) in X); m++) {
+      v = X["answers." k ".pick." m]
+      if (v !~ /^[0-9]+$/ || v + 0 >= no) { bad = 1; break }
+      PL[k, np++] = lab(q, v)
+    }
+    if (bad) break
+    t = (XT["answers." k ".text"] == "s") ? X["answers." k ".text"] : ""
+    if ((t != "" && !free) || length(t) > 2400 || (np == 0 && t == "")) { bad = 1; break }
+    NP[k] = np; TX[k] = t; QI[k] = q
+  }
+  if (bad || n != nq || n == 0) { print "BAD"; exit }
+  if (mode == "claude") {
+    o = "{"
+    for (k = 0; k < n; k++) {
+      if (TX[k] != "" || NP[k] == 1) {
+        v = ""
+        for (m = 0; m < NP[k]; m++) v = v (m ? ", " : "") PL[k, m]
+        if (TX[k] != "") v = v (v == "" ? "" : ", ") TX[k]
+        v = "\"" v "\""
+      } else {
+        v = "["
+        for (m = 0; m < NP[k]; m++) v = v (m ? "," : "") "\"" PL[k, m] "\""
+        v = v "]"
+      }
+      o = o (k ? "," : "") "\"" E[qp "." QI[k] "." fq] "\":" v
+    }
+    print o "}"
+  } else {
+    for (q = 0; q < nq; q++) for (k = 0; k < n; k++) if (QI[k] == q) {
+      v = "["
+      for (m = 0; m < NP[k]; m++) v = v (m ? "," : "") "\"" PL[k, m] "\""
+      if (TX[k] != "") v = v (NP[k] ? "," : "") "\"" TX[k] "\""
+      O[q] = v "]"
+    }
+    o = "["
+    for (q = 0; q < nq; q++) o = o (q ? "," : "") O[q]
+    print o "]"
+  }
+}'
+
+# Prints decision $1 (a decision id, section 4.3) in the agent's format,
+# with X_* from its extension (section 5.4). Returns 1 if there is nothing
+# to print for it here.
+v2_emit() { # act
+  case $AGENT:$1 in
+    *:allow | *:deny) emit_decision "$1" ;;
+    claude:allow_scope)
+      sg=$(raw_span "permission_suggestions.$X_ORIG")
+      [ -n "$sg" ] || return 1
+      printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedPermissions":[%s]}}%s}\n' \
+        "$sg" "$(state_json running)"
+      ;;
+    claude:deny_reason | claude:plan_refine)
+      printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"%s%s"}}%s}\n' \
+        "$CLAUDE_DENY" "$X_REASON" "$(state_json running)"
+      ;;
+    claude:answer)
+      qs=$(raw_span tool_input.questions)
+      [ -n "$qs" ] && [ -n "$X_ANSWERS" ] || return 1
+      printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":{"questions":%s,"answers":%s}}}%s}\n' \
+        "$qs" "$X_ANSWERS" "$(state_json running)"
+      ;;
+    claude:plan_approve)
+      ti=$(raw_span tool_input)
+      [ -n "$ti" ] || return 1
+      up=''
+      [ "$X_MODE" = accept_edits ] && up=',"updatedPermissions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}]'
+      printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":%s%s}}%s}\n' \
+        "$ti" "$up" "$(state_json running)"
+      ;;
+    codex:deny_reason)
+      printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"%s"}}}\n' "$X_REASON"
+      ;;
+    agy:deny_reason) ANSWERED=1; printf '{"decision":"deny","reason":"%s"}\n' "$X_REASON" ;;
+    agy:plan_approve) ANSWERED=1; printf '{"decision":"continue","reason":"%s"}\n' "$AGY_PLAN_OK" ;;
+    opencode:allow_scope) printf '{"decision":"allow","scope":"always"}\n' ;;
+    opencode:deny_reason) printf '{"decision":"deny","message":"%s"}\n' "$X_REASON" ;;
+    opencode:answer)
+      [ -n "$X_ANSWERS" ] || return 1
+      printf '{"decision":"answer","answers":%s}\n' "$X_ANSWERS"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# Other requests of the session that are open now (OpenCode: the bridge
+# keeps run/oc.<session>.pending), but not request $1.
+open_others() { # request id
+  [ -f "$RUN_DIR/oc.$SID.pending" ] || return 0
+  head -c 16384 "$RUN_DIR/oc.$SID.pending" 2>/dev/null | while IFS= read -r oo; do
+    is_id "$oo" && [ "$oo" != "$1" ] && printf '%s\n' "$oo"
+  done
+}
+
+# Judges the decision that link $1 (rq.$$.$1.*) brought (section 5.5): JV
+# apply (JA the decision id), window (nothing to print: a v1 allow of a
+# question), bad (1, 2, 4), changed (3, 5) or none (the wait ended without
+# one).
+rq_judge() { # i
+  JV=none JA='' X_REASON='' X_MODE='' X_ANSWERS='' X_ORIG=''
+  { IFS= read -r jd; IFS= read -r jx; IFS= read -r jp; } <"$RUN_DIR/rq.$$.$1.got"
+  read -r js_push js_nonce js_rid js_dec js_kind js_code js_fmt <"$RUN_DIR/rq.$$.$1.st"
+  jm=$(cat "$RUN_DIR/rq.$$.$1.meta" 2>/dev/null)
+  jrq='' jwin='' jcan='' jaff='' jns=0 jmodes='' jnq=0 jsmap=''
+  for kv in $(printf '%s\n' "$jm" | sed -n '1s/^META //p'); do
+    case $kv in
+      rq=*) jrq=${kv#rq=} ;; win=*) jwin=${kv#win=} ;; can=*) jcan=${kv#can=} ;; aff=*) jaff=${kv#aff=} ;;
+      ns=*) jns=${kv#ns=} ;; modes=*) jmodes=${kv#modes=} ;; nq=*) jnq=${kv#nq=} ;;
+    esac
+  done
+  jsmap=$(printf '%s\n' "$jm" | sed -n "s/^#smap${TAB}s${TAB}//p")
+  case $jd in allow | deny) ;; invalid) JV=bad; return 0 ;; *) return 0 ;; esac
+  [ "$jx" = bad ] && { JV=bad; return 0; }
+  if [ "$jx" != ok ]; then
+    # No extension (an older app, a relay before R2, an alert's quick
+    # action): the decision's default meaning for the request.
+    if [ "$jd" = deny ]; then JA=deny
+    else
+      case $jwin in question) JV=window; return 0 ;; plan) JA=plan_approve ;; *) JA=allow ;; esac
+    fi
+    if [ -n "$jaff" ] && [ "$JA" = deny ] && [ -n "$(open_others "$jrq")" ]; then JV=changed; return 0; fi
+    if [ "$JA" = plan_approve ] && [ "$AGENT" = claude ]; then X_MODE=default; fi
+    case ",$jcan," in *",$JA,"*) ;; *) [ -z "$jcan" ] || { JV=bad; return 0; } ;; esac
+    JV=apply
+    return 0
+  fi
+  # The extension (section 5.2).
+  xv='' xf='' xr='' xn='' xd='' xq='' xa='' xs='' xm='' xseen=''
+  xfacts=$(printf '%s' "$jp" | awk "$NORM_FN$JSON_FACTS" 2>/dev/null)
+  while IFS="$TAB" read -r xk xt xval; do
+    case $xk in
+      v) xv=$xval ;; fmt) xf=$xval ;; rid) xr=$xval ;; nonce) xn=$xval ;; decision) xd=$xval ;;
+      req) xq=$xval ;; act) xa=$xval ;; scope) [ "$xt" = r ] && xs=$xval ;; mode) xm=$xval ;;
+      reason) [ "$xt" = s ] && X_REASON=$xval ;;
+      seen.*) xseen="$xseen $xval" ;;
+    esac
+  done <<EOF
+$xfacts
+EOF
+  if [ "$xv" != 1 ] || [ "$xr" != "$js_rid" ] || [ "$xn" != "$js_nonce" ] || [ "$xd" != "$jd" ]; then JV=bad; return 0; fi
+  # N10: the request the user saw.
+  [ -n "$jrq" ] && [ "$xq" = "$jrq" ] || { JV=changed; return 0; }
+  case ",$jcan," in *",$xa,"*) ;; *) JV=bad; return 0 ;; esac
+  case $xa in
+    allow | allow_scope | allow_edit | answer | plan_approve | form_accept) [ "$jd" = allow ] || { JV=bad; return 0; } ;;
+    *) [ "$jd" = deny ] || { JV=bad; return 0; } ;;
+  esac
+  case $xa in
+    allow_scope)
+      is_uint "$xs" && [ "$xs" -lt "$jns" ] || { JV=bad; return 0; }
+      set -f
+      set -- $jsmap
+      set +f
+      shift "$xs" 2>/dev/null || { JV=bad; return 0; }
+      X_ORIG=${1:-}
+      ;;
+    plan_approve)
+      [ -z "$xm" ] || case ",$jmodes," in *",$xm,"*) X_MODE=$xm ;; *) JV=bad; return 0 ;; esac
+      ;;
+    deny_reason | plan_refine)
+      [ -n "$X_REASON" ] && [ "${#X_REASON}" -le 6000 ] || { JV=bad; return 0; }
+      ;;
+    answer)
+      case $AGENT in claude) aq=tool_input.questions am=claude ;; *) aq=questions am=opencode ;; esac
+      X_ANSWERS=$( { printf '%s\n' "$FACTS" | sed 's/^/E	/'; printf '%s\n' "$xfacts" | sed 's/^/X	/'; } |
+        awk -v qp="$aq" -v fq=question -v fl=label -v free=1 -v nq="$jnq" -v mode="$am" "$ANSWER_AWK" 2>/dev/null)
+      [ -n "$X_ANSWERS" ] && [ "$X_ANSWERS" != BAD ] || { JV=bad; return 0; }
+      ;;
+  esac
+  # N10: the other requests that this decision also settles were all seen.
+  case ",$jaff," in
+    *",$xa,"*)
+      case " $xseen " in *" $jrq "*) ;; *) JV=changed; return 0 ;; esac
+      for oo in $(open_others "$jrq"); do
+        case " $xseen " in *" $oo "*) ;; *) JV=changed; return 0 ;; esac
+      done
+      ;;
+  esac
+  JA=$xa JV=apply
+}
+
+# --- waiting for a decision (section 4.6) --------------------------------------
+
+# Sends request SPEC as link index $1 to link file $2 when its kind is $8
+# (tunnel, relay or all): rid $3, ev $4, decidable $5 (1: with a nonce),
+# waitov $6, relay time $7. Leaves rq.$$.$1.st
+# "<push> <nonce|-> <rid> <dec> <kind> <http code> <fmt>" and rq.$$.$1.meta.
+rq_send() { # i file rid ev dec waitov maxtime pass
+  load_link "$2" || return 0
+  case $8 in tunnel) [ "$L_KIND" = tunnel ] || return 0 ;; relay) [ "$L_KIND" != tunnel ] || return 0 ;; esac
+  rd=$5 rw=$6
+  # A question is decidable only where the receiver takes decisions on
+  # questions (fmt=2; for the relay that is R1). Elsewhere it is an alert,
+  # and one whose window would hide while the hook waits does not wait.
+  if [ "$4" = question ] && [ "$L_FMT" != 2 ] && [ "$rd" = 1 ]; then
+    rd=0
+    [ "$rw" = hidden ] && rw=none
+  fi
+  rn=''
+  if [ "$rd" = 1 ]; then
+    rn=$(rand_hex 16)
+    [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ -n "${SIMPLETERM_HOOK_TEST_NONCE:-}" ] && rn=$SIMPLETERM_HOOK_TEST_NONCE
+    is_hex "$rn" 32 || { rd=0; rn=''; }
+  fi
+  METAF=$RUN_DIR/rq.$$.$1.meta WAITOV=$rw ING_MT=$7
+  ri=$(ingest_raw "$3" "$4" "$rn" "$RUN_DIR/ing.$$.$1")
+  rp=${ri%% *} rc=${ri#* }
+  re=${rc#* } rc=${rc%% *}
+  if [ "$rc" = 400 ] && [ "$re" = invalid-nh ] && [ -n "$rn" ] && [ "$L_KIND" != tunnel ]; then
+    # The relay lost R1 (rolled back): the same rid once more, not
+    # decidable, and no wait there (section 2.4).
+    log "ingest invalid-nh link=$(printf %.8s "$L_LINK"): again without a nonce"
+    rd=0 rn=''
+    ri=$(ingest_raw "$3" "$4" '' "$RUN_DIR/ing.$$.$1")
+    rp=${ri%% *} rc=${ri#* }
+    rc=${rc%% *}
+  fi
+  printf '%s %s %s %s %s %s %s\n' "$rp" "${rn:--}" "$3" "$rd" "${L_KIND:-relay}" "$rc" "${L_FMT:-1}" >"$RUN_DIR/rq.$$.$1.st"
+}
+
+# Starts the poller of link index $1 if it took the request to wait on.
+rq_poll() { # i
+  [ -f "$RUN_DIR/rq.$$.$1.st" ] || return 0
+  read -r pp pn pr pd pk pc pf <"$RUN_DIR/rq.$$.$1.st"
+  [ "$pp" = sent ] && [ "$pd" = 1 ] || return 0
+  load_link "$(cat "$RUN_DIR/rq.$$.$1.f")" || return 0
+  rm -f "$RUN_DIR/rq.$$.$1.dec"
+  printf '' >"$RUN_DIR/rq.$$.$1.w"
+  (poll_link "$pr" "$pn" "$RUN_DIR/rq.$$.$1.dec" "$deadline") </dev/null >/dev/null 2>&1 &
+  PIDS="$PIDS $!"
+}
+
+# A result event (section 5.6) to the tunnel of link index $1: scope $2,
+# out $3, the request event's rid $4, decision id or window kind $5.
+rq_result() { # i scope out rrid [act|win]
+  load_link "$(cat "$RUN_DIR/rq.$$.$1.f" 2>/dev/null)" || return 0
+  [ "$L_KIND" = tunnel ] || return 0
+  rx="@.res.scope${TAB}s$TAB$2$NL@.res.req${TAB}s$TAB$REQ_ID$NL@.res.rrid${TAB}s$TAB$4$NL@.res.out${TAB}s$TAB$3$NL"
+  [ "$3" = applied ] && [ -n "${5:-}" ] && rx="$rx@.res.act${TAB}s$TAB$5$NL"
+  [ "$3" = window ] && [ -n "${5:-}" ] && rx="$rx@.res.win${TAB}s$TAB$5$NL"
+  rs=$( { printf '%s\n' "$FACTS"; printf '%s' "$AT"; printf '%s' "$rx"; } | awk "$NORM_FN$V2_SPEC" 2>/dev/null)
+  (
+    SPEC=$rs NOMSG=1 METAF='' WAITOV='' ING_MT=''
+    TS=$(date +%s)
+    is_uint "$TS" || TS=0
+    rr=$(rand_hex 8)
+    is_hex "$rr" 16 && ingest_one "$rr" resolved '' "$RUN_DIR/ing.$$.res.$1" >/dev/null
+  )
+}
+
+# Ends the request: the request-level result to every tunnel that took it,
+# in the background ($1 out, $2 the link index whose decision applied).
+rq_finish() { # out [i] [act]
+  for p in $PIDS; do kill "$p" 2>/dev/null; done
+  PIDS=''
+  [ -n "${REQ_ID:-}" ] || return 0
+  trap '' HUP
+  (
+    i=0
+    while [ "$i" -lt "$RQ_N" ]; do
+      i=$((i + 1))
+      [ -f "$RUN_DIR/rq.$$.$i.st" ] || continue
+      read -r fp fn fr fd fk fc ff <"$RUN_DIR/rq.$$.$i.st"
+      [ "$fk" = tunnel ] && [ "$fc" = 200 ] || continue
+      fo=$1 fa=${3:-}
+      if [ "$1" = applied ] && [ "${2:-}" != "$i" ]; then fo=other fa=''; fi
+      [ "$fo" = window ] && fa=$RQ_WIN
+      rq_result "$i" req "$fo" "$fr" "$fa"
+    done
+    rm -f "$RUN_DIR"/rq."$$".* "$RUN_DIR"/ing."$$".* "$RUN_DIR"/dec."$$".* 2>/dev/null
+    trim_log
+  ) </dev/null >/dev/null 2>&1 &
+}
+
+# A decision from link index $1 was dropped ($2 bad or changed, section
+# 5.5): that link's wait ends; a tunnel of a v2 app hears it at once and gets
+# the request again under a new rid (3 times at most).
+rq_reject() { # i bad|changed
+  read -r xp xn xr xd xk xc xf <"$RUN_DIR/rq.$$.$1.st"
+  log "decision link-$1 dropped: $2"
+  [ "$xk" = tunnel ] && [ "$xf" = 2 ] || return 0
+  rq_result "$1" link "$2" "$xr"
+  xcount=$(cat "$RUN_DIR/rq.$$.$1.n" 2>/dev/null)
+  is_uint "$xcount" || xcount=0
+  [ "$xcount" -lt 3 ] || return 0
+  answered_locally "$start" "$FP" && return 0
+  printf '%s\n' $((xcount + 1)) >"$RUN_DIR/rq.$$.$1.n"
+  if [ "$AGENT" = opencode ]; then
+    # The other open requests as they are now.
+    FACTS=$(printf '%s\n' "$FACTS" | sed '/^others\./d')
+    xo=0
+    for oo in $(open_others "$REQ_ID"); do
+      FACTS="$FACTS$NL""others.$xo${TAB}s$TAB$oo"
+      xo=$((xo + 1))
+    done
+    v2_spec "$V2X@.tms${TAB}s$TAB$(v2_tms)$NL"
+  fi
+  xnr=$(rand_hex 8)
+  is_hex "$xnr" 16 || return 0
+  rq_send "$1" "$(cat "$RUN_DIR/rq.$$.$1.f")" "$xnr" "$RQ_EV" 1 '' 5 tunnel
+  rq_poll "$1"
+}
+
+# True if a tunnel answered the probe (section 4.6): HTTP 404 with error
+# `unknown` (and not shown:false) to a decision poll of an unknown rid.
+tunnel_probe() {
+  tp=0 tjobs=''
+  rm -f "$RUN_DIR/probe.$$.ok"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    tp=$((tp + 1))
+    (
+      load_link "$f" || exit 0
+      [ "$L_KIND" = tunnel ] || exit 0
+      pr=$(rand_hex 8)
+      is_hex "$pr" 16 || exit 0
+      o=$RUN_DIR/probe.$$.$tp
+      code=$(http GET "/v1/decision?rid=$pr&wait=0" '' 5 "$o")
+      e=$(resp_get "$o" error,shown)
+      rm -f "$o"
+      log "probe link=$(printf %.8s "$L_LINK") http=$code"
+      [ "$code" = 404 ] || exit 0
+      case $e in *error=unknown*) ;; *) exit 0 ;; esac
+      case $e in *shown=false*) exit 0 ;; esac
+      printf '' >"$RUN_DIR/probe.$$.ok"
+    ) </dev/null >/dev/null 2>&1 &
+    tjobs="$tjobs $!"
+  done <<EOF
+$LINKS
+EOF
+  for p in $tjobs; do wait "$p" 2>/dev/null; done
+  [ -f "$RUN_DIR/probe.$$.ok" ] && { rm -f "$RUN_DIR/probe.$$.ok"; return 0; }
+  return 1
+}
+
+# Sends the request in SPEC (ev $1) the way $2 says (section 4.6) and waits
+# per link; then prints the agent's answer, or nothing (its safe
+# no-decision), and tells the tunnels how the request ended.
+#   shared   every link at once, decidable (Claude Code, OpenCode)
+#   hidden   tunnels first; if one answered, the relay only gets an alert
+#            without a nonce; otherwise the relay is decidable (Codex, agy)
+#   relay    the relay only, decidable (agy after an unanswered probe)
+#   agyplan  tunnels an alert (wait none); the fmt=2 relay decidable, the
+#            others an alert, only when no tunnel answered and agy_wait > 0
+request_flow() { # ev mode
+  RQ_EV=$1 RQ_MODE=$2
   case $AGENT in
     codex) cap=$(conf_int codex_wait 60) ;;
     agy) cap=$(conf_int agy_wait 0) ;;
@@ -660,96 +2291,121 @@ permission_flow() {
   [ "$AGENT" = agy ] && [ "$cap" -gt 110 ] && cap=110
   POLL_WAIT=$(conf_int poll_wait 25)
   [ "$POLL_WAIT" -ge 1 ] && [ "$POLL_WAIT" -le 25 ] || POLL_WAIT=25
-  start=$(date +%s)
+  # The cap counts from the hook's start (the tunnel's 5 seconds and the
+  # relay's ingest included, section 4.6).
+  start=$T0
   RES_BASE=$(cat "$RUN_DIR/$SID.res" 2>/dev/null)
   deadline=$((start + cap))
-  PIDS='' JOBS='' POLLERS=0
+  PIDS='' RQ_N=0
+  REQ_ID=$(printf '%s\n' "$SPEC" | sed -n "s/^req\\.id${TAB}s${TAB}//p")
+  RID_USED=1
+  RQ_WIN=$(printf '%s\n' "$SPEC" | sed -n "s/^req\\.win${TAB}s${TAB}//p")
   AGENT_PID=$(agent_pid)
-
-  cleanup_perm() {
-    for p in $PIDS; do kill "$p" 2>/dev/null; done
-    rm -f "$RUN_DIR"/ing."$$".* "$RUN_DIR"/out."$$".* "$RUN_DIR"/dec."$$".* 2>/dev/null
-  }
   # The agent may end the wait (Claude Code signals hooks when a turn is
   # interrupted, the OpenCode bridge when its prompt was answered): print
   # nothing and leave the decision to the agent.
-  trap 'cleanup_perm; log "permission signal"; trim_log; exit 0' TERM INT HUP
+  rq_sig=gone
+  [ "$AGENT" = opencode ] && rq_sig=terminal
+  trap 'rq_finish $rq_sig; log "permission signal"; finish' TERM INT HUP
 
-  # Ingest to every link in parallel; each job leaves its nonce and result.
-  n=0
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    n=$((n + 1))
-    (
-      load_link "$f" || exit 0
-      nonce=$(rand_hex 16)
-      [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ -n "${SIMPLETERM_HOOK_TEST_NONCE:-}" ] &&
-        nonce=$SIMPLETERM_HOOK_TEST_NONCE
-      is_hex "$nonce" 32 || exit 0
-      push=$(ingest_one "$RID" permission "$nonce" "$RUN_DIR/ing.$$.$n")
-      printf '%s %s %s\n' "$push" "$nonce" "$f" >"$RUN_DIR/out.$$.$n"
-    ) </dev/null >/dev/null 2>&1 &
-    JOBS="$JOBS $!"
+    RQ_N=$((RQ_N + 1))
+    printf '%s\n' "$f" >"$RUN_DIR/rq.$$.$RQ_N.f"
   done <<EOF
 $LINKS
 EOF
-  for p in $JOBS; do wait "$p" 2>/dev/null; done
-
-  # Wait only where a device was actually notified.
-  i=0
-  while [ "$i" -lt "$n" ]; do
-    i=$((i + 1))
-    [ -f "$RUN_DIR/out.$$.$i" ] || continue
-    read -r push nonce f <"$RUN_DIR/out.$$.$i" || continue
-    [ "$push" = sent ] || continue
-    load_link "$f" || continue
-    (poll_link "$RID" "$nonce" "$RUN_DIR/out.$$.$i.dec" "$deadline") </dev/null >/dev/null 2>&1 &
-    PIDS="$PIDS $!"
-    POLLERS=$((POLLERS + 1))
-  done
-
-  # Pollers always leave a result file; zombies make kill -0 unreliable.
-  decision=''
-  if [ -n "$PIDS" ]; then
-    while :; do
-      done_n=0
-      i=0
-      while [ "$i" -lt "$n" ]; do
-        i=$((i + 1))
-        [ -f "$RUN_DIR/out.$$.$i.dec" ] || continue
-        done_n=$((done_n + 1))
-        read -r d <"$RUN_DIR/out.$$.$i.dec"
-        case $d in allow | deny) decision=$d ;; esac
-        [ -n "$decision" ] && break
-      done
-      [ -n "$decision" ] && break
-      [ "$done_n" -lt "$POLLERS" ] || break
-      if answered_locally "$start" "$FP"; then
-        log "permission answered-at-terminal"
-        break
-      fi
-      if [ -n "$AGENT_PID" ] && ! kill -0 "$AGENT_PID" 2>/dev/null; then
-        log "permission agent-gone"
-        break
-      fi
-      [ "$(date +%s)" -lt "$deadline" ] || break
-      sleep 1
+  rq_pass() { # pass dec waitov ev maxtime
+    i=0 JOBS=''
+    while [ "$i" -lt "$RQ_N" ]; do
+      i=$((i + 1))
+      (rq_send "$i" "$(cat "$RUN_DIR/rq.$$.$i.f")" "$RID" "$4" "$2" "$3" "$5" "$1") </dev/null >/dev/null 2>&1 &
+      JOBS="$JOBS $!"
     done
-    if [ -z "$decision" ] && ! answered_locally "$start" "$FP" &&
-      { [ -z "$AGENT_PID" ] || kill -0 "$AGENT_PID" 2>/dev/null; }; then
-      if [ "$(date +%s)" -ge "$deadline" ]; then log "permission timeout"; else log "permission no-decision"; fi
-    fi
-  fi
-  cleanup_perm
-  LOGGED=1
-
-  case $decision in
-    allow | deny)
-      emit_decision "$decision"
-      log "permission $decision"
+    for p in $JOBS; do wait "$p" 2>/dev/null; done
+  }
+  tunnel_took() { # a tunnel answered HTTP 200
+    i=0
+    while [ "$i" -lt "$RQ_N" ]; do
+      i=$((i + 1))
+      [ -f "$RUN_DIR/rq.$$.$i.st" ] || continue
+      read -r tp tn tr td tk tc tf <"$RUN_DIR/rq.$$.$i.st"
+      [ "$tk" = tunnel ] && [ "$tc" = 200 ] && return 0
+    done
+    return 1
+  }
+  remain() { r=$((deadline - $(date +%s))); [ "$r" -ge 1 ] || r=1; [ "$r" -le 20 ] || r=20; printf '%s' "$r"; }
+  case $RQ_MODE in
+    shared) rq_pass all 1 '' "$RQ_EV" 20 ;;
+    relay) rq_pass relay 1 '' "$RQ_EV" "$(remain)" ;;
+    hidden)
+      rq_pass tunnel 1 '' "$RQ_EV" 5
+      if tunnel_took; then
+        # The app is connected: other devices get an alert without buttons,
+        # so a decision there is never left unheard.
+        trap '' HUP
+        (rq_pass relay 0 none question 20) </dev/null >/dev/null 2>&1 &
+      else
+        rq_pass relay 1 '' "$RQ_EV" "$(remain)"
+      fi
       ;;
-    *) emit_decision none ;;
+    agyplan)
+      rq_pass tunnel 0 none "$RQ_EV" 5
+      if ! tunnel_took && [ "$cap" -gt 0 ]; then
+        rq_pass relay 1 hidden "$RQ_EV" "$(remain)"
+      else
+        rq_pass relay 0 none "$RQ_EV" 20
+      fi
+      ;;
   esac
+
+  i=0
+  while [ "$i" -lt "$RQ_N" ]; do i=$((i + 1)); rq_poll "$i"; done
+
+  decision='' dlink='' rq_out=window
+  while :; do
+    waiting=0
+    i=0
+    while [ "$i" -lt "$RQ_N" ]; do
+      i=$((i + 1))
+      [ -f "$RUN_DIR/rq.$$.$i.w" ] || continue
+      waiting=1
+      [ -f "$RUN_DIR/rq.$$.$i.dec" ] || continue
+      mv -f "$RUN_DIR/rq.$$.$i.dec" "$RUN_DIR/rq.$$.$i.got"
+      rm -f "$RUN_DIR/rq.$$.$i.w"
+      rq_judge "$i"
+      if [ "$JV" = apply ] || [ "$JV" = window ]; then
+        if answered_locally "$start" "$FP"; then rq_out=terminal; break 2; fi
+        decision=$JA dlink=$i
+        [ "$JV" = window ] && decision=''
+        break 2
+      fi
+      case $JV in bad | changed) rq_reject "$i" "$JV" ;; esac
+    done
+    [ "$waiting" = 1 ] || break
+    if answered_locally "$start" "$FP"; then
+      log "permission answered-at-terminal"
+      rq_out=terminal
+      break
+    fi
+    if [ -n "$AGENT_PID" ] && ! kill -0 "$AGENT_PID" 2>/dev/null; then
+      log "permission agent-gone"
+      rq_out=gone
+      break
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then log "permission timeout"; break; fi
+    sleep 1
+  done
+  trap - TERM INT HUP
+  LOGGED=1
+  if [ -n "$decision" ] && v2_emit "$decision"; then
+    log "permission $decision"
+    rq_finish applied "$dlink" "$decision"
+  else
+    [ "$rq_out" = window ] && [ -z "$dlink" ] && log "permission no-decision"
+    [ "$AGENT" = agy ] && agy_default
+    rq_finish "$rq_out"
+  fi
 }
 
 # --- usage (#342) ------------------------------------------------------------
@@ -1183,14 +2839,19 @@ case $AGENT in
   claude)
     APP=claude-code
     # Grok Build runs Claude Code plugins' hooks (and this plugin installed
-    # in Grok uses the same hooks file): it sets GROK_HOOK_EVENT.
-    if [ -n "${GROK_HOOK_EVENT:-}" ]; then AGENT=grok APP=grok-build; fi
+    # in Grok uses the same hooks file): it sets GROK_HOOK_EVENT. GitHub
+    # Copilot CLI loads a Claude Code plugin given to it (--plugin-dir); it
+    # sets COPILOT_CLI=1 (and CLAUDE_PROJECT_DIR too), and then this is
+    # Copilot, never a Claude Code wait.
+    if [ "${COPILOT_CLI:-}" = 1 ]; then AGENT=copilot APP=copilot-cli MODE=''
+    elif [ -n "${GROK_HOOK_EVENT:-}" ]; then AGENT=grok APP=grok-build; fi
     ;;
   codex | codex-notify) APP=codex ;;
   gemini) APP=gemini-cli ;;
   agy) APP=antigravity ;;
   grok) APP=grok-build ;;
   opencode) APP=opencode ;;
+  copilot) APP=copilot-cli ;;
   notify) APP=script ;;
   *) exit 0 ;;
 esac
@@ -1203,6 +2864,14 @@ elif [ "$AGENT" = notify ]; then
   INPUT=''
 else
   INPUT=$(head -c "$MAX_INPUT" 2>/dev/null) || INPUT=$(dd bs=4096 count=64 2>/dev/null)
+fi
+
+# Codex runs PreToolUse and PostToolUse hooks for the session record's
+# heartbeat only (TDS_AGENT_EVENTS_V2 section 8.3): their large tool input or
+# output is not read, only its start (session_id and the event come first).
+if [ "$AGENT" = codex ]; then
+  ih=$(printf '%.4096s' "$INPUT")
+  case $ih in *'"hook_event_name":"PreToolUse"'* | *'"hook_event_name":"PostToolUse"'*) INPUT=$ih ;; esac
 fi
 
 # Nothing to do without a link or a SimpleTerm session.
@@ -1247,6 +2916,7 @@ fi
 is_hex "$RID" 16 || RID=''
 is_uint "$TS" || TS=0
 is_uint "$NOW" || NOW=0
+T0=$NOW
 [ -n "$RID" ] || LINKS=''
 USAGE_SEQ='' USAGE_JSON='' TITLE='' MSG=''
 
@@ -1282,32 +2952,44 @@ case $AGENT in
     # there only when a subagent's own tool call fires the hook (foreground or
     # background; absent for the main thread).
     WANT='hook_event_name,notification_type,tool_name,tool_input.command,tool_input.file_path,tool_input.url,tool_input.description,tool_input.questions.0.question,session_id,cwd,message,last_assistant_message,error,transcript_path,context_tokens,model,to_model,prompt,source,stop_hook_active,is_interrupt,agent_id'
+    # v2 (TDS_AGENT_EVENTS_V2 section 10.1): turn, permission mode, the
+    # subagent's type, a session's end; from the OpenCode bridge its request
+    # id, version family, parent session, message id and session title.
+    WANT=$WANT',prompt_id,permission_mode,agent_type,reason,request_id,oc,parent_session_id,message_id,title'
     for i in 0 1 2 3 4 5 6 7 8 9; do WANT=$WANT,background_tasks.$i.id,background_tasks.$i.type,background_tasks.$i.description,background_tasks.$i.command; done
     for i in 0 1 2 3 4; do WANT=$WANT,session_crons.$i.id,session_crons.$i.schedule,session_crons.$i.prompt; done
     ;;
   codex)
-    WANT='hook_event_name,tool_name,tool_input.command,tool_input.file_path,tool_input.description,session_id,cwd,last_assistant_message,transcript_path,stop_hook_active'
+    WANT='hook_event_name,tool_name,tool_input.command,tool_input.file_path,tool_input.description,session_id,cwd,last_assistant_message,transcript_path,stop_hook_active,turn_id,permission_mode,prompt,source'
     ;;
   codex-notify) WANT='type,cwd,last-assistant-message,input-messages.0' ;;
   gemini)
     WANT='hook_event_name,notification_type,message,details.type,details.command,details.rootCommand,details.filePath,details.fileName,details.toolName,details.serverName,details.urls.0,details.prompt,prompt_response,session_id,cwd,transcript_path,stop_hook_active'
     ;;
   agy)
-    WANT='conversationId,workspacePaths.0,toolCall.name,toolCall.args.CommandLine,toolCall.args.Cwd,toolCall.args.questions.0.question,toolCall.args.Action,toolCall.args.Target,terminationReason,error,fullyIdle'
+    # toolCall.args has no Cwd in 1.4.12 (the workspace is workspacePaths).
+    WANT='conversationId,workspacePaths.0,toolCall.name,toolCall.args.CommandLine,toolCall.args.questions.0.question,toolCall.args.Path,toolCall.args.ServerName,toolCall.args.ToolName,toolCall.args.ArtifactMetadata.RequestFeedback,terminationReason,error,fullyIdle,executionNum,stepIdx,transcriptPath,lastUserInput'
     ;;
   grok)
     # backgroundTasks (Grok's Stop, camelCase): the first ten tasks.
     # sessionCrons (the first five): scheduled wake-ups; a prompt id that is
     # not a person's marks a turn Grok started itself.
     WANT='hook_event_name,hookEventName,notificationType,sessionId,cwd,message,lastAssistantMessage,error,reason,promptId,timestamp,prompt,stop_hook_active'
+    WANT=$WANT',permissionMode,agentId,agent_id,agentType,subagentType,toolName,toolUseId,transcriptPath,transcript_path'
     for i in 0 1 2 3 4 5 6 7 8 9; do WANT=$WANT,backgroundTasks.$i.id,backgroundTasks.$i.type,backgroundTasks.$i.description,backgroundTasks.$i.command; done
     for i in 0 1 2 3 4; do WANT=$WANT,sessionCrons.$i.id,sessionCrons.$i.schedule,sessionCrons.$i.prompt; done
+    ;;
+  copilot)
+    # GitHub Copilot CLI (camelCase; notification and Claude-format events
+    # in snake_case): section 10 of TDS_AGENT_EVENTS_V2.
+    WANT='hookName,hook_event_name,hookEventName,sessionId,session_id,cwd,transcriptPath,transcript_path,message,notification_type,toolName,tool_name,agentId,agent_id,agentType,agent_type,parentAgentId,parent_agent_id,stopReason,prompt,reason,error.message,error.name,error,stop_hook_active,timestamp,recoverable,errorContext,error_context'
     ;;
 esac
 
 EVENT='' NTYPE='' TOOL='' DETAIL='' DESC='' SID='' CWD='' LAST='' ERR='' QTEXT='' FIRSTIN='' NTYPE2=''
 TPATH='' CTXTOK='' MODEL='' GTYPE='' FULLYIDLE='' TERMREASON='' EXTRA='' GKEY='' REASON=''
-PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS=''
+PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS='' REQIDIN='' TOOLUSEID=''
+OCTITLE='' RFB='' APATH='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX=''
 BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_SEQ=''
 BG_SVC=0 BG_IDMAP='' BG_KEEP='' BG_SHELLS='' BG_IDS='' BG_NOID=0 BG_M=''
 CRON_N=0 CRON_SCHED='' CRON_SUMS=''
@@ -1789,7 +3471,7 @@ bg_field() { # path=value
     description) [ "$bk" = "$BG_PICK" ] && [ -z "$BG_DESC" ] && BG_DESC=$bv ;;
     command)
       [ "$bk" = "$BG_PICK" ] && [ -z "$BG_CMD" ] && BG_CMD=$bv
-      case "$BG_SHELLS " in *" $bk "*) is_service_cmd "$bv" && BG_SVC=$((BG_SVC + 1)) ;; esac
+      case "$BG_SHELLS " in *" $bk "*) is_service_cmd "$bv" && BG_SVC=$((BG_SVC + 1)) BG_SVCIDX="$BG_SVCIDX $bk" ;; esac
       ;;
   esac
   return 0
@@ -1831,7 +3513,29 @@ while IFS= read -r kv; do
     source=*) SRC=${kv#*=} ;;
     stop_hook_active=*) STOPACT=${kv#*=} ;;
     is_interrupt=*) ISINT=${kv#*=} ;;
-    agent_id=*) AGENTID=${kv#*=} ;;
+    agent_id=* | agentId=*) AGENTID=${kv#*=} ;;
+    agent_type=* | agentType=* | subagentType=*) [ -n "$SUBTYPE" ] || SUBTYPE=${kv#*=} ;;
+    parentAgentId=* | parent_agent_id=*) SUBPAR=${kv#*=} ;;
+    prompt_id=* | turn_id=* | message_id=* | executionNum=*) TID=${kv#*=} ;;
+    permission_mode=* | permissionMode=*) PMODE=${kv#*=} ;;
+    request_id=*) REQIDIN=${kv#*=} ;;
+    oc=*) OCV=${kv#*=} ;;
+    parent_session_id=*) SUBPAR_SESSION=${kv#*=} ;;
+    title=*) OCTITLE=${kv#*=} ;;
+    toolName=*) [ -n "$TOOL" ] || TOOL=${kv#*=} ;;
+    toolUseId=*) TOOLUSEID=${kv#*=} ;;
+    transcriptPath=*) [ -n "$TPATH" ] || TPATH=${kv#*=} ;;
+    toolCall.args.ArtifactMetadata.RequestFeedback=*) RFB=${kv#*=} ;;
+    toolCall.args.Path=*) APATH=${kv#*=} ;;
+    toolCall.args.ServerName=*) AMS=${kv#*=} ;;
+    toolCall.args.ToolName=*) AMT=${kv#*=} ;;
+    lastUserInput=*) LASTIN=${kv#*=} ;;
+    hookName=*) [ -n "$EVENT" ] || EVENT=${kv#*=} ;;
+    error.name=*) ERR=${kv#*=} ;;
+    error.message=*) LAST=${kv#*=} ;;
+    stopReason=*) REASON=${kv#*=} ;;
+    recoverable=*) RECOV=${kv#*=} ;;
+    errorContext=* | error_context=*) ECTX=${kv#*=} ;;
     # Grok sends both: hook_event_name has Claude's PascalCase names.
     hook_event_name=*) EVENT=${kv#*=} ;;
     hookEventName=*) [ -n "$EVENT" ] || EVENT=${kv#*=} ;;
@@ -1848,7 +3552,6 @@ while IFS= read -r kv; do
     tool_input.questions.0.question=* | toolCall.args.questions.0.question=*) QTEXT=${kv#*=} ;;
     session_id=* | sessionId=* | conversationId=*) [ -n "$SID" ] || SID=${kv#*=} ;;
     cwd=* | workspacePaths.0=*) [ -n "$CWD" ] || CWD=${kv#*=} ;;
-    toolCall.args.Cwd=*) EXTRA=${kv#*=} ;;
     message=*) LAST=${kv#*=} ;;
     last_assistant_message=* | lastAssistantMessage=* | prompt_response=*) LAST=${kv#*=} ;;
     last-assistant-message=*) LAST=${kv#*=} ;;
@@ -1860,7 +3563,7 @@ while IFS= read -r kv; do
     fullyIdle=*) FULLYIDLE=${kv#*=} ;;
     terminationReason=*) TERMREASON=${kv#*=} ;;
     reason=*) REASON=${kv#*=} ;;
-    promptId=*) PROMPTID=${kv#*=}; GKEY=$GKEY.$PROMPTID ;;
+    promptId=*) PROMPTID=${kv#*=}; GKEY=$GKEY.$PROMPTID TID=$PROMPTID ;;
     timestamp=*) GKEY=$GKEY.${kv#*=} ;;
   esac
 done <<EOF
@@ -1878,10 +3581,33 @@ if [ "$AGENT" = grok ]; then
     user_prompt_submit) EVENT=UserPromptSubmit ;;
   esac
 fi
+if [ "$AGENT" = copilot ]; then
+  # Our Copilot hooks name the event on the command line; a Claude-format
+  # hook (the Claude Code plugin given to Copilot) has it in the input.
+  [ -n "$MODE" ] && EVENT=$MODE
+  case $EVENT in
+    PermissionRequest) EVENT=permissionRequest ;;
+    PreToolUse) EVENT=preToolUse ;;
+    PostToolUse) EVENT=postToolUse ;;
+    Notification) EVENT=notification ;;
+    Stop) EVENT=agentStop ;;
+    UserPromptSubmit) EVENT=userPromptSubmitted ;;
+    SessionStart) EVENT=sessionStart ;;
+    SessionEnd) EVENT=sessionEnd ;;
+    SubagentStart) EVENT=subagentStart ;;
+    SubagentStop) EVENT=subagentStop ;;
+  esac
+fi
+RAWSID=$SID
 SID=$(printf '%s' "$SID" | tr -c 'A-Za-z0-9_-' '_' | cut -c1-80)
 [ -n "$SID" ] || SID=nosession
+DIRV=$CWD
+# A subagent (its own hook events carry its id; section 7).
+SUBID=''
+is_id "$AGENTID" && SUBID=$AGENTID
 
-CWD_BASE=$(json_trim "${CWD:-$EXTRA}" 64 256 base)
+CWD_BASE=$(json_trim "$CWD" 64 256 base)
+CWD_BASEF=$(json_trim "$CWD" 100000 400000 base)
 FP=$(printf '%s\t%s' "$TOOL" "$(json_trim "$DETAIL" 200 800)" | cksum | awk '{ print $1 }')
 
 # A `done` waits done_delay seconds (done_later) in case another Stop hook
@@ -1892,7 +3618,7 @@ FP=$(printf '%s\t%s' "$TOOL" "$(json_trim "$DETAIL" 200 800)" | cksum | awk '{ p
 # subagent's tool calls carry the session id and are no sign of the main
 # thread going on.
 case $AGENT:$EVENT in
-  claude:Stop | codex:Stop | grok:Stop | gemini:AfterAgent) ;;
+  claude:Stop | codex:Stop | grok:Stop | gemini:AfterAgent | copilot:agentStop | opencode:Stop | *:SessionEnd | *:sessionEnd) ;;
   *)
     if [ -z "$AGENTID" ] && [ -f "$RUN_DIR/$SID.pend" ]; then rm -f "$RUN_DIR/$SID.pend" 2>/dev/null; fi
     ;;
@@ -2008,14 +3734,20 @@ bg_pause() {
   # flag, 3: the pause's token, 4: `ask` while the badge says `waiting`.
   if [ "${1:-}" = ask ]; then bm=$(json_trim "$LAST" 80 320); else bm=$BG_M; fi
   printf '%s\n%s\n%s\n%s\n' "$bm" "$flag" "$RID" "${1:-}" >"$RUN_DIR/$SID.bg" 2>/dev/null
+  pend=background
+  [ "$BG_N" -eq 0 ] && [ "$CRON_N" -gt 0 ] && pend=scheduled
   if [ "${1:-}" = ask ]; then
-    MSG=$(json_trim "$LAST" 200 800)
+    setmsg "$LAST"
+    turn_at background true
+    v2_prep "$TURN_AT"
     send_bg question
     print_state waiting "$LAST"
     return 0
   fi
   bgm=$BG_M # print_state reuses m
   print_state background "$bgm"
+  turn_at "$pend" "$TASKS"
+  send_state "$pend" "$TURN_AT"
   [ "$BG_N" -gt 0 ] && [ "$BG_FINITE" -eq 0 ] && bg_later "$RID" "$bgm"
   return 0
 }
@@ -2030,7 +3762,10 @@ bg_later() { # token what
   [ -n "$LINKS" ] || return 0
   w=$(conf_int bg_done_after 600)
   [ "$w" -gt 0 ] || return 0
-  MSG=$(done_msg "$2")
+  MSG=$(done_msg "$2") MSGF=''
+  MSGF=$MSG
+  turn_at done "$TASKS" true
+  v2_prep "$TURN_AT"
   trap '' HUP
   (
     sleep "$w"
@@ -2061,7 +3796,7 @@ done_msg() { # what
 # 0 (a second Stop still replaces the first within the wait if one is set).
 done_later() {
   [ -n "$LINKS" ] || return 0
-  case $AGENT in codex | gemini | opencode) dw=0 ;; *) dw=3 ;; esac
+  case $AGENT in codex | gemini | opencode | copilot | agy) dw=0 ;; *) dw=3 ;; esac
   dw=$(conf_int done_delay $dw)
   if [ "$dw" -le 0 ] || ! printf '%s\n' "$RID" >"$RUN_DIR/$SID.pend" 2>/dev/null; then
     send_bg done
@@ -2076,13 +3811,15 @@ done_later() {
   ) </dev/null >/dev/null 2>&1 &
 }
 
-later_send() { # ev
+later_send() { # ev [scope]
   TS=$(date +%s)
   NOW=$TS
   is_uint "$TS" || TS=0
   RID=$(rand_hex 8)
   is_hex "$RID" 16 || return 0
-  send_bg "$1"
+  # v2: the event's time again (tms).
+  [ "$V2" = 1 ] && v2_spec "$V2X@.tms${TAB}s$TAB$(v2_tms)$NL"
+  send_bg "$1" "$RID" "${2:-all}"
 }
 
 # Codex `/goal` (on by default since 0.16x): while a goal is active Codex
@@ -2109,7 +3846,9 @@ codex_goal_later() { # rollout file
   off=$(wc -c <"$gf" 2>/dev/null | tr -d ' ')
   is_uint "$off" || return 0
   w=$(conf_int codex_goal_check 5)
-  MSG=$(json_trim "$LAST" 200 800)
+  setmsg "$LAST"
+  turn_at done
+  v2_prep "$TURN_AT"
   printf '%s\n' "$RID" >"$RUN_DIR/$SID.goal" 2>/dev/null
   trap '' HUP
   (
@@ -2151,32 +3890,39 @@ turn_end() {
 # Build has no such field: the prompt id of a turn it starts itself begins
 # with a fixed word (task-completed-, scheduler-fired-, ...; static, from the
 # 1.0.70 binary), a person's is a UUID.
-PROMPT_USER=1
+PROMPT_USER=1 PROMPT_BY=user
 prompt_origin() {
-  PROMPT_USER=1
+  PROMPT_USER=1 PROMPT_BY=user
   if [ "$AGENT" = grok ]; then
     case $PROMPTID in
-      task-completed-* | bash-completed-* | monitor-completed-* | subagent-completed-* | workflow-completed-* | \
-        parent-agent-message-* | parent-message-* | notifications-* | goal-summary-* | goal-classifier-nudge-* | \
-        plan-resume-* | scheduler-fired-*) PROMPT_USER=0 ;;
+      task-completed-* | bash-completed-* | monitor-completed-* | subagent-completed-* | workflow-completed-*) PROMPT_BY=task ;;
+      scheduler-fired-*) PROMPT_BY=schedule ;;
+      parent-agent-message-* | parent-message-* | notifications-* | goal-summary-* | goal-classifier-nudge-* | plan-resume-*) PROMPT_BY=agent ;;
     esac
-    return 0
+  elif [ "$AGENT" = copilot ]; then
+    case $PROMPT in '<system_notification>'*) PROMPT_BY=task ;; esac
+  else
+    case $SRC in
+      user | sdk) ;;
+      loop_wakeup | schedule_wakeup) PROMPT_BY=schedule ;;
+      poll_event) PROMPT_BY=task ;;
+      '')
+        case $PROMPT in
+          '<task-notification>'*) PROMPT_BY=task ;;
+          '<agent-message '*) PROMPT_BY=agent ;;
+          '<<autonomous-loop'*) PROMPT_BY=schedule ;;
+          '') ;;
+          *)
+            if [ -f "$RUN_DIR/$SID.crons" ]; then
+              case " $(cat "$RUN_DIR/$SID.crons" 2>/dev/null) " in *" $(prompt_sum "$PROMPT") "*) PROMPT_BY=schedule ;; esac
+            fi
+            ;;
+        esac
+        ;;
+      *) PROMPT_BY=agent ;;
+    esac
   fi
-  case $SRC in
-    user | sdk) ;;
-    '')
-      case $PROMPT in
-        '<task-notification>'* | '<agent-message '* | '<<autonomous-loop'*) PROMPT_USER=0 ;;
-        '') ;;
-        *)
-          if [ -f "$RUN_DIR/$SID.crons" ]; then
-            case " $(cat "$RUN_DIR/$SID.crons" 2>/dev/null) " in *" $(prompt_sum "$PROMPT") "*) PROMPT_USER=0 ;; esac
-          fi
-          ;;
-      esac
-      ;;
-    *) PROMPT_USER=0 ;;
-  esac
+  [ "$PROMPT_BY" = user ] || PROMPT_USER=0
 }
 
 # $SID.turn: line 1 `user` or `auto` (who started this turn), line 2 the ids
@@ -2185,7 +3931,8 @@ prompt_origin() {
 turn_mark() {
   tm_ids=''
   [ -f "$RUN_DIR/$SID.stopids" ] && IFS= read -r tm_ids <"$RUN_DIR/$SID.stopids"
-  if [ "$PROMPT_USER" = 1 ]; then tm_who=user; else tm_who=auto; fi
+  tm_who=$PROMPT_BY
+  [ "$PROMPT_USER" = 1 ] && tm_who=user
   printf '%s\n%s\n' "$tm_who" "$tm_ids" >"$RUN_DIR/$SID.turn" 2>/dev/null
 }
 
@@ -2198,10 +3945,37 @@ bg_all_old() {
   return 0
 }
 
+# TURN_AT: @-parameters of the end of a turn (TDS_AGENT_EVENTS_V2 section
+# 6.1): end $1, asks $2 (true|false), late $3. Who started the turn is the
+# turn's mark (turn_mark); the background tasks and schedules come from the
+# event's facts.
+TASKS='' TLAST='' TGOAL=''
+turn_at() { # end [asks] [late]
+  TURN_AT="@.turn${TAB}s${TAB}1$NL@.end${TAB}s$TAB$1$NL"
+  tb=${TURN_BY:-}
+  [ -z "$tb" ] && [ -f "$RUN_DIR/$SID.turn" ] && tb=$(sed -n 1p "$RUN_DIR/$SID.turn" 2>/dev/null)
+  case $tb in user | task | schedule | agent) ;; auto) tb=agent ;; *) tb=unknown ;; esac
+  TURN_AT="$TURN_AT@.by${TAB}s$TAB$tb$NL"
+  [ -n "${2:-}" ] && TURN_AT="$TURN_AT@.asks${TAB}s$TAB$2$NL"
+  # OpenCode's LAST is the session's title, not the last message.
+  [ "$AGENT" != opencode ] && [ -n "${TLAST:-$LAST}" ] && TURN_AT="$TURN_AT@.last${TAB}s$TAB${TLAST:-$LAST}$NL"
+  [ -n "${3:-}" ] && TURN_AT="$TURN_AT@.late${TAB}s$TAB$3$NL"
+  [ "$STOPACT" = true ] && TURN_AT="$TURN_AT@.hook${TAB}s${TAB}true$NL"
+  case $AGENT in
+    grok) TURN_AT="$TURN_AT@.bgp${TAB}s${TAB}backgroundTasks$NL@.cronp${TAB}s${TAB}sessionCrons$NL" ;;
+    *) TURN_AT="$TURN_AT@.bgp${TAB}s${TAB}background_tasks$NL@.cronp${TAB}s${TAB}session_crons$NL" ;;
+  esac
+  TURN_AT="$TURN_AT@.prev${TAB}s$TAB$PREV_IDS$NL@.svc${TAB}s$TAB$BG_SVCIDX$NL"
+  [ -n "$TGOAL" ] && TURN_AT="$TURN_AT@.goal${TAB}s$TAB$TGOAL$NL"
+  return 0
+}
+
 # A `done` for the turn that just ended ($1: what still runs, if anything).
 stop_done() {
-  if [ -n "${1:-}" ]; then MSG=$(done_msg "$1"); else MSG=$(json_trim "$LAST" 200 800); fi
+  if [ -n "${1:-}" ]; then MSG=$(done_msg "$1") MSGF=''; MSGF=$MSG; else setmsg "$LAST"; fi
   [ "$STOPACT" = true ] && XFLAGS=',"stop_hook_active":true'
+  turn_at done "$TASKS"
+  v2_prep "$TURN_AT"
   done_later
   # The turn's done is sent (or pending): Claude Code's idle_prompt, 60 s
   # later, repeats it (the next turn note takes the mark back).
@@ -2225,10 +3999,11 @@ stop_done() {
 # schedule gone is the done. TURN_USER defaults to 1 (a person) when the
 # turn's start was not seen.
 stop_flow() {
-  TURN_USER=1 PREV_IDS='' t1='' t2=''
+  TURN_USER=1 PREV_IDS='' t1='' t2='' TURN_BY=''
   if [ -f "$RUN_DIR/$SID.turn" ]; then
     { IFS= read -r t1; IFS= read -r t2; } <"$RUN_DIR/$SID.turn"
-    [ "$t1" = auto ] && TURN_USER=0
+    [ -n "$t1" ] && [ "$t1" != user ] && TURN_USER=0
+    TURN_BY=$t1
     PREV_IDS=$t2
   fi
   bg_ids_finish
@@ -2237,6 +4012,11 @@ stop_flow() {
     printf '%s\n' "$CRON_SUMS" >"$RUN_DIR/$SID.crons" 2>/dev/null
   elif [ -f "$RUN_DIR/$SID.crons" ]; then
     rm -f "$RUN_DIR/$SID.crons" 2>/dev/null
+  fi
+  TASKS=''
+  if [ "$AGENT" != opencode ]; then
+    TASKS=false
+    ask_detect "$LAST" && TASKS=true
   fi
   if [ "$BG_N" -eq 0 ] && [ "$CRON_N" -eq 0 ]; then
     stop_done
@@ -2254,30 +4034,184 @@ stop_flow() {
   fi
   usage_report
   # OpenCode's LAST is the session's title, not a message to the person.
-  if [ "$AGENT" != opencode ] && ask_detect "$LAST"; then bg_pause ask; else bg_pause; fi
+  if [ "$TASKS" = true ]; then bg_pause ask; else bg_pause; fi
   turn_end
 }
+
+# --- v2 helpers of the event handlers ---------------------------------------------
+
+# The request kind parameter lines for v2_prep (TDS_AGENT_EVENTS_V2 section 4).
+rk_at() { # kind [extra lines]
+  RK_AT="@.rkind${TAB}s$TAB$1$NL@.rid${TAB}s$TAB$RID$NL${2:-}"
+}
+
+# Saves this event's facts that a later event of the session needs, with
+# prefix $1, in run/$SID.$2 (at most 64 KiB; the line of a long value goes).
+facts_keep() { # prefix file [path regex]
+  v2_facts
+  printf '%s\n' "$FACTS" | awk -v pre="$1" -v re="${3:-.}" 'length($0) <= 65536 && $1 ~ re { print pre $0 }' FS="$TAB" |
+    head -c 65536 >"$RUN_DIR/$SID.$2.$$" 2>/dev/null && mv -f "$RUN_DIR/$SID.$2.$$" "$RUN_DIR/$SID.$2"
+}
+
+# Facts saved by facts_keep within $2 seconds, added to FACTS.
+facts_add() { # file max-age
+  ff=$RUN_DIR/$SID.$1
+  [ -f "$ff" ] || return 1
+  [ -n "$(find "$ff" -mmin -"$(( ($2 + 59) / 60 ))" 2>/dev/null)" ] || return 1
+  v2_facts
+  FACTS="$FACTS$NL$(cat "$ff" 2>/dev/null)"
+}
+
+# Codex: the plan of turn TID from the rollout (`item_completed` with
+# item.type Plan, measured on 0.165.0, M2): its text, JSON-escaped.
+codex_plan() { # rollout file
+  [ -n "$1" ] && is_id "$TID" || return 1
+  tail -c 1048576 "$1" 2>/dev/null | awk -v tid="\"turn_id\":\"$TID\"" '
+    index($0, "\"type\":\"item_completed\"") && index($0, tid) && (p = index($0, "\"item\":{\"type\":\"Plan\"")) {
+      r = substr($0, p)
+      q = index(r, "\"text\":\"")
+      if (!q) next
+      r = substr(r, q + 8)
+      if (match(r, /^([^"\\]|\\.)*/)) t = substr(r, 1, RLENGTH)
+    }
+    END { if (t == "") exit 1; print t }'
+}
+
+# Copilot's session events (transcriptPath, events.jsonl): the last answer
+# (TLAST) and the background shells and subagents that have not ended, as
+# background_tasks facts and kv lines for bg_field (section 10.4).
+COPILOT_TX='
+function str(s, key,   p, r) {
+  p = index(s, "\"" key "\":\"")
+  if (!p) return ""
+  r = substr(s, p + length(key) + 4)
+  if (match(r, /^([^"\\]|\\.)*/)) return substr(r, 1, RLENGTH)
+  return ""
+}
+/"type":"assistant\.message"/ { c = str($0, "content"); if (c != "") last = c }
+/"type":"tool\.execution_start"/ && /"toolName":"bash"/ && /"mode":"async"/ && !/"detach":true/ {
+  id = str($0, "shellId"); if (id == "") next
+  if (!(id in SH)) { NS++; SO[NS] = id }
+  SH[id] = 1; SC[id] = str($0, "command"); SD[id] = str($0, "description")
+}
+/"type":"system\.notification"/ && (/"type":"shell_completed"/ || /"type":"shell_detached_completed"/) { delete SH[str($0, "shellId")] }
+/"type":"tool\.execution_start"/ && /"toolName":"stop_bash"/ { delete SH[str($0, "shellId")] }
+/"type":"subagent\.started"/ && /"executionMode":"background"/ {
+  id = str($0, "toolCallId"); if (id == "") next
+  if (!(id in SA)) { NA++; AO[NA] = id }
+  SA[id] = 1; AT[id] = str($0, "agentType"); AN[id] = str($0, "agentDisplayName")
+}
+/"type":"subagent\.(completed|failed)"/ { delete SA[str($0, "toolCallId")] }
+END {
+  n = 0
+  for (k = 1; k <= NS; k++) if (SO[k] in SH) {
+    i = SO[k]
+    printf "F\tbackground_tasks.%d.id\ts\t%s\n", n, i
+    printf "F\tbackground_tasks.%d.type\ts\tshell\n", n
+    if (SD[i] != "") printf "F\tbackground_tasks.%d.description\ts\t%s\n", n, SD[i]
+    if (SC[i] != "") printf "F\tbackground_tasks.%d.command\ts\t%s\n", n, SC[i]
+    n++
+  }
+  for (k = 1; k <= NA; k++) if (AO[k] in SA) {
+    i = AO[k]
+    printf "F\tbackground_tasks.%d.id\ts\t%s\n", n, i
+    printf "F\tbackground_tasks.%d.type\ts\tsubagent\n", n
+    if (AT[i] != "") printf "F\tbackground_tasks.%d.agentType\ts\t%s\n", n, AT[i]
+    if (AN[i] != "") printf "F\tbackground_tasks.%d.description\ts\t%s\n", n, AN[i]
+    n++
+  }
+  if (last != "") print "L\t" last
+}'
+
+copilot_tx() {
+  tf=$(input_file "$TPATH")
+  [ -n "$tf" ] || return 0
+  tx=$(tail -c 2097152 "$tf" 2>/dev/null | awk "$COPILOT_TX" 2>/dev/null)
+  [ -n "$tx" ] || return 0
+  TLAST=$(printf '%s\n' "$tx" | sed -n "s/^L$TAB//p")
+  [ -n "$TLAST" ] && LAST=$TLAST
+  v2_facts
+  ft=$(printf '%s\n' "$tx" | sed -n "s/^F$TAB//p")
+  [ -n "$ft" ] && FACTS="$FACTS$NL$ft"
+  while IFS="$TAB" read -r k t v; do
+    [ -n "$k" ] && bg_field "$k=$v"
+  done <<EOF
+$ft
+EOF
+}
+
+# The session's record at a turn's start (state running, its prompt) or end.
+sess_turn() { # running|idle [prompt]
+  sess_ok || return 0
+  v2_common
+  if [ "$1" = running ]; then sess_start; else sess_beat force; fi
+  sess_write "$@"
+}
+
+# The heartbeat of the session's record (section 8.2): every hook event.
+case $AGENT:$EVENT in
+  agy:PreToolUse | grok:PreToolUse) sess_beat ;;
+  *:UserPromptSubmit | *:userPromptSubmitted | *:SessionStart | *:sessionStart | *:SessionEnd | *:sessionEnd) ;;
+  *) sess_beat ;;
+esac
 
 case $AGENT:$EVENT in
   claude:PermissionRequest | codex:PermissionRequest | opencode:PermissionRequest)
     if [ "$MODE" = signal ]; then
       print_state waiting "approve $TOOL: $DETAIL"
-    elif [ "$TOOL" = AskUserQuestion ]; then
-      MSG=$(json_trim "${QTEXT:-$DESC}" 200 800)
-      ask_once && send_bg question
+      finish
+    fi
+    case $AGENT in claude) rk=claude_perm ;; codex) rk=codex_perm ;; *) rk=oc_perm ;; esac
+    rk_at "$rk" "@.oc${TAB}s$TAB$OCV$NL"
+    if [ "$TOOL" = AskUserQuestion ]; then
+      # The question's decidable report (section 10.3): this one, not the
+      # PreToolUse before it, which waits ask_delay seconds for it.
+      setmsg "${QTEXT:-$DESC}"
+      ask_once || finish
+      v2_prep "$RK_AT"
+      [ -n "$LINKS" ] && request_flow question shared
     else
       d=$DETAIL
       [ "$TOOL" = apply_patch ] && d=${DESC:-patch}
       [ -n "$d" ] || d=$DESC
-      MSG=$(json_trim "approve $TOOL: $d" 200 800)
-      [ -n "$LINKS" ] && permission_flow
+      setmsg "approve $TOOL: $d"
+      v2_prep "$RK_AT"
+      # Codex hides its prompt while the hook waits (section 4.6).
+      w=shared
+      [ "$AGENT" = codex ] && w=hidden
+      [ -n "$LINKS" ] && request_flow permission "$w"
     fi
+    ;;
+  opencode:Question)
+    # OpenCode 1.19 question.asked, from the bridge: an answer goes back to
+    # the bridge (section 5.4).
+    setmsg "$QTEXT"
+    rk_at oc_question "@.oc${TAB}s$TAB$OCV$NL"
+    v2_prep "$RK_AT"
+    [ -n "$LINKS" ] && request_flow question shared
+    ;;
+  opencode:Form)
+    # OpenCode 2.x form.created (a question): an alert, answered in the
+    # terminal until the plugin can reply to a form (M8).
+    setmsg "${QTEXT:-$LAST}"
+    rk_at oc_form "@.oc${TAB}s$TAB$OCV$NL"
+    v2_prep "$RK_AT"
+    send_bg question
     ;;
   claude:PreToolUse)
     if [ "$TOOL" = AskUserQuestion ]; then
-      MSG=$(json_trim "$QTEXT" 200 800)
-      ask_once && send_bg question
+      setmsg "$QTEXT"
       print_state waiting
+      # PermissionRequest reports the same question, decidable: it goes
+      # first. This one is the safety net for a question without one.
+      rk_at claude_askpre
+      v2_prep "$RK_AT"
+      w=$(conf_int ask_delay 2)
+      trap '' HUP
+      (
+        sleep "$w"
+        ask_once && send_bg question
+      ) </dev/null >/dev/null 2>&1 &
     fi
     ;;
   claude:Notification)
@@ -2291,18 +4225,17 @@ case $AGENT:$EVENT in
         # Already told by this turn's done: the prompt repeats it. Without a
         # done (interrupt, StopFailure, no Stop hook) it stays the safety net.
         [ -f "$RUN_DIR/$SID.done" ] && finish
-        MSG=$(json_trim "$LAST" 200 800)
+        setmsg "$LAST"
+        v2_prep
         send_bg question
         ;;
-      elicitation_dialog | elicitation_url_dialog)
-        print_state waiting
-        MSG=$(json_trim "$LAST" 200 800)
-        send_bg question
-        ;;
-      agent_needs_input)
-        # Another background session of the user's needs input, not this
-        # one: the alert stays, this tab's badge does not change.
-        MSG=$(json_trim "$LAST" 200 800)
+      elicitation_dialog | elicitation_url_dialog | agent_needs_input)
+        # agent_needs_input: another background session of the user's needs
+        # input, not this one: the alert stays, this tab's badge does not.
+        [ "$NTYPE" = agent_needs_input ] || print_state waiting
+        setmsg "$LAST"
+        rk_at claude_notif "@.ntype${TAB}s$TAB$NTYPE$NL"
+        v2_prep "$RK_AT"
         send_bg question
         ;;
     esac
@@ -2313,6 +4246,8 @@ case $AGENT:$EVENT in
     turn_mark
     usage_report
     print_state running
+    send_state running
+    sess_turn running "$PROMPT"
     ;;
   claude:PostToolUse | claude:PostToolUseFailure)
     if [ "$EVENT" = PostToolUseFailure ] && [ "$ISINT" = true ] && [ -z "$AGENTID" ]; then
@@ -2321,6 +4256,9 @@ case $AGENT:$EVENT in
       # session's wait goes on.
       note turn
       print_state idle
+      turn_at interrupt
+      send_state idle "$TURN_AT"
+      sess_turn idle
       finish
     fi
     note tool "$FP"
@@ -2335,37 +4273,96 @@ case $AGENT:$EVENT in
   claude:SessionStart | claude:PostCompact | claude:PostModelSwitch)
     usage_report
     print_usage
-    [ "$EVENT" = SessionStart ] && ensure_cli
+    if [ "$EVENT" = SessionStart ]; then
+      ensure_cli
+      sess_start
+      sess_ok && [ ! -f "$SESS.json" ] && sess_turn idle
+    fi
+    ;;
+  claude:SessionEnd | grok:SessionEnd | copilot:sessionEnd)
+    if [ "$AGENT" = copilot ] && [ "$REASON" = error ]; then
+      # The session ended on an error (its last try, kept above).
+      e=$(cat "$RUN_DIR/$SID.cerr" 2>/dev/null)
+      setmsg "${e:-error: the session ended on an error}"
+      LAST='' TLAST=''
+      turn_at error
+      v2_prep "$TURN_AT"
+      send_bg error
+    fi
+    rm -f "$RUN_DIR/$SID.cerr" 2>/dev/null
+    printf '' 2>/dev/null >"$RUN_DIR/t0.$$"
+    send_state ended
+    sess_end
+    rm -f "$RUN_DIR/t0.$$" 2>/dev/null
+    # The agent is exiting and may take its hooks' children with it
+    # (measured with Copilot -p): the sends finish first.
+    wait
+    ;;
+  claude:SubagentStart | claude:SubagentStop | grok:SubagentStart | grok:SubagentStop | copilot:subagentStart | copilot:subagentStop)
+    case $EVENT in *Start | *start) send_state sub_start ;; *) send_state sub_stop ;; esac
     ;;
   claude:Stop | codex:Stop)
     note turn
     case $LAST in '{\"title\":'*) finish ;; esac
     gf=''
     [ "$AGENT" = codex ] && gf=$(input_file "$TPATH")
+    if [ "$AGENT" = codex ] && plan=$(codex_plan "$gf"); then
+      # The turn ended on Codex's "Implement this plan?" (M2): a question,
+      # not a done; answered in Codex's window (keys).
+      setmsg "$plan"
+      rk_at codex_plan "@.plan${TAB}s$TAB$plan$NL"
+      v2_prep "$RK_AT"
+      send_bg question
+      usage_report
+      turn_end
+      sess_turn idle
+      finish
+    fi
     if [ "$AGENT" = codex ] && codex_goal_active "$gf"; then
       usage_report
+      TGOAL=active
+      turn_at background
+      send_state background "$TURN_AT"
+      TGOAL=''
       codex_goal_later "$gf"
       turn_end
+      sess_turn idle
       finish
     fi
     stop_flow
+    sess_turn idle
     ;;
   claude:StopFailure)
     note turn
-    ev=error
-    case $ERR in authentication_failed | oauth_org_not_allowed | cloud_credential_error) ev=auth ;; esac
-    MSG=$(json_trim "$ERR: $LAST" 200 800)
+    ev=error te=error
+    case $ERR in authentication_failed | oauth_org_not_allowed | cloud_credential_error) ev=auth ;; rate_limit) te=limit ;; esac
+    setmsg "$ERR: $LAST"
+    turn_at "$te"
+    v2_prep "$TURN_AT"
     send_bg "$ev"
     usage_report
     print_state done
+    sess_turn idle
     ;;
   codex:SessionStart | codex:PostCompact)
     usage_report
+    [ "$EVENT" = SessionStart ] && sess_start
+    ;;
+  codex:UserPromptSubmit)
+    note turn
+    prompt_origin
+    turn_mark
+    send_state running
+    sess_turn running "$PROMPT"
+    ;;
+  codex:PreToolUse | codex:PostToolUse)
+    # Registered for the session record's heartbeat only (section 8.3).
     ;;
   codex-notify:notify)
     [ "$NTYPE2" = agent-turn-complete ] || finish
     case $FIRSTIN in 'Generate a concise, single-line task title'*) finish ;; esac
-    MSG=$(json_trim "$LAST" 200 800)
+    setmsg "$LAST"
+    v2_prep
     send_bg done
     ;;
   gemini:Notification)
@@ -2373,7 +4370,8 @@ case $AGENT:$EVENT in
     # an alert only (`question`, the event for "needs input").
     [ "$NTYPE" = ToolPermission ] || finish
     case $GTYPE in edit) TOOL=edit ;; info) TOOL=${TOOL:-fetch} ;; esac
-    MSG=$(json_trim "approve ${TOOL:-$GTYPE}: ${DETAIL:-$LAST}" 200 800)
+    setmsg "approve ${TOOL:-$GTYPE}: ${DETAIL:-$LAST}"
+    v2_prep
     send_bg question
     ;;
   gemini:AfterAgent)
@@ -2381,35 +4379,52 @@ case $AGENT:$EVENT in
       '[no response text]'*)
         # What Gemini CLI passes when the turn produced no answer: an API
         # error, a cancelled stream or a detected loop.
-        MSG=$(json_trim "no_response: the turn ended without an answer" 200 800)
+        setmsg "no_response: the turn ended without an answer"
+        v2_prep
         send_bg error
         ;;
       *)
-        MSG=$(json_trim "$LAST" 200 800)
+        setmsg "$LAST"
         [ "$STOPACT" = true ] && XFLAGS=',"stop_hook_active":true'
+        v2_prep
         done_later
         ;;
     esac
     usage_report
     turn_end
     ;;
-  agy:PreToolUse)
+  agy:PreToolUse | agy:PostToolUse)
+    if [ "$TOOL" = write_file ] && [ "$RFB" = true ]; then
+      # A plan for review (ArtifactMetadata.RequestFeedback, M3): the Stop
+      # that ends this turn is its review, not a done.
+      facts_keep plan. agyplan '^(toolCall\.|stepIdx)'
+      finish
+    fi
+    [ "$EVENT" = PreToolUse ] || finish
     case $TOOL in
-      run_command)
-        # Opt-in (agy_wait): this hook runs before every command, before the
-        # permission policy, so waiting here delays commands the policy
-        # would allow, and the terminal shows no prompt meanwhile.
-        [ -n "$LINKS" ] && [ "$(conf_int agy_wait 0)" -gt 0 ] || finish
-        MSG=$(json_trim "approve $TOOL: $DETAIL" 200 800)
-        permission_flow
-        ;;
       ask_question)
-        MSG=$(json_trim "$QTEXT" 200 800)
+        setmsg "$QTEXT"
+        rk_at agy_ask
+        v2_prep "$RK_AT"
         send_bg question
         ;;
-      ask_permission)
-        MSG=$(json_trim "approve ${DESC:-$TOOL}: $DETAIL" 200 800)
-        send_bg question
+      run_command | write_file | edit_file | read_file | call_mcp_tool)
+        # This hook runs before every call, before agy's permission policy:
+        # only with agy_wait > 0 (opt-in), and then only when no tunnel
+        # answers (an app that is connected sees agy's own prompt, section
+        # 4.6), does a request go out and wait.
+        [ -n "$LINKS" ] && [ "$(conf_int agy_wait 0)" -gt 0 ] || finish
+        d=$DETAIL
+        [ -n "$d" ] || d=$APATH
+        [ "$TOOL" = call_mcp_tool ] && d="$AMS/$AMT"
+        setmsg "approve $TOOL: $d"
+        if tunnel_probe; then
+          log "permission tunnel-answered: no request"
+          finish
+        fi
+        rk_at agy_tool
+        v2_prep "$RK_AT"
+        request_flow permission relay
         ;;
     esac
     ;;
@@ -2417,11 +4432,29 @@ case $AGENT:$EVENT in
     # Only a fully idle agent is done (background tasks may still run).
     # Cancelling (Esc) sends no Stop at all.
     note turn
+    if [ -f "$RUN_DIR/$SID.agyplan" ] && [ "$FULLYIDLE" != false ] && { [ -z "$ERR" ] || [ "$ERR" = null ]; }; then
+      # The turn ended on a plan for review: a question (section 4.6
+      # "agy plan"), decidable only on a v2 relay while no tunnel answers.
+      facts_add agyplan 3600
+      rm -f "$RUN_DIR/$SID.agyplan" 2>/dev/null
+      setmsg "approve plan"
+      rk_at agy_plan
+      v2_prep "$RK_AT"
+      [ -n "$LINKS" ] && request_flow question agyplan
+      turn_end
+      sess_turn idle
+      finish
+    fi
+    LAST=''
     if [ -n "$ERR" ] && [ "$ERR" != null ]; then
-      MSG=$(json_trim "${TERMREASON:-error}: $ERR" 200 800)
+      setmsg "${TERMREASON:-error}: $ERR"
+      turn_at error
+      v2_prep "$TURN_AT"
       send_bg error
     elif [ "$FULLYIDLE" = true ]; then
-      MSG=''
+      setmsg ''
+      turn_at done
+      v2_prep "$TURN_AT"
       send_bg done
     elif [ "$FULLYIDLE" = false ]; then
       # Background commands, schedules or subagents still run; agy does not
@@ -2430,6 +4463,7 @@ case $AGENT:$EVENT in
       bg_pause
     fi
     turn_end
+    sess_turn idle "$LASTIN"
     ;;
   grok:UserPromptSubmit)
     # Also the turn Grok starts itself when background work reports back
@@ -2437,19 +4471,41 @@ case $AGENT:$EVENT in
     note turn
     prompt_origin
     turn_mark
+    send_state running
+    sess_turn running "$PROMPT"
+    ;;
+  grok:PreToolUse)
+    # Which tool asks next: the Notification of a permission prompt names
+    # none (section 10.2).
+    facts_keep pre. grokpre '^(toolName|toolUseId|toolInput)'
+    ;;
+  grok:PostToolUse)
+    [ -n "$TOOLUSEID" ] && [ -f "$RUN_DIR/$SID.grokpre" ] &&
+      awk -v id="$TOOLUSEID" -F "$TAB" '$1 == "pre.toolUseId" && $3 == id { f = 1 } END { exit !f }' "$RUN_DIR/$SID.grokpre" 2>/dev/null &&
+      rm -f "$RUN_DIR/$SID.grokpre"
     ;;
   grok:Notification)
     # Grok asks in its own prompt and takes no answer from a hook:
-    # permission_prompt (only while its permission UI waits) and idle_prompt
-    # are alerts. The key includes the event's timestamp, the same in every
-    # copy of one event.
+    # permission_prompt (only while its permission UI waits; also its plan
+    # review, "Plan approval requested"), elicitation_dialog (a question)
+    # and idle_prompt are alerts. The key includes the event's timestamp, the
+    # same in every copy of one event.
+    nt=$NTYPE
     case $NTYPE in
-      permission_prompt) ;;
+      permission_prompt) case $LAST in 'Plan approval requested'*) nt=plan ;; esac ;;
+      elicitation_dialog) ;;
       idle_prompt) bg_paused && finish; [ -f "$RUN_DIR/$SID.done" ] && finish ;;
       *) finish ;;
     esac
     once "$(printf '%s|%s|%s|%s|%s' "$EVENT" "$SID" "$NTYPE" "$GKEY" "$LAST" | cksum | awk '{ print $1 }')" || finish
-    MSG=$(json_trim "$LAST" 200 800)
+    setmsg "$LAST"
+    if [ "$NTYPE" = idle_prompt ]; then
+      v2_prep
+    else
+      facts_add grokpre 600
+      rk_at grok_notif "@.ntype${TAB}s$TAB$nt$NL"
+      v2_prep "$RK_AT"
+    fi
     send_bg question
     ;;
   grok:Stop | grok:StopFailure)
@@ -2463,15 +4519,19 @@ case $AGENT:$EVENT in
     if [ "$EVENT" = Stop ]; then
       stop_flow
     else
-      ev=error
-      case $ERR in authentication_failed | oauth_org_not_allowed | cloud_credential_error) ev=auth ;; esac
-      MSG=$(json_trim "$ERR: $LAST" 200 800)
+      ev=error te=error
+      case $ERR in authentication_failed | oauth_org_not_allowed | cloud_credential_error) ev=auth ;; rate_limit) te=limit ;; esac
+      setmsg "$ERR: $LAST"
+      turn_at "$te"
+      v2_prep "$TURN_AT"
       send_bg "$ev"
       turn_end
     fi
+    sess_turn idle
     ;;
   opencode:Notification)
-    MSG=$(json_trim "$LAST" 200 800)
+    setmsg "$LAST"
+    v2_prep
     send_bg question
     ;;
   opencode:Stop)
@@ -2482,21 +4542,100 @@ case $AGENT:$EVENT in
     # the last Stop do not hold this one back.
     note turn
     stop_flow
+    sess_turn idle
     ;;
   opencode:UserPromptSubmit)
     # Sent by the plugin when a session's own turn starts (a person's, or the
     # session taken up again by a background shell): ends a pause, and the
     # shells open at the last Stop do not hold this turn's Stop back.
     note turn
-    PROMPT_USER=1
+    PROMPT_USER=1 PROMPT_BY=user
     turn_mark
+    send_state running
+    sess_turn running
     ;;
   opencode:StopFailure)
     note turn
     ev=error
     case $ERR in ProviderAuthError | *[Aa]uth*) ev=auth ;; esac
-    MSG=$(json_trim "$ERR: $LAST" 200 800)
+    setmsg "$ERR: $LAST"
+    turn_at error
+    v2_prep "$TURN_AT"
     send_bg "$ev"
+    sess_turn idle
+    ;;
+  copilot:permissionRequest)
+    # It comes for calls whose prompt never shows too (read-only, already
+    # allowed, plan.md): until that can be told from the hook (M9) it sends
+    # nothing and prints nothing (an empty output is Copilot's "no decision";
+    # exit 1 or other output would be a denial).
+    ;;
+  copilot:preToolUse)
+    case $TOOL in
+      exit_plan_mode)
+        # The plan's review (section 10.4): an alert; answered in Copilot.
+        v2_facts
+        sm=$(printf '%s\n' "$FACTS" | sed -n "s/^toolArgs\\.summary${TAB}s$TAB//p" | head -n 1)
+        setmsg "${sm:-plan ready}"
+        rk_at cop_plan
+        v2_prep "$RK_AT"
+        send_bg question
+        ;;
+      ask_user)
+        # Its notification (elicitation_dialog) carries no question.
+        facts_keep pre. coppre '^toolArgs'
+        ;;
+    esac
+    ;;
+  copilot:notification)
+    case $NTYPE in
+      permission_prompt) ;;
+      elicitation_dialog) facts_add coppre 600 ;;
+      *) finish ;;
+    esac
+    setmsg "$LAST"
+    rk_at cop_notif
+    v2_prep "$RK_AT"
+    send_bg question
+    ;;
+  copilot:userPromptSubmitted)
+    note turn
+    prompt_origin
+    turn_mark
+    send_state running
+    sess_turn running "$PROMPT"
+    ;;
+  copilot:sessionStart)
+    sess_start
+    sess_ok && [ ! -f "$SESS.json" ] && sess_turn idle
+    ;;
+  copilot:agentStop)
+    # A subagent's own stop (agentId set) is not the session's (section 7).
+    if [ -n "$AGENTID" ]; then
+      send_state sub_stop
+      finish
+    fi
+    note turn
+    copilot_tx
+    stop_flow
+    sess_turn idle
+    ;;
+  copilot:errorOccurred)
+    # A failed tool is the model's to handle. Copilot retries a failed model
+    # call and reports each try as recoverable (measured on 1.0.105: six
+    # tries, all recoverable, then sessionEnd with reason error in -p mode):
+    # kept for that end, not an alert of its own.
+    [ "$ECTX" = tool_execution ] && finish
+    if [ "$RECOV" = true ]; then
+      printf '%s\n' "$(json_trim "${ERR:-error}: $LAST" 200 800)" >"$RUN_DIR/$SID.cerr" 2>/dev/null
+      finish
+    fi
+    note turn
+    setmsg "${ERR:-error}: $LAST"
+    turn_at error
+    v2_prep "$TURN_AT"
+    send_bg error
+    sess_turn idle
     ;;
 esac
 finish
