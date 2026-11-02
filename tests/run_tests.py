@@ -3668,16 +3668,28 @@ def ps_parse_check(pwsh):
     return [l for l in out.stdout.splitlines() if l.strip()]
 
 
+# Tests that keep the CPU busy (t_service_shells: some 200 Stop hooks, about 40 s of CPU a suite):
+# at most two suites run one at a time, so the others' timed checks do not run on a machine loaded
+# far past its cores (the full matrix runs ten suites at once).
+HEAVY = {"t_service_shells": threading.Semaphore(2)}
+
+
 def run_suite(suite, only):
     for t in TESTS:
         if only and t.__name__ not in only:
             continue
         if suite.kind == "ps1" and (t is t_missing_deps or t.__name__ in SH_ONLY):
             continue
+        sem = HEAVY.get(t.__name__)
+        if sem:
+            sem.acquire()
         try:
             t(suite)
         except Exception as e:  # report and continue with the next case
             suite.check("%s raised" % t.__name__, False, repr(e))
+        finally:
+            if sem:
+                sem.release()
 
 
 def run_in_own_group(run):
