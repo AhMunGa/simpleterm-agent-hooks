@@ -890,8 +890,18 @@ def t_service_shells(s):
                          ("pip install flask && npm run build", False), ("tail -n 50 build.log | cut -f 2", False),
                          ("kubectl get pods -w", True), ("vite &", True), ("npx vite &", True), ("npx vite | tee vite.log", True),
                          ("npx tsc -w", True), ("npx webpack -w", True), ("npx tailwindcss -i a.css -o b.css -w", True),
-                         ("vitest", True), ("docker logs -f api", True), ("kubectl logs -f web-1", True), ("journalctl -f", True),
-                         ("vitest run", False), ("npx vitest --run", False), ("docker logs api", False)):
+                         ("docker logs -f api", True), ("kubectl logs -f web-1", True), ("journalctl -f", True),
+                         ("vitest run", False), ("npx vitest --run", False), ("docker logs api", False),
+                         ("vitest", False), ("npx vitest", False), ("npx vitest -w", True), ("npx vitest --watch", True),
+                         ("npx vite 2>&1", True), ("npx vite > vite.log 2>&1 &", True), ("vite 2>&1 | tee vite.log", True),
+                         ("npx vite >vite.log", True), ("vite build", False), ("npm create vite@latest", False),
+                         ("pnpm --filter web dev", True), ("pnpm -F web dev", True), ("pnpm install", False), ("turbo dev", True),
+                         ("nx serve", True), ("ng serve", True), ("astro dev", True), ("nuxt dev", True), ("npx expo start", True),
+                         ("storybook dev", True), ("php artisan serve", True), ("hugo server", True),
+                         ("bundle exec jekyll serve", True), ("npx serve", True), ("npx http-server", True),
+                         ("gunicorn app:app", True), ("kubectl port-forward svc/api 8080:80", True),
+                         ("kubectl rollout status deploy/api -w", False),
+                         ('until curl -s -o /dev/null -w "%{http_code}" localhost:3000; do sleep 1; done', False)):
         s.ctl("/_ctl/reset", {})
         out = stop("sv3-%d" % abs(hash(cmd)), [shell(cmd, "Run it")])
         got = seqs(out).startswith("\x1b]9;simpleterm:state=done")
@@ -1128,10 +1138,11 @@ def t_done_delay(s):
     # Codex registers no event that would come within moments to cancel the wait: at once (0), the flag still passed on.
     s.run("codex", json.dumps({"session_id": "dd-cx", "turn_id": "t", "transcript_path": None, "cwd": "/w/repo",
                                "hook_event_name": "Stop", "last_assistant_message": "Codex done.", "stop_hook_active": True}))
+    # (a newer event of the session would have cancelled a pending done: it is not pending)
+    s.run("codex", json.dumps({"session_id": "dd-cx", "hook_event_name": "SessionStart", "cwd": "/w/repo", "transcript_path": None}))
     rec = wait_for(lambda: ingests(s, "done"), 20)
     s.check("done delay: Codex has no wait by default (nothing could cancel it)",
-            rec and rec[0]["received"] - t0 < 2.5 and rec[0]["plain_json"].get("stop_hook_active") is True,
-            str([round(r["received"] - t0, 2) for r in rec]))
+            rec and rec[0]["plain_json"].get("stop_hook_active") is True, str([round(r["received"] - t0, 2) for r in rec]))
     # Grok Build keeps the wait (its other events come within moments).
     s.ctl("/_ctl/reset", {})
     t0 = time.time()
@@ -1184,6 +1195,32 @@ def t_background_events_and_badges(s):
     d = ingests(s, "done")
     s.check("blocked Stop with an old task left: one done, for the real end",
             len(d) == 1 and d[0]["plain_json"].get("msg", "").startswith("Second."), str([r["plain_json"].get("msg") for r in d]))
+
+    # A run dir that cannot be written (here: a file where the directory belongs; the hook re-chmods a real
+    # directory itself): the hook still exits 0 and prints the badge (a failed redirection of the special
+    # builtin `:` would end the shell: exit 2 is "block and continue" for Claude Code's Stop).
+    s.setup([(LINK_A, {"push": "disabled"})])
+    rd = s.home / ".simpleterm" / "run"
+    shutil.rmtree(rd, ignore_errors=True)
+    rd.write_text("")
+    try:
+        rc, out, err, el = s.run("claude", cc_event("bev9", "Stop", stop_hook_active=False, last_assistant_message="Done.",
+                                                     background_tasks=[], session_crons=[]), st)
+    finally:
+        rd.unlink()
+    s.check("unwritable run dir: Stop exits 0 and prints the badge", rc == 0 and seqs(out) == "\x1b]9;simpleterm:state=done\x07",
+            "%s %r %r" % (rc, out, err[-200:]))
+
+    # A turn that ends with a question is done, with the question as its text; idle_prompt 60 s later adds none.
+    s.setup([(LINK_A, {"push": "disabled"})])
+    qd = "Should I deploy to staging now?"
+    stop("bev7", [], last=qd)
+    wait_for(lambda: ingests(s, "done"), 20)
+    run("bev7", "Notification", notification_type="idle_prompt", message="Claude is waiting for your input")
+    time.sleep(1.5)
+    evs = ingests(s)
+    s.check("question-ended turn: done carries the question, idle_prompt adds no question",
+            [r["body"]["ev"] for r in evs] == ["done"] and evs[0]["plain_json"].get("msg") == qd, str([r["plain_json"].get("msg") for r in evs]))
 
     # idle_prompt (60 s after a turn) repeats a done that was sent: no question and no badge change. Without a done
     # (the turn ended by an interrupt) it stays the safety net; a new prompt takes the mark back.
@@ -1956,9 +1993,10 @@ def t_gemini(s):
     s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})], conf={"done_delay": None})
     t0 = time.time()
     s.run("gemini", json.dumps(dict(after, session_id="gm-fast", stop_hook_active=True)))
+    s.run("gemini", json.dumps(dict(note, session_id="gm-fast", notification_type="Other")))  # would cancel a pending done
     rec = wait_for(lambda: ingests(s, "done"), 20)
     s.check("gemini: done_delay defaults to 0 (nothing could cancel it), stop_hook_active passed on",
-            rec and rec[0]["received"] - t0 < 2.5 and rec[0]["plain_json"].get("stop_hook_active") is True,
+            rec and rec[0]["plain_json"].get("stop_hook_active") is True,
             str([(round(r["received"] - t0, 2), r["plain_json"]) for r in rec]))
 
 
@@ -2566,12 +2604,35 @@ def t_opencode_js(s):
     done = ingests(s, "done")
     s.check("opencode 2.x: a long turn after a pause gets no done before its own end",
             len(done) == 1 and done[0]["received"] - t0 > 3.5, str([(r["plain_json"].get("msg"), round(r["received"] - t0, 2)) for r in done]))
-    t0 = running_turns("unknown shell, second turn", "node worker.js", 2, conf={"bg_done_after": 2})
+    # (bg_done_after 10: "at once" means well before the first pause's timer; generous for a loaded machine)
+    t0 = running_turns("unknown shell, second turn", "node worker.js", 2, conf={"bg_done_after": 10})
     wait_for(lambda: ingests(s, "done"), 20)
-    time.sleep(3)
+    first = ingests(s, "done")
+    time.sleep(max(0, t0 + 12.5 - time.time()))
     done = ingests(s, "done")
     s.check("opencode 2.x: the second turn with the same open shell is done at once (once, the old wait is over)",
-            len(done) == 1 and done[0]["received"] - t0 < 2.5, str([(r["plain_json"].get("msg"), round(r["received"] - t0, 2)) for r in done]))
+            len(first) == 1 and first[0]["received"] - t0 < 9 and len(done) == 1,
+            str([(r["plain_json"].get("msg"), round(r["received"] - t0, 2)) for r in done]))
+
+    # Lane jobs: a hung lookup does not hold later events of the session for good, and a permission request
+    # waits for the turn events that came before it (a late turn start would end its wait as answered locally).
+    s.setup([(LINK_A, {"push": "disabled"})])
+    node_plugin(s, "v2", {"directory": d, "sessions": {"ses_h": {"title": "Hung"}}, "wait": 4000,
+                          "env": {"SIMPLETERM_LANE_TIMEOUT_MS": "800"}, "getDelay": {"ses_h": {"ms": 60000, "times": 1}},
+                          "steps": [ev(80, "session.execution.started", "ses_h"), ev(81, "session.execution.succeeded", "ses_h")]})
+    rec = wait_for(lambda: ingests(s, "done"), 20)
+    s.check("opencode 2.x: a hung session lookup times out, the next turn event goes on", rec and rec[0]["plain_json"].get("msg") == "Hung",
+            str(ingests(s))[:200])
+    s.setup([(LINK_A, {"decision": "allow", "after": 1})])
+    ask_p = {"id": "evt_90", "type": "permission.asked", "location": {"directory": d},
+             "data": {"id": "per_90", "sessionID": "ses_p", "action": "shell", "resources": ["make"]}}
+    t0 = time.time()
+    node_plugin(s, "v2", {"directory": d, "sessions": {"ses_p": {}}, "wait": 30000, "replies": 1,
+                          "getDelay": {"ses_p": {"ms": 1500, "times": 1}},
+                          "steps": [ev(91, "session.execution.started", "ses_p"), {"event": ask_p}]})
+    rec = ingests(s, "permission")
+    s.check("opencode 2.x: a permission request waits for the session's earlier turn events",
+            rec and rec[0]["received"] - t0 >= 1.3, str([round(r["received"] - t0, 2) for r in rec]))
 
     # Two instances (two project directories): an answer without a location
     # still ends the wait in the instance that waits, whichever sees it first.

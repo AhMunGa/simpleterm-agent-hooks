@@ -454,7 +454,7 @@ ingest_one() { # rid ev nonce outfile
     200)
       push=$(resp_get "$4" push | sed -n 's/^push=//p')
       ;;
-    410) : >"$RUN_DIR/$L_LINK.revoked" ;;
+    410) printf '' >"$RUN_DIR/$L_LINK.revoked" 2>/dev/null ;;
   esac
   rm -f "$4"
   log "ingest ev=$2 link=$(printf %.8s "$L_LINK") http=$code push=${push:--}"
@@ -570,7 +570,7 @@ EOF
       404 | 410 | 401 | 403)
         log "decision link=$(printf %.8s "$L_LINK") http=$code"
         [ "$code" = 410 ] && [ "$(resp_get "$resp" error)" = 'error=revoked' ] &&
-          : >"$RUN_DIR/$L_LINK.revoked"
+          printf '' >"$RUN_DIR/$L_LINK.revoked" 2>/dev/null
         break
         ;;
       000)
@@ -1256,7 +1256,7 @@ if [ "$AGENT" = notify ]; then
   t=$(notify_text "${2:-}" 64 256)
   b=$(notify_text "${3:-}" 200 800)
   [ -n "$t$b" ] || finish
-  if [ "${SIMPLETERM:-}" = 1 ] && { : >/dev/tty; } 2>/dev/null; then
+  if [ "${SIMPLETERM:-}" = 1 ] && { printf '' >/dev/tty; } 2>/dev/null; then
     if [ -n "${TMUX:-}" ]; then
       # tmux forwards it only with `set -g allow-passthrough on`.
       printf '\033Ptmux;\033\033]777;notify;%s;%s\007\033\\' "$t" "$b" >/dev/tty 2>/dev/null
@@ -1331,7 +1331,7 @@ function scan(part) {
   c = tolower(o)
   svc(" (npm|pnpm|yarn|bun)( run| run-script)? (dev|start|serve|preview|watch)(:[a-z0-9_-]+)? ", "")
   svc(" next (dev|start) ", "")
-  svc(" vite (dev |serve |preview |-)| vite $", "")
+  svc(" vite ", " vite (build|optimize) ")
   svc(" nodemon ", "")
   svc(" python[0-9.]* -m http[.]server ", "")
   svc("manage[.]py runserver ", "")
@@ -1342,9 +1342,23 @@ function scan(part) {
   svc(" tail ([^ ]+ )*(-[a-z]*f[a-z]*|--follow[^ ]*) ", "")
   svc(" --watch[a-z-]*(=[^ ]*)? ", " --watch[a-z-]*=(false|0|no|off) | --no-watch[a-z-]* ")
   # -w on the original case: -W (python, make) is something else.
-  if (o ~ / -w / && c !~ " (grep|egrep|fgrep|rg|wc|ls|sort|diff|cut|tr|sed|awk|ps|date|stat|find|git|npm|pnpm|yarn|npx|make|docker|podman|python[0-9.]*|pytest|go|cargo) ") found = 1
+  if (o ~ / -w / && c !~ " (grep|egrep|fgrep|rg|wc|ls|sort|diff|cut|tr|sed|awk|ps|date|stat|find|git|npm|pnpm|yarn|npx|make|docker|podman|python[0-9.]*|pytest|go|cargo|curl|wget|ping|nc|gcc|clang|fold|uniq) " && c !~ " kubectl (rollout status|wait) ") found = 1
   svc(" (tsc|webpack|sass|esbuild|rollup|swc|tailwindcss) ([^ ]+ )*-w ", "")
-  svc(" vitest ", " vitest (run|bench|related|typecheck|list) | --run ")
+  # vitest watches only on a terminal and not under an agent: `vitest` alone runs once.
+  svc(" vitest ([^ ]+ )*(-w|--watch) ", "")
+  svc(" pnpm ([^ ]+ )*(dev|start|serve|preview|watch)(:[a-z0-9_-]+)? ", " pnpm (install|add|i|remove|exec|dlx) ")
+  svc(" turbo ([^ ]+ )*(dev|watch|serve|start)(:[a-z0-9_-]+)? ", "")
+  svc(" nx ([^ ]+ )*(serve|dev|start) ", "")
+  svc(" ng (serve|s) ", "")
+  svc(" (astro|nuxt|nuxi|storybook|sb) (dev|preview|start) ", "")
+  svc(" expo start ", "")
+  svc(" artisan serve ", "")
+  svc(" hugo (server|serve|s) ", "")
+  svc(" jekyll (serve|s) ", "")
+  svc(" (http-server|live-server|browser-sync) ", "")
+  svc(" (npx|bunx) serve ", "")
+  svc("[ /]gunicorn ", "")
+  svc(" port-forward ", "")
   svc(" (logs|journalctl) ([^ ]+ )*(-[a-z]*f[a-z]*|--follow[^ ]*) ", "")
   svc(" watch ", "")
 }
@@ -1941,7 +1955,8 @@ stop_done() {
   done_later
   # The turn's done is sent (or pending): Claude Code's idle_prompt, 60 s
   # later, repeats it (the next turn note takes the mark back).
-  : >"$RUN_DIR/$SID.done" 2>/dev/null
+  # (printf, not `:`: a failed redirection of a special builtin ends the shell.)
+  printf '' >"$RUN_DIR/$SID.done" 2>/dev/null
   usage_report
   print_state done
   turn_end

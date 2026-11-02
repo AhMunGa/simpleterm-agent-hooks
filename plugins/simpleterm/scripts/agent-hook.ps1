@@ -1526,7 +1526,7 @@ function Test-AskText([string]$raw) {
 $ServiceCmds = @(
     @(' (npm|pnpm|yarn|bun)( run| run-script)? (dev|start|serve|preview|watch)(:[a-z0-9_-]+)? ', ''),
     @(' next (dev|start) ', ''),
-    @(' vite (dev |serve |preview |-)| vite $', ''),
+    @(' vite ', ' vite (build|optimize) '),
     @(' nodemon ', ''),
     @(' python[0-9.]* -m http[.]server ', ''),
     @('manage[.]py runserver ', ''),
@@ -1537,11 +1537,25 @@ $ServiceCmds = @(
     @(' tail ([^ ]+ )*(-[a-z]*f[a-z]*|--follow[^ ]*) ', ''),
     @(' --watch[a-z-]*(=[^ ]*)? ', ' --watch[a-z-]*=(false|0|no|off) | --no-watch[a-z-]* '),
     @(' (tsc|webpack|sass|esbuild|rollup|swc|tailwindcss) ([^ ]+ )*-w ', ''),
-    @(' vitest ', ' vitest (run|bench|related|typecheck|list) | --run '),
+    # vitest watches only on a terminal and not under an agent: `vitest` alone runs once.
+    @(' vitest ([^ ]+ )*(-w|--watch) ', ''),
+    @(' pnpm ([^ ]+ )*(dev|start|serve|preview|watch)(:[a-z0-9_-]+)? ', ' pnpm (install|add|i|remove|exec|dlx) '),
+    @(' turbo ([^ ]+ )*(dev|watch|serve|start)(:[a-z0-9_-]+)? ', ''),
+    @(' nx ([^ ]+ )*(serve|dev|start) ', ''),
+    @(' ng (serve|s) ', ''),
+    @(' (astro|nuxt|nuxi|storybook|sb) (dev|preview|start) ', ''),
+    @(' expo start ', ''),
+    @(' artisan serve ', ''),
+    @(' hugo (server|serve|s) ', ''),
+    @(' jekyll (serve|s) ', ''),
+    @(' (http-server|live-server|browser-sync) ', ''),
+    @(' (npx|bunx) serve ', ''),
+    @('[ /]gunicorn ', ''),
+    @(' port-forward ', ''),
     @(' (logs|journalctl) ([^ ]+ )*(-[a-z]*f[a-z]*|--follow[^ ]*) ', ''),
     @(' watch ', '')
 )
-$ServiceDashW = ' (grep|egrep|fgrep|rg|wc|ls|sort|diff|cut|tr|sed|awk|ps|date|stat|find|git|npm|pnpm|yarn|npx|make|docker|podman|python[0-9.]*|pytest|go|cargo) '
+$ServiceDashW = ' (grep|egrep|fgrep|rg|wc|ls|sort|diff|cut|tr|sed|awk|ps|date|stat|find|git|npm|pnpm|yarn|npx|make|docker|podman|python[0-9.]*|pytest|go|cargo|curl|wget|ping|nc|gcc|clang|fold|uniq) '
 
 # The command is split at ; & | (and line breaks) and each command is matched
 # on its own, so a word of one never pairs with a word of the next.
@@ -1558,7 +1572,7 @@ function Test-ServiceCmd([string]$cmd) {
             }
         }
         # -w on the original case: -W (python, make) is something else.
-        if ($o -cmatch ' -w ' -and $c -notmatch $ServiceDashW) { return $true }
+        if ($o -cmatch ' -w ' -and $c -notmatch $ServiceDashW -and $c -notmatch ' kubectl (rollout status|wait) ') { return $true }
     }
     return $false
 }

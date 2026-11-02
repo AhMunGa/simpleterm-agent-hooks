@@ -50,11 +50,15 @@
   - **Services are not waited for**: a background shell whose command looks like a service (`npm
     run dev`, `next dev`, `vite`, `nodemon`, `python -m http.server`, `manage.py runserver`,
     `rails s`, `flask run`, `uvicorn`, `docker compose up` without `-d`, `tail -f`, `--watch`,
-    `-w`, `watch`) sends `done` at once with `(still running in the background: ...)` instead of
+    `-w`, `watch`, `vite`, `npx tsc|webpack -w`, `docker|kubectl logs -f`, `journalctl -f`,
+    `kubectl port-forward`, `pnpm --filter web dev`, `turbo dev`, `nx serve`, `ng serve`, `astro dev`,
+    `expo start`, `php artisan serve`, `hugo server`, `jekyll serve`, `npx serve`, `gunicorn`; a
+    plain `vitest` is not one, it watches only on a terminal and not under an agent) sends `done` at once with `(still running in the background: ...)` instead of
     after `bg_done_after`; the note is kept whole when the message is long. A command is split at
     `;`, `&&`, `||`, `|` and each part is read on its own, so `pip install flask && npm run build`
     and `tail -n 50 x.log | cut -f 2` are not services; `--watch=false`, `--watchAll=false`,
-    `--no-watch`, `python -W`, `make -w` and `docker exec -w` are not either.
+    `--no-watch`, `python -W`, `make -w`, `docker exec -w`, `kubectl rollout status -w` and
+    `curl -w` are not either.
   - **A prompt you typed is answered**: every `Stop` records the ids of the running tasks; when a
     person typed the prompt of the turn and only tasks that ran before it are left, the turn is a
     report (`done` with the note). Turns started by a task's report or a schedule still wait. The
@@ -72,6 +76,11 @@
   main thread cancel the wait: a subagent's tool calls (hook input with `agent_id`) carry the
   session id too and no longer cancel a `done` that leaves background work running. A `done` of a `Stop` with `stop_hook_active: true` carries
   `"stop_hook_active":true`.
+- A turn that ends with a question is a `done` carrying the question; Claude Code's `idle_prompt`
+  60 s later adds no `question` (the lock-screen reply of that push is gone for these turns).
+- The hook no longer redirects with the special builtin `:` (a failed redirection ended the shell:
+  exit 2 from a Stop hook means "block and continue"); the OpenCode plugin's per-session event
+  lane has a 15 s timeout, and a permission request waits for the turn events before it.
 - Claude Code and Grok Build: `idle_prompt` (60 s after a turn) is a repeat of a `done` that was
   sent or is pending for that turn, so it sends no `question` and does not touch the badge; the
   mark is taken back by the next prompt, an interrupt or `StopFailure`, so a turn that ended
@@ -80,7 +89,8 @@
   both reported it); `agent_needs_input` (another background session's) still alerts but no
   longer changes this tab's badge; `PostToolUseFailure` with `is_interrupt` (Esc) sets the badge
   idle, not running, and ends a background pause (not when the interrupted tool is a subagent's,
-  foreground or background: its hook input carries `agent_id`, found in the 2.1.316 binary). A turn paused on a
+  foreground or background: its hook input carries `agent_id`, found in the 2.1.316 binary's
+  schema; not yet captured from a background subagent's `PostToolUse`). A turn paused on a
   question keeps the `waiting` badge when a background subagent runs a tool.
 - Gemini CLI: an `AfterAgent` with `[no response text]` (API error, cancelled stream, loop) sends
   `error`, not `done`.

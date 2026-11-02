@@ -1,6 +1,6 @@
 // Drives the OpenCode plugins with fake OpenCode objects (tests only).
 //   node tests/opencode_harness.mjs v1|v2 <plugin file> '<scenario JSON>'
-// scenario: {directory, instances?: [dir], sessions: {id: info}, steps: [{event, gap?} | {sleep: ms}], wait: ms}
+// scenario: {directory, env?, getDelay?, instances?: [dir], sessions: {id: info}, steps: [{event, gap?} | {sleep: ms}], wait: ms}
 // Prints the plugin's calls (permission replies) as JSON on the last line.
 import { pathToFileURL } from "node:url";
 
@@ -17,6 +17,10 @@ async function settle(ms) {
     await sleep(100);
   }
 }
+// scenario.env: environment of the plugin (read when it loads).
+Object.assign(process.env, scenario.env || {});
+// scenario.getDelay: {sessionID: {ms, times}}: the first `times` session lookups of a session take `ms` (2.x only).
+const delays = JSON.parse(JSON.stringify(scenario.getDelay || {}));
 const mod = await import(pathToFileURL(file).href);
 
 if (kind === "v1") {
@@ -65,7 +69,16 @@ if (kind === "v1") {
         },
       },
       permission: { reply: async (args) => { calls.push({ reply: args, directory }); } },
-      session: { get: async ({ sessionID }) => (scenario.sessions || {})[sessionID] || {} },
+      session: {
+        get: async ({ sessionID }) => {
+          const dl = delays[sessionID];
+          if (dl && dl.times > 0) {
+            dl.times -= 1;
+            await sleep(dl.ms);
+          }
+          return (scenario.sessions || {})[sessionID] || {};
+        },
+      },
     };
     inst.cleanup = await def.setup(ctx);
     instances.push(inst);

@@ -188,7 +188,7 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | Agent event | Alert (`ev`) | Badge (Claude Code, SimpleTerm sessions only) |
 |---|---|---|
 | Claude `PermissionRequest` | `permission` (waits for your answer, up to 540 s) | waiting, then running |
-| Claude `PreToolUse` `AskUserQuestion`, `Notification` (idle, elicitation, input needed) | `question` (one per question: `PermissionRequest` repeats it; `idle_prompt` only when no `done` was sent for the turn) | waiting (idle keeps done; `agent_needs_input`, another session's, leaves the badge) |
+| Claude `PreToolUse` `AskUserQuestion`, `Notification` (idle, elicitation, input needed) | `question` (one per question: `PermissionRequest` repeats it; `idle_prompt` only when no `done` was sent or is pending for the turn) | waiting (idle keeps done; `agent_needs_input`, another session's, leaves the badge) |
 | Claude `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure` | none (context, see below) | running |
 | Claude `Stop` / `StopFailure` | `done` (sent 3 s later on Claude Code, see below) / `error` or `auth` | done |
 | Claude `Stop` with `background_tasks` in flight | none (and no idle question until the next turn), unless the last message asks you something (`question`), only services or tasks that ran before your prompt are left (`done`) | background (+ an OSC 7501 `working` record, see below); waiting (+ a `blocked` record) for a question |
@@ -203,7 +203,7 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | agy `PreToolUse` `run_command` (only with `agy_wait`) | `permission` | none |
 | agy `PreToolUse` `ask_question`, `ask_permission` | `question` | none |
 | agy `Stop` (fully idle) | `done`, or `error` | none |
-| Grok `Notification` `permission_prompt`, `idle_prompt` | `question` (`idle_prompt` only when no `done` was sent for the turn) | none |
+| Grok `Notification` `permission_prompt`, `idle_prompt` | `question` (`idle_prompt` only when no `done` was sent or is pending for the turn) | none |
 | Grok `Stop` (`end_turn`) / `StopFailure` | `done` (none with `backgroundTasks` or `sessionCrons`, same rules as Claude) / `error` or `auth` | none |
 | OpenCode permission request | `permission` (waits up to 540 s) | none |
 | OpenCode turn finished / failed | `done` (none while a subagent of it runs; a background shell is judged as Claude Code's `background_tasks`) / `error` or `auth` | none |
@@ -246,7 +246,14 @@ there):
 - **Services are not waited for.** A background shell whose command looks like a service (`npm
   run dev`/`start`/`serve`/`preview`/`watch`, `next dev`, `vite`, `nodemon`, `python -m
   http.server`, `manage.py runserver`, `rails s`, `flask run`, `uvicorn`, `docker compose up`
-  without `-d`, `tail -f`, `--watch`, `-w`, `watch`) never ends and never wakes the agent. When only
+  without `-d`, `tail -f`, `--watch`, `-w`, `watch`, `vite` (not `vite build`), `npx tsc|webpack|sass
+  -w`, `vitest -w`, `docker|kubectl logs -f`, `journalctl -f`, `kubectl port-forward`, `pnpm
+  --filter web dev`, `turbo dev`, `nx serve`, `ng serve`, `astro|nuxt|storybook dev`, `expo
+  start`, `php artisan serve`, `hugo server`, `jekyll serve`, `npx serve`, `http-server`,
+  `gunicorn`) never ends and never wakes the agent. A plain `vitest` is not one: it watches only on
+  a terminal and not under an agent. Each command of a pipeline or `&&` chain is read on its own;
+  `--watch=false`, `python -W`, `make -w`, `kubectl rollout status -w` and `curl -w` are not
+  services. When only
   such shells (and the agent's housekeeping) are left, `done` goes at once, ending with `(still
   running in the background: <task>)`, instead of after `bg_done_after`. The patterns are one
   table (`SVC_AWK`); other shells keep the `bg_done_after` wait.
@@ -279,7 +286,8 @@ Gemini CLI and OpenCode register no event that would arrive within the delay (Co
 `PermissionRequest`, `PostCompact`, `Stop`; Gemini: `Notification`, `AfterAgent`), so for them the
 wait could only delay the alert: their default is 0 (at once; set `done_delay` to wait anyway,
 a newer `Stop` then still replaces the first). Only events of the main thread cancel the wait: a
-subagent's own tool calls (their hook input carries `agent_id`, foreground or background) carry the
+subagent's own tool calls (their hook input carries `agent_id`, foreground or background; from the
+binary's schema, not yet captured from a background subagent's `PostToolUse`) carry the
 session id too, but are no sign of the main thread going on, so a `done` that leaves background
 work running is not lost to them. A `done` whose `Stop` carried `stop_hook_active: true` also carries
 `"stop_hook_active":true` in its plaintext.
@@ -470,7 +478,12 @@ Not tested on Windows yet.
 - **Background work that never ends.** A dev server the table of services does not know, or
   another endless job left in the background, never wakes the agent: `done` comes only after
   `bg_done_after` (default 10 minutes), and the badge stays `background` until the next turn
-  (a turn you type while it still runs is `done` at once). This holds on OpenCode 2.x too: an
+  (a turn you type while it still runs is `done` at once).
+- **A turn that ends with a question is a `done`.** Its `done` carries the question (the last
+  message) and no `question` follows when Claude Code's `idle_prompt` comes 60 s later, so the
+  alert does not change into "response needed". The lock-screen reply action that the old 60 s
+  `question` push offered is gone for these turns: type the follow-up in the app or the terminal.
+  (A question that leaves background work running is still a `question`, see above.) This holds on OpenCode 2.x too: an
   open shell no longer blocks the dones of later turns. Commands that look like services
   (`npm run dev`, `tail -f`, ...) get their `done` at once.
 - **Questions are read from text.** Whether the last message asks something is a guess from its

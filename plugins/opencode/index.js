@@ -177,8 +177,18 @@ async function hasRunningChild(ctx, sessionID, running) {
 // the hook before the end of the turn it belongs to, or it would undo the
 // pause that end made.
 const lanes = (globalThis.__simpletermLanes ??= new Map());
+// A job that hangs (a session lookup, the hook) must not hold the session's
+// later events for good: after this long the lane goes on without it.
+const LANE_TIMEOUT_MS = Number(process.env.SIMPLETERM_LANE_TIMEOUT_MS) > 0 ? Number(process.env.SIMPLETERM_LANE_TIMEOUT_MS) : 15000;
+function withTimeout(promise) {
+  let timer;
+  const limit = new Promise((resolve) => {
+    timer = setTimeout(resolve, LANE_TIMEOUT_MS);
+  });
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
+}
 function inLane(sessionID, work) {
-  const run = (lanes.get(sessionID) || Promise.resolve()).then(work);
+  const run = (lanes.get(sessionID) || Promise.resolve()).then(() => withTimeout(work()));
   const tail = run.catch(() => {});
   lanes.set(sessionID, tail);
   tail.then(() => {
@@ -213,6 +223,9 @@ export default {
       const cwd = where || home;
       switch (event.type) {
         case "permission.asked": {
+          // After the turn events of the session that came before it: a late
+          // turn start would otherwise end this wait as "answered locally".
+          await (lanes.get(d.sessionID) || Promise.resolve());
           const detail = Array.isArray(d.resources) ? d.resources.join(" ") : String(d.message || "");
           const out = await runHook(
             {
