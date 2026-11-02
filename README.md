@@ -193,7 +193,7 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | Claude `Stop` / `StopFailure` | `done` (sent 3 s later, see below) / `error` or `auth` | done |
 | Claude `Stop` with `background_tasks` in flight | none (and no idle question until the next turn), unless the last message asks you something (`question`), only services or tasks that ran before your prompt are left (`done`) | background (+ an OSC 7501 `working` record, see below); waiting (+ a `blocked` record) for a question |
 | Claude `Stop` with `session_crons` set, turn started by a schedule | none (a question: `question`) | background, `scheduled: <schedule>` |
-| Claude `PostToolUseFailure` with `is_interrupt` (Esc) | none | idle |
+| Claude `PostToolUseFailure` with `is_interrupt` (Esc; not for a background subagent's tool, `agent_id` set) | none | idle |
 | Claude `SessionStart`, `PostCompact`, `PostModelSwitch` | none (context) | none |
 | Codex `PermissionRequest` | `permission` (waits up to 60 s) | none |
 | Codex `Stop` | `done`, none while a `/goal` is active | none |
@@ -206,14 +206,14 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | Grok `Notification` `permission_prompt`, `idle_prompt` | `question` | none |
 | Grok `Stop` (`end_turn`) / `StopFailure` | `done` (none with `backgroundTasks` or `sessionCrons`, same rules as Claude) / `error` or `auth` | none |
 | OpenCode permission request | `permission` (waits up to 540 s) | none |
-| OpenCode turn finished / failed | `done` (none while a background shell or subagent of it runs) / `error` or `auth` | none |
+| OpenCode turn finished / failed | `done` (none while a subagent of it runs; a background shell is judged as Claude Code's `background_tasks`) / `error` or `auth` | none |
 | OpenCode 2.x input form | `question` | none |
 | `simpleterm notify` | `notify` | OSC 777 notification instead |
 
 **Background work is not done.** Claude Code (2.1.145+), Grok Build and OpenCode end a turn while a
 shell, subagent or monitor started in the background still runs, and take the turn up again when
-it reports back (OpenCode 2.x: `shell.created`/`shell.exited` and running child sessions; 1.x
-background subagents: busy child sessions). Such a `Stop` lists that work (`background_tasks`, Grok `backgroundTasks`), so the
+it reports back (OpenCode 2.x: `shell.created`/`shell.exited`, sent as `background_tasks`, and
+running child sessions; 1.x background subagents: busy child sessions). Such a `Stop` lists that work (`background_tasks`, Grok `backgroundTasks`), so the
 hook sends no `done` and no idle question then; the turn the agent takes up later sends `done` as
 usual. The badge says `background`. Claude Code 2.1.295+ also reports its own turns through OSC
 7501 and counts only background subagents as working, so the hook adds a `working` record of its
@@ -270,12 +270,17 @@ there):
   record with that text. A turn you typed still ends with `done`, a question still alerts, and an
   error always does. The first `Stop` that finds no schedule left is the `done`.
 
-**A `done` waits 3 seconds** (`done_delay`). Another Stop hook (yours or a plugin's) may block the
-stop so that the agent works on; Claude Code, Codex and Grok Build then fire `Stop` again with
-`stop_hook_active: true`, and Gemini CLI `AfterAgent`. Any newer event of the same session within
-the delay (a tool call, a prompt, a permission request) cancels the `done`, and a newer `Stop`
-replaces it, so such a turn sends one `done`, for its real end. The badge changes at once; only the
-alert is late. A `done` whose `Stop` carried `stop_hook_active: true` also carries
+**A `done` waits 3 seconds on Claude Code and Grok Build** (`done_delay`). Another Stop hook (yours
+or a plugin's) may block the stop so that the agent works on; the agent then fires `Stop` again
+with `stop_hook_active: true`. Any newer event of the same session within the delay (a tool call,
+a prompt, a permission request) cancels the `done`, and a newer `Stop` replaces it, so such a turn
+sends one `done`, for its real end. The badge changes at once; only the alert is late. Codex,
+Gemini CLI and OpenCode register no event that would arrive within the delay (Codex: `SessionStart`,
+`PermissionRequest`, `PostCompact`, `Stop`; Gemini: `Notification`, `AfterAgent`), so for them the
+wait could only delay the alert: their default is 0 (at once; set `done_delay` to wait anyway,
+a newer `Stop` then still replaces the first). A `done` that leaves background work running is
+also sent at once: a background subagent's own tool calls carry the session id and would cancel
+the wait. A `done` whose `Stop` carried `stop_hook_active: true` also carries
 `"stop_hook_active":true` in its plaintext.
 
 Codex runs a `PermissionRequest` hook before it shows its own approval prompt, so while the hook
@@ -373,7 +378,7 @@ poll_wait=25      # one long-poll, 1-25
 usage=1           # 0: send no context or rate limits
 bg_done_after=600 # a pause with only shells/monitors left: done after this many seconds; 0: never
 codex_goal_check=5 # seconds to wait for a Codex /goal's next turn before sending done
-done_delay=3      # seconds a done waits for a newer event of the session (another Stop hook); 0: at once
+done_delay=3      # seconds a done waits for a newer event of the session (another Stop hook); 0: at once (default 3 on Claude Code and Grok Build, 0 on Codex, Gemini CLI and OpenCode)
 ```
 
 ## Privacy
@@ -463,11 +468,15 @@ Not tested on Windows yet.
 
 - **Background work that never ends.** A dev server the table of services does not know, or
   another endless job left in the background, never wakes the agent: `done` comes only after
-  `bg_done_after` (default 10 minutes), and the badge stays `background` until the next turn.
-  Commands that look like services (`npm run dev`, `tail -f`, ...) get their `done` at once.
+  `bg_done_after` (default 10 minutes), and the badge stays `background` until the next turn
+  (a turn you type while it still runs is `done` at once). This holds on OpenCode 2.x too: an
+  open shell no longer blocks the dones of later turns. Commands that look like services
+  (`npm run dev`, `tail -f`, ...) get their `done` at once.
 - **Questions are read from text.** Whether the last message asks something is a guess from its
   last two sentences (see above); a question phrased in another way is read wrongly now and then. A report that
-  ends with a sign-off such as `Let me know if you need anything else` is not read as a question.
+  ends with a sign-off such as `Let me know if you need anything else` or `If you want me to ...`, a
+  wait or FYI request (`기다려 주세요`, `참고해 주세요`, `양해 바랍니다`), or a `?` inside inline code or
+  a table row is not read as a question.
 - **Scheduled turns before Claude Code sends `UserPromptSubmit` `source`.** 2.1.316 sends none;
   a turn started by a schedule is recognised by its prompt (equal to one of the last `Stop`'s
   `session_crons`) and a typed prompt equal to a scheduled one counts as scheduled.

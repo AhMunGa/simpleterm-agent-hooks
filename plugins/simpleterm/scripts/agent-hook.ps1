@@ -1257,7 +1257,12 @@ function Invoke-BgPause([bool]$ask) {
         $Script:BgSeq += '\u0007'
     }
     $bgFile = Join-Path $RunDir ($Sid + '.bg')
-    try { [IO.File]::WriteAllText($bgFile, $m + "`n" + $flag + "`n" + $Rid + "`n", $Utf8) } catch { }
+    # Line 1: the badge's message (the question when asking), 2: the OSC 7501
+    # flag, 3: the pause's token, 4: `ask` while the badge says waiting.
+    $bm = $m
+    $askMark = ''
+    if ($ask) { $bm = Limit-JsonText $Last 80 320; $askMark = 'ask' }
+    try { [IO.File]::WriteAllText($bgFile, $bm + "`n" + $flag + "`n" + $Rid + "`n" + $askMark + "`n", $Utf8) } catch { }
     if ($ask) {
         $Script:Msg = Limit-JsonText $Last 200 800
         Send-Background 'question'
@@ -1277,10 +1282,14 @@ function Invoke-BgPause([bool]$ask) {
 # Sends done (text Msg) done_delay seconds from now (default 3; 0: at once)
 # unless something of the session happens first: another Stop hook may have
 # kept the agent going, and then its next event (or Stop) comes within
-# moments. The event is made then (fresh rid and time).
+# moments. The event is made then (fresh rid and time). Only where the agent
+# has such an event to send (Claude Code, Grok Build): Codex registers none
+# that would come within moments, so its default is 0.
 function Send-DoneLater {
     if ($LinkFiles.Count -eq 0) { return }
-    $dw = Get-ConfInt 'done_delay' 3
+    $dw = 3
+    if ($Agent -eq 'codex') { $dw = 0 }
+    $dw = Get-ConfInt 'done_delay' $dw
     if ($dw -le 0) { Send-Background 'done'; return }
     $pendFile = Join-Path $RunDir ($Sid + '.pend')
     try { [IO.File]::WriteAllText($pendFile, $Rid + "`n", $Utf8) } catch { Send-Background 'done'; return }
@@ -1358,6 +1367,12 @@ $AskKo = @([regex]::Unescape('\uAE4C\uC694'), [regex]::Unescape('\uB2C8\uAE4C'),
     [regex]::Unescape('\uC8FC\uC138\uC694'), [regex]::Unescape('\uC8FC\uC2DC\uACA0\uC5B4\uC694'), [regex]::Unescape('\uC8FC\uC2E4\uB798\uC694'),
     [regex]::Unescape('\uB098\uC694'), [regex]::Unescape('\uC778\uAC00\uC694'), [regex]::Unescape('\uBC14\uB78D\uB2C8\uB2E4'),
     [regex]::Unescape('\uD560\uB798\uC694'))
+# Words just before a request ending that make it no ask ("wait a moment",
+# "for your reference", "bear with us"): kidari, chamgo, chamjo, yanghae,
+# ihaehae, gamangan, yuui.
+$AskFyi = @([regex]::Unescape('\uAE30\uB2E4'), [regex]::Unescape('\uCC38\uACE0'), [regex]::Unescape('\uCC38\uC870'),
+    [regex]::Unescape('\uC591\uD574'), [regex]::Unescape('\uC774\uD574\uD574'), [regex]::Unescape('\uAC10\uC548'),
+    [regex]::Unescape('\uC720\uC758'))
 $AskEn = @('should i', 'shall i', 'would you like', 'do you want', 'let me know which', 'let me know whether', 'want me to', 'please confirm',
     'please choose', 'please select', 'please tell me')
 $AskFwQ = [string][char]0xFF1F
@@ -1428,15 +1443,24 @@ function Test-AskText([string]$raw) {
     $txt = $kept.ToString()
     $sent = New-Object System.Collections.ArrayList
     $cur = New-Object System.Text.StringBuilder
+    $code = $false
+    $line = ''
     for ($i = 0; $i -lt $txt.Length; $i++) {
         $c = [string]$txt[$i]
         [void]$cur.Append($c)
+        $line += $c
         $term = ''
         $nx = ''
         if ($i + 1 -lt $txt.Length) { $nx = [string]$txt[$i + 1] }
-        if ($c -eq "`n") { $term = 'nl' }
-        elseif ($c -eq '?' -or $c -eq '!') { if ($nx -notmatch '[A-Za-z0-9]') { $term = $c } }
-        elseif ($c -eq '.') { if ($nx -eq '' -or $nx -eq ' ' -or $nx -eq "`n") { $term = $c } }
+        $nx2 = ''
+        if ($i + 2 -lt $txt.Length) { $nx2 = [string]$txt[$i + 2] }
+        if ($c -eq "`n") { $term = 'nl'; $line = ''; $code = $false }
+        elseif ($c -eq '`') { $code = -not $code }
+        # No sentence ends inside inline code or in a table row; a?.b is not one either.
+        elseif (($c -eq '?' -or $c -eq '!') -and -not $code -and $line -notmatch '^[ \t]*\|') {
+            if ($nx -notmatch '[A-Za-z0-9]' -and -not ($c -eq '?' -and $nx -eq '.' -and $nx2 -match '[A-Za-z0-9_$]')) { $term = $c }
+        }
+        elseif ($c -eq '.' -and -not $code) { if ($nx -eq '' -or $nx -eq ' ' -or $nx -eq "`n") { $term = $c } }
         elseif ($AskTermChars -contains $c) { $term = $c }
         if ($term) {
             $x = $cur.ToString().Trim()
@@ -1455,9 +1479,26 @@ function Test-AskText([string]$raw) {
     for ($k = $sent.Count - 1; $k -ge 0 -and $k -ge $sent.Count - 2; $k--) {
         if ($sent[$k][1] -eq '?' -or $sent[$k][1] -eq $AskFwQ) { return $true }
         $core = Get-AskCore $sent[$k][0]
-        foreach ($ko in $AskKo) { if ($core.EndsWith($ko, [StringComparison]::Ordinal)) { return $true } }
+        for ($j = 0; $j -lt $AskKo.Count; $j++) {
+            $ko = $AskKo[$j]
+            if (-not $core.EndsWith($ko, [StringComparison]::Ordinal)) { continue }
+            # juseyo (index 3) and baramnida (index 8) after a wait / FYI word are no ask.
+            if ($j -eq 3 -or $j -eq 8) {
+                $tail = $core.Substring(0, $core.Length - $ko.Length)
+                if ($tail.Length -gt 4) { $tail = $tail.Substring($tail.Length - 4) }
+                $fyi = $false
+                foreach ($w in $AskFyi) { if ($tail.Contains($w)) { $fyi = $true } }
+                if ($fyi) { continue }
+            }
+            return $true
+        }
         $low = ' ' + $core.ToLowerInvariant() + ' '
-        foreach ($en in $AskEn) { if ($low.Contains(' ' + $en + ' ')) { return $true } }
+        foreach ($en in $AskEn) {
+            $p = $low.IndexOf(' ' + $en + ' ', [StringComparison]::Ordinal)
+            if ($p -lt 0) { continue }
+            if ($p -ge 6 -and $low.Substring($p - 6, 6) -eq 'if you') { continue }
+            return $true
+        }
     }
     return $false
 }
@@ -1467,8 +1508,8 @@ function Test-AskText([string]$raw) {
 # A shell task whose command looks like a service (a dev server, a watcher, a
 # follower) is not something the agent waits for: it never ends and never
 # wakes the agent. One @(pattern, exception) per line, matched against the
-# lowercased command with ; & | ( ) and JSON escapes turned into single
-# spaces and one space at each end (the same table as SVC_AWK in agent-hook.sh).
+# lowercased command with ( ) and JSON escapes turned into single spaces and
+# one space at each end (the same table as SVC_AWK in agent-hook.sh).
 $ServiceCmds = @(
     @(' (npm|pnpm|yarn|bun)( run| run-script)? (dev|start|serve|preview|watch)(:[a-z0-9_-]+)? ', ''),
     @(' next (dev|start) ', ''),
@@ -1481,21 +1522,27 @@ $ServiceCmds = @(
     @('[ /]uvicorn ', ''),
     @('docker[ -]compose ([^ ]+ )*up ', ' (-d|--detach) '),
     @(' tail ([^ ]+ )*(-[a-z]*f[a-z]*|--follow[^ ]*) ', ''),
-    @(' --watch[a-z-]*(=[^ ]*)? ', ''),
-    @(' -w ', ' (grep|egrep|fgrep|rg|wc|ls|sort|diff|cut|tr|sed|awk|ps|date|stat|find|git|npm|pnpm|yarn|npx) '),
+    @(' --watch[a-z-]*(=[^ ]*)? ', ' --watch[a-z-]*=(false|0|no|off) | --no-watch[a-z-]* '),
     @(' watch ', '')
 )
+$ServiceDashW = ' (grep|egrep|fgrep|rg|wc|ls|sort|diff|cut|tr|sed|awk|ps|date|stat|find|git|npm|pnpm|yarn|npx|make|docker|podman|kubectl|python[0-9.]*|pytest|go|cargo) '
 
+# The command is split at ; & | (and line breaks) and each command is matched
+# on its own, so a word of one never pairs with a word of the next.
 function Test-ServiceCmd([string]$cmd) {
-    $c = $cmd.ToLowerInvariant()
-    $c = [regex]::Replace($c, '\\[nrt"]', ' ')
-    $c = [regex]::Replace($c, '[;&|()\t]', ' ')
-    $c = ' ' + $c + ' '
-    $c = [regex]::Replace($c, ' +', ' ')
-    foreach ($e in $ServiceCmds) {
-        if ($c -match $e[0]) {
-            if (-not $e[1] -or $c -notmatch $e[1]) { return $true }
+    $cmd = [regex]::Replace($cmd, '\\n', ';')
+    $cmd = [regex]::Replace($cmd, '\\[rt"]', ' ')
+    foreach ($part in [regex]::Split($cmd, '[;&|]+')) {
+        $o = [regex]::Replace($part, '[()\t]', ' ')
+        $o = ' ' + ([regex]::Replace($o, ' +', ' ')) + ' '
+        $c = $o.ToLowerInvariant()
+        foreach ($e in $ServiceCmds) {
+            if ($c -match $e[0]) {
+                if (-not $e[1] -or $c -notmatch $e[1]) { return $true }
+            }
         }
+        # -w on the original case: -W (python, make) is something else.
+        if ($o -cmatch ' -w ' -and $c -notmatch $ServiceDashW) { return $true }
     }
     return $false
 }
@@ -1514,7 +1561,15 @@ function Test-BgAllOld([string]$prevIds) {
 function Invoke-StopDone([string]$what) {
     if ($what) { $Script:Msg = Get-DoneMsg $what } else { $Script:Msg = Limit-JsonText $Last 200 800 }
     if ((Get-Field $f 'stop_hook_active') -eq 'true') { $Script:XFlag = '1' }
-    Send-DoneLater
+    if ($what) {
+        # Work still runs: the events that follow may be that work's own (a
+        # background subagent's tool calls carry this session id) and would
+        # cancel the wait, losing the done. At once, then.
+        try { [IO.File]::Delete((Join-Path $RunDir ($Sid + '.pend'))) } catch { }
+        Send-Background 'done'
+    } else {
+        Send-DoneLater
+    }
     Invoke-UsageReport
     Write-State 'done' ''
     Update-Cli
@@ -1555,14 +1610,20 @@ function Invoke-StopFlow {
     Update-Cli
 }
 
-# The status of a running turn: `background` while a paused session's
-# background subagents run tools, `running` otherwise.
+# The status of a running turn: while a paused session's background subagents
+# run tools, the pause's own badge (`waiting` when the turn paused on a
+# question, `background` otherwise); `running` otherwise.
 function Write-Running {
     $path = Join-Path $RunDir ($Sid + '.bg')
     if ([IO.File]::Exists($path)) {
         $m = ''
-        try { $m = ([IO.File]::ReadAllText($path, $Utf8) -split "`n")[0] } catch { }
-        Write-State 'background' $m
+        $state = 'background'
+        try {
+            $bl = [IO.File]::ReadAllText($path, $Utf8) -split "`n"
+            $m = $bl[0]
+            if ($bl.Count -gt 3 -and $bl[3] -eq 'ask') { $state = 'waiting' }
+        } catch { }
+        Write-State $state $m
     } else {
         Write-State 'running' ''
     }
@@ -1609,7 +1670,7 @@ try {
         'tool_input.questions.0.question', 'session_id', 'sessionId', 'cwd', 'message', 'last_assistant_message',
         'lastAssistantMessage', 'last-assistant-message', 'input-messages.0', 'error', 'transcript_path', 'context_tokens',
         'model', 'to_model', 'promptId', 'toolUseId', 'reason', 'timestamp', 'prompt', 'source', 'stop_hook_active',
-        'is_interrupt') + $bgWant + $cronWant)
+        'is_interrupt', 'agent_id') + $bgWant + $cronWant)
     $HookEvent = Get-Field $f 'hook_event_name'
     if (-not $HookEvent) { $HookEvent = Get-Field $f 'hookEventName' }
     if ($Agent -eq 'codex-notify') { $HookEvent = 'notify' }
@@ -1780,8 +1841,10 @@ try {
             break
         }
         { $_ -eq 'claude:PostToolUse' -or $_ -eq 'claude:PostToolUseFailure' } {
-            if ($HookEvent -eq 'PostToolUseFailure' -and (Get-Field $f 'is_interrupt') -eq 'true') {
+            if ($HookEvent -eq 'PostToolUseFailure' -and (Get-Field $f 'is_interrupt') -eq 'true' -and -not (Get-Field $f 'agent_id')) {
                 # Esc during a tool call: the turn is over (no Stop follows).
+                # Not when a background subagent's tool was interrupted
+                # (agent_id is set): the main session's wait goes on.
                 Add-Note 'turn' ''
                 Write-State 'idle' ''
                 break

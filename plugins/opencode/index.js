@@ -34,10 +34,14 @@ const seen = (globalThis.__simpletermSeen ??= new Set());
 // Which sessions are running and whose child each one is, as every instance
 // sees it (an event may be handled by any of them).
 const sessions = (globalThis.__simpletermSessions ??= { running: new Set(), parent: new Map() });
-// Background shells still running (shell id -> session id). A shell started
-// with `background: true` outlives the turn, and its exit starts the session
-// again (measured on 2.2.5: execution.succeeded 0.1 s after shell.created,
-// shell.exited 25 s later, then execution.started and .succeeded again).
+// Background shells still running (shell id -> {owner session id, command}).
+// A shell started with `background: true` outlives the turn, and its exit
+// starts the session again (measured on 2.2.5: execution.succeeded 0.1 s
+// after shell.created, shell.exited 25 s later, then execution.started and
+// .succeeded again). A shell that never exits (a dev server) must not hold
+// the done back for good: the hook gets the open shells with the Stop and
+// decides as it does for Claude Code's background_tasks (a service is not
+// waited for, other shells are, for a while).
 const shells = (globalThis.__simpletermShells ??= new Map());
 
 function firstSeen(id) {
@@ -61,7 +65,7 @@ function track(event) {
     const info = d.info || {};
     const owner = info.metadata && info.metadata.sessionID;
     if (info.id && owner && info.status !== "exited") {
-      shells.set(info.id, owner);
+      shells.set(info.id, { owner, command: String(info.command || "") });
       if (shells.size > 500) shells.delete(shells.keys().next().value);
     }
     return;
@@ -145,14 +149,17 @@ async function parentOf(ctx, sessionID) {
   return parent;
 }
 
-// True if a background shell of the session or of a direct child was still
-// running (`open`, the owners taken when the event arrived): its exit wakes
-// that session again.
-async function hasOpenShell(ctx, sessionID, open) {
-  for (const owner of open) {
-    if (owner === sessionID || (await parentOf(ctx, owner)) === sessionID) return true;
+// The background shells of the session or of a direct child that were still
+// running (`open`, taken when the event arrived), as the hook's
+// background_tasks: the exit of one wakes that session again.
+async function openShellsOf(ctx, sessionID, open) {
+  const mine = [];
+  for (const sh of open) {
+    if (sh.owner === sessionID || (await parentOf(ctx, sh.owner)) === sessionID) {
+      mine.push({ id: sh.id, type: "shell", command: sh.command });
+    }
   }
-  return false;
+  return mine.slice(0, 10);
 }
 
 // True if a direct child of the session was running (`running`, taken when
@@ -177,7 +184,7 @@ export default {
       track(event);
       const done = event.type === "session.execution.succeeded";
       const running = done ? [...sessions.running] : [];
-      const open = done ? [...new Set(shells.values())] : [];
+      const open = done ? [...shells].map(([id, v]) => ({ id, owner: v.owner, command: v.command })) : [];
       const d = event.data || {};
       if (event.type === "permission.replied") {
         // Answered (in the terminal, or by us): stop waiting for a device.
@@ -224,7 +231,7 @@ export default {
           if (info.parentID) return; // a subagent's session
           const failed = event.type === "session.execution.failed";
           if (!failed && (await hasRunningChild(ctx, d.sessionID, running))) return;
-          if (!failed && (await hasOpenShell(ctx, d.sessionID, open))) return;
+          const background = failed ? [] : await openShellsOf(ctx, d.sessionID, open);
           const err = d.error || {};
           await runHook(
             failed
@@ -240,6 +247,7 @@ export default {
                   session_id: d.sessionID,
                   cwd,
                   last_assistant_message: String(info.title || ""),
+                  ...(background.length ? { background_tasks: background } : {}),
                 },
             cwd,
           );

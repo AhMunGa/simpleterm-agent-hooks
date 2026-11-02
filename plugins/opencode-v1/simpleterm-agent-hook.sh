@@ -1278,8 +1278,9 @@ case $AGENT in
   claude | opencode)
     # background_tasks (Claude Code Stop): the first ten tasks.
     # session_crons (the first five): scheduled wake-ups. prompt/source tell
-    # who started a turn; stop_hook_active and is_interrupt are flags.
-    WANT='hook_event_name,notification_type,tool_name,tool_input.command,tool_input.file_path,tool_input.url,tool_input.description,tool_input.questions.0.question,session_id,cwd,message,last_assistant_message,error,transcript_path,context_tokens,model,to_model,prompt,source,stop_hook_active,is_interrupt'
+    # who started a turn; stop_hook_active and is_interrupt are flags. agent_id is
+    # there only when a background subagent's own tool call fires the hook.
+    WANT='hook_event_name,notification_type,tool_name,tool_input.command,tool_input.file_path,tool_input.url,tool_input.description,tool_input.questions.0.question,session_id,cwd,message,last_assistant_message,error,transcript_path,context_tokens,model,to_model,prompt,source,stop_hook_active,is_interrupt,agent_id'
     for i in 0 1 2 3 4 5 6 7 8 9; do WANT=$WANT,background_tasks.$i.id,background_tasks.$i.type,background_tasks.$i.description,background_tasks.$i.command; done
     for i in 0 1 2 3 4; do WANT=$WANT,session_crons.$i.id,session_crons.$i.schedule,session_crons.$i.prompt; done
     ;;
@@ -1305,7 +1306,7 @@ esac
 
 EVENT='' NTYPE='' TOOL='' DETAIL='' DESC='' SID='' CWD='' LAST='' ERR='' QTEXT='' FIRSTIN='' NTYPE2=''
 TPATH='' CTXTOK='' MODEL='' GTYPE='' FULLYIDLE='' TERMREASON='' EXTRA='' GKEY='' REASON=''
-PROMPT='' SRC='' STOPACT='' ISINT='' PROMPTID='' XFLAGS=''
+PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS=''
 BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_SEQ=''
 BG_SVC=0 BG_IDMAP='' BG_KEEP='' BG_SHELLS='' BG_IDS='' BG_NOID=0 BG_M=''
 CRON_N=0 CRON_SCHED='' CRON_SUMS=''
@@ -1315,17 +1316,19 @@ CRON_N=0 CRON_SCHED='' CRON_SUMS=''
 # A shell task whose command looks like a service (a dev server, a watcher, a
 # follower) is not something the agent waits for: it never ends and never
 # wakes the agent. exit 0 when the command (one JSON-escaped line on stdin) is
-# one. One `svc(pattern, exception)` per line, matched against the lowercased
-# command with ; & | ( ) and JSON escapes turned into single spaces and one
-# space at each end; add a line to teach it another.
+# one. The command is split at ; & | (and line breaks) and each command is
+# matched on its own, so a word of one never pairs with a word of the next.
+# One `svc(pattern, exception)` per line, matched against the lowercased
+# command with ( ) and JSON escapes turned into single spaces and one space
+# at each end; add a line to teach it another.
 SVC_AWK='
 function svc(re, ex) { if (c ~ re && (ex == "" || c !~ ex)) found = 1 }
-{
-  c = tolower($0)
-  gsub(/\\[nrt"]/, " ", c)
-  gsub(/[;&|()\t]/, " ", c)
-  c = " " c " "
-  gsub(/  +/, " ", c)
+function scan(part) {
+  o = part
+  gsub(/[()\t]/, " ", o)
+  gsub(/  +/, " ", o)
+  o = " " o " "
+  c = tolower(o)
   svc(" (npm|pnpm|yarn|bun)( run| run-script)? (dev|start|serve|preview|watch)(:[a-z0-9_-]+)? ", "")
   svc(" next (dev|start) ", "")
   svc(" vite (dev |serve |preview |-)| vite $", "")
@@ -1337,9 +1340,17 @@ function svc(re, ex) { if (c ~ re && (ex == "" || c !~ ex)) found = 1 }
   svc("[ /]uvicorn ", "")
   svc("docker[ -]compose ([^ ]+ )*up ", " (-d|--detach) ")
   svc(" tail ([^ ]+ )*(-[a-z]*f[a-z]*|--follow[^ ]*) ", "")
-  svc(" --watch[a-z-]*(=[^ ]*)? ", "")
-  svc(" -w ", " (grep|egrep|fgrep|rg|wc|ls|sort|diff|cut|tr|sed|awk|ps|date|stat|find|git|npm|pnpm|yarn|npx) ")
+  svc(" --watch[a-z-]*(=[^ ]*)? ", " --watch[a-z-]*=(false|0|no|off) | --no-watch[a-z-]* ")
+  # -w on the original case: -W (python, make) is something else.
+  if (o ~ / -w / && c !~ " (grep|egrep|fgrep|rg|wc|ls|sort|diff|cut|tr|sed|awk|ps|date|stat|find|git|npm|pnpm|yarn|npx|make|docker|podman|kubectl|python[0-9.]*|pytest|go|cargo) ") found = 1
   svc(" watch ", "")
+}
+{
+  s = $0
+  gsub(/\\n/, ";", s)
+  gsub(/\\[rt"]/, " ", s)
+  n = split(s, part, /[;&|]+/)
+  for (i = 1; i <= n; i++) scan(part[i])
 }
 END { exit !found }'
 
@@ -1361,6 +1372,7 @@ BEGIN {
   nk = split("\352\271\214\354\232\224|\353\213\210\352\271\214|\355\225\230\354\213\234\352\262\240\354\226\264\354\232\224|\354\243\274\354\204\270\354\232\224|\354\243\274\354\213\234\352\262\240\354\226\264\354\232\224|\354\243\274\354\213\244\353\236\230\354\232\224|\353\202\230\354\232\224|\354\235\270\352\260\200\354\232\224|\353\260\224\353\236\215\353\213\210\353\213\244|\355\225\240\353\236\230\354\232\224", KO, "|")
   ne = split("should i|shall i|would you like|do you want|let me know which|let me know whether|want me to|please confirm|please choose|please select|please tell me", EN, "|")
   FWQ = "\357\274\237"; FWE = "\357\274\201"; IDEO = "\343\200\202"
+  nf = split("\352\270\260\353\213\244|\354\260\270\352\263\240|\354\260\270\354\241\260|\354\226\221\355\225\264|\354\235\264\355\225\264\355\225\264|\352\260\220\354\225\210|\354\234\240\354\235\230", FYI, "|")
   nc = split("\343\200\215|\343\200\217|\342\200\235|\342\200\231|\357\274\211|" FWQ "|" FWE "|" IDEO, CL, "|")
 }
 function hexv(h,   k, v, c) {
@@ -1413,13 +1425,21 @@ function add(x, term,   y) {
   if (y ~ /^[0-9]+[.)]?$/) return
   m++; S[m] = y; T[m] = term
 }
-function asks(k,   x, cr, low, j) {
+# "Wait a moment", "for your reference", "bear with us" end like a request
+# but ask for nothing: the words just before the ending say so.
+function fyi(cr, sl,   t, k) {
+  t = substr(cr, 1, length(cr) - sl)
+  t = substr(t, length(t) - 11)
+  for (k = 1; k <= nf; k++) if (index(t, FYI[k])) return 1
+  return 0
+}
+function asks(k,   x, cr, low, j, p) {
   x = S[k]
   if (T[k] == "?" || T[k] == FWQ) return 1
   cr = core(x)
-  for (j = 1; j <= nk; j++) if (ends(cr, KO[j])) return 1
+  for (j = 1; j <= nk; j++) if (ends(cr, KO[j])) { if ((j == 4 || j == 9) && fyi(cr, length(KO[j]))) continue; return 1 }
   low = " " tolower(cr) " "
-  for (j = 1; j <= ne; j++) if (index(low, " " EN[j] " ")) return 1
+  for (j = 1; j <= ne; j++) { p = index(low, " " EN[j] " "); if (p > 6 && substr(low, p - 6, 6) == "if you") continue; if (p > 0) return 1 }
   return 0
 }
 NR == 1 {
@@ -1436,12 +1456,17 @@ NR == 1 {
     if (substr(tr, 1, 3) == "```") { fence = !fence; continue }
     if (!fence) txt = txt L[i] "\n"
   }
-  m = 0; cur = ""; tl = length(txt)
+  m = 0; cur = ""; tl = length(txt); code = 0; line = ""
   for (i = 1; i <= tl; i++) {
-    c = substr(txt, i, 1); cur = cur c; term = ""
-    if (c == "\n") { add(cur, ""); cur = "" }
-    else if (c == "?" || c == "!") { nx = substr(txt, i + 1, 1); if (!(nx ~ /[A-Za-z0-9]/)) term = c }
-    else if (c == ".") { nx = substr(txt, i + 1, 1); if (nx == "" || nx == " " || nx == "\n") term = c }
+    c = substr(txt, i, 1); cur = cur c; line = line c; term = ""
+    if (c == "\n") { add(cur, ""); cur = ""; line = ""; code = 0 }
+    else if (c == "`") code = !code
+    # No sentence ends inside inline code or in a table row; `a?.b` is not one either.
+    else if ((c == "?" || c == "!") && !code && line !~ /^[ \t]*\|/) {
+      nx = substr(txt, i + 1, 1)
+      if (!(nx ~ /[A-Za-z0-9]/) && !(c == "?" && nx == "." && substr(txt, i + 2, 1) ~ /[A-Za-z0-9_$]/)) term = c
+    }
+    else if (c == "." && !code) { nx = substr(txt, i + 1, 1); if (nx == "" || nx == " " || nx == "\n") term = c }
     else if (c >= "\200") {
       t3 = substr(txt, i, 3)
       if (t3 == FWQ || t3 == FWE || t3 == IDEO) { term = t3; cur = cur substr(txt, i + 1, 2); i += 2 }
@@ -1531,6 +1556,7 @@ while IFS= read -r kv; do
     source=*) SRC=${kv#*=} ;;
     stop_hook_active=*) STOPACT=${kv#*=} ;;
     is_interrupt=*) ISINT=${kv#*=} ;;
+    agent_id=*) AGENTID=${kv#*=} ;;
     # Grok sends both: hook_event_name has Claude's PascalCase names.
     hook_event_name=*) EVENT=${kv#*=} ;;
     hookEventName=*) [ -n "$EVENT" ] || EVENT=${kv#*=} ;;
@@ -1698,7 +1724,10 @@ bg_pause() {
       BG_SEQ="\\u001b]7501;state=working:id=$BG_ID${e:+:msg=$e}\\u0007"
     fi
   fi
-  printf '%s\n%s\n%s\n' "$BG_M" "$flag" "$RID" >"$RUN_DIR/$SID.bg" 2>/dev/null
+  # Line 1: the badge's message (the question when asking), 2: the OSC 7501
+  # flag, 3: the pause's token, 4: `ask` while the badge says `waiting`.
+  if [ "${1:-}" = ask ]; then bm=$(json_trim "$LAST" 80 320); else bm=$BG_M; fi
+  printf '%s\n%s\n%s\n%s\n' "$bm" "$flag" "$RID" "${1:-}" >"$RUN_DIR/$SID.bg" 2>/dev/null
   if [ "${1:-}" = ask ]; then
     MSG=$(json_trim "$LAST" 200 800)
     send_bg question
@@ -1746,10 +1775,14 @@ done_msg() { # what
 # Sends `done` (text MSG) done_delay seconds from now (default 3; 0: at once)
 # unless something of the session happens first: another Stop hook may have
 # kept the agent going, and then its next event (or Stop) comes within
-# moments. The event is made then (fresh rid and time).
+# moments. The event is made then (fresh rid and time). Only where the agent
+# has such an event to send (Claude Code, Grok Build): Codex, Gemini CLI and
+# OpenCode register none that would come within moments, so their default is
+# 0 (a second Stop still replaces the first within the wait if one is set).
 done_later() {
   [ -n "$LINKS" ] || return 0
-  dw=$(conf_int done_delay 3)
+  case $AGENT in codex | gemini | opencode) dw=0 ;; *) dw=3 ;; esac
+  dw=$(conf_int done_delay $dw)
   if [ "$dw" -le 0 ] || ! printf '%s\n' "$RID" >"$RUN_DIR/$SID.pend" 2>/dev/null; then
     send_bg done
     return 0
@@ -1777,13 +1810,12 @@ later_send() { # ev
 # (transcript) records `thread_goal_updated` with the goal's status, and the
 # model ends a goal with an `update_goal` call; the turns between are not
 # done. Measured with Codex 0.165.0.
-codex_goal_active() {
-  f=$(input_file "$TPATH")
-  [ -n "$f" ] || return 1
+codex_goal_active() { # rollout file
+  [ -n "$1" ] || return 1
   awk '
     /"type":"thread_goal_updated"/ { active = ($0 ~ /"status":"active"/); called = 0; next }
     /"name":"update_goal"/ { called = 1 }
-    END { exit !(active && !called) }' "$f" 2>/dev/null
+    END { exit !(active && !called) }' "$1" 2>/dev/null
 }
 
 # A goal can also end without a trace in the rollout (blocked after an
@@ -1791,9 +1823,10 @@ codex_goal_active() {
 # turn starts. Measured: Codex starts a goal's next turn within milliseconds
 # (task_started). If none started codex_goal_check seconds (default 5) after
 # this Stop, the turn was the last: `done` goes then.
-codex_goal_later() {
+codex_goal_later() { # rollout file
   [ -n "$LINKS" ] || return 0
-  off=$(wc -c <"$f" 2>/dev/null | tr -d ' ')
+  gf=$1
+  off=$(wc -c <"$gf" 2>/dev/null | tr -d ' ')
   is_uint "$off" || return 0
   w=$(conf_int codex_goal_check 5)
   MSG=$(json_trim "$LAST" 200 800)
@@ -1802,17 +1835,19 @@ codex_goal_later() {
   (
     sleep "$w"
     [ "$(cat "$RUN_DIR/$SID.goal" 2>/dev/null)" = "$RID" ] || exit 0
-    tail -c +$((off + 1)) "$f" 2>/dev/null | awk '/"type":"task_started"/ { found = 1 } END { exit !found }' && exit 0
+    tail -c +$((off + 1)) "$gf" 2>/dev/null | awk '/"type":"task_started"/ { found = 1 } END { exit !found }' && exit 0
     rm -f "$RUN_DIR/$SID.goal" 2>/dev/null
     later_send done
   ) </dev/null >/dev/null 2>&1 &
 }
 
-# The status of a running turn: `background` while a paused session's
-# background subagents run tools, `running` otherwise.
+# The status of a running turn: while a paused session's background
+# subagents run tools, the pause's own badge (`waiting` when the turn paused
+# on a question, `background` otherwise); `running` otherwise.
 print_running() {
   if bg_paused; then
-    print_state background "$(head -c 400 "$RUN_DIR/$SID.bg" 2>/dev/null | head -n 1)"
+    bm=$(head -c 400 "$RUN_DIR/$SID.bg" 2>/dev/null | head -n 1)
+    if [ "$(sed -n 4p "$RUN_DIR/$SID.bg" 2>/dev/null)" = ask ]; then print_state waiting "$bm"; else print_state background "$bm"; fi
   else
     print_state running
   fi
@@ -1887,7 +1922,15 @@ bg_all_old() {
 stop_done() {
   if [ -n "${1:-}" ]; then MSG=$(done_msg "$1"); else MSG=$(json_trim "$LAST" 200 800); fi
   [ "$STOPACT" = true ] && XFLAGS=',"stop_hook_active":true'
-  done_later
+  if [ -n "${1:-}" ]; then
+    # Work still runs: the events that follow may be that work's own (a
+    # background subagent's tool calls carry this session id) and would
+    # cancel the wait, losing the done. At once, then.
+    rm -f "$RUN_DIR/$SID.pend" 2>/dev/null
+    send_bg done
+  else
+    done_later
+  fi
   usage_report
   print_state done
   turn_end
@@ -1934,7 +1977,8 @@ stop_flow() {
     return 0
   fi
   usage_report
-  if ask_detect "$LAST"; then bg_pause ask; else bg_pause; fi
+  # OpenCode's LAST is the session's title, not a message to the person.
+  if [ "$AGENT" != opencode ] && ask_detect "$LAST"; then bg_pause ask; else bg_pause; fi
   turn_end
 }
 
@@ -1992,8 +2036,10 @@ case $AGENT:$EVENT in
     print_state running
     ;;
   claude:PostToolUse | claude:PostToolUseFailure)
-    if [ "$EVENT" = PostToolUseFailure ] && [ "$ISINT" = true ]; then
-      # Esc during a tool call: the turn is over (no Stop follows).
+    if [ "$EVENT" = PostToolUseFailure ] && [ "$ISINT" = true ] && [ -z "$AGENTID" ]; then
+      # Esc during a tool call: the turn is over (no Stop follows). Not when
+      # a background subagent's tool was interrupted (agent_id is set): the
+      # main session's wait goes on.
       note turn
       print_state idle
       finish
@@ -2015,9 +2061,11 @@ case $AGENT:$EVENT in
   claude:Stop | codex:Stop)
     note turn
     case $LAST in '{\"title\":'*) finish ;; esac
-    if [ "$AGENT" = codex ] && codex_goal_active; then
+    gf=''
+    [ "$AGENT" = codex ] && gf=$(input_file "$TPATH")
+    if [ "$AGENT" = codex ] && codex_goal_active "$gf"; then
       usage_report
-      codex_goal_later
+      codex_goal_later "$gf"
       turn_end
       finish
     fi
@@ -2148,9 +2196,14 @@ case $AGENT:$EVENT in
     send_bg question
     ;;
   opencode:Stop)
-    MSG=$(json_trim "$LAST" 200 800)
-    send_bg done
-    turn_end
+    # The plugin lists the background shells still open (background_tasks):
+    # a dev server does not hold the done back, other work waits as for
+    # Claude Code. OpenCode does not say who started a turn: a person did,
+    # so shells that were open at the last Stop do not hold this one back.
+    note turn
+    PROMPT_USER=1
+    turn_mark
+    stop_flow
     ;;
   opencode:StopFailure)
     ev=error
