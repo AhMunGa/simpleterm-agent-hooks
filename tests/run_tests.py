@@ -1709,6 +1709,8 @@ def t_usage_claude(s):
     s.check("usage claude: plaintext field order", rec and rec[0]["plain"].startswith(
         '{"v":1,"rid":"%s","ev":"usage","app":"claude-code","host":"dev-box","cwd":"app","ctx":{' % p.get("rid")),
         rec[0]["plain"] if rec else "")
+    # The done and the usage go out from separate background sends (on Windows separate processes).
+    wait_for(lambda: len(ingests(s)) >= 2, 20)
     s.check("usage claude: own rid", rec and len({r["body"]["rid"] for r in ingests(s)}) == 2, str(ingests(s))[:300])
     # Unchanged: nothing more (no sequence, no event).
     s.ctl("/_ctl/reset", {})
