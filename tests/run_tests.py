@@ -862,7 +862,7 @@ def t_service_shells(s):
         ev = cc_event(sid, "Stop", stop_hook_active=False, last_assistant_message=last, background_tasks=tasks, session_crons=[],
                       **(extra or {}))
         if amp:
-            ev = ev.replace("&", "\u0026").replace("<", "\u003c").replace(">", "\u003e")
+            ev = ev.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
         return s.run("claude", ev, dict(st, **(env or {})))[1]
 
     out = stop("sv1", [shell("npm run dev")])
@@ -881,7 +881,7 @@ def t_service_shells(s):
     s.ctl("/_ctl/reset", {})
     # One table (SVC_AWK): a command is a service only at the command position of the last list element and when
     # (tool, subcommand) is known; when in doubt it is not one (a wrong service sends an early done). A third
-    # field 'amp' sends the command the way Go writes JSON (& as \u0026).
+    # field 'amp' sends the command the way Go writes JSON (& < > as \u0026 \u003c \u003e).
     for cmd, service, *flag in (
             ('npm run dev -- --port 3000', True), ('pnpm run watch', True), ('next dev', True),
             ('python3 -m http.server 8000', True), ('python manage.py runserver 0.0.0.0:8000', True), ('bin/rails server', True),
@@ -980,11 +980,20 @@ def t_service_shells(s):
             ('kubectl logs -f job.batch/migrate', False), ('kubectl logs -f -l job-name=migrate', False),
             ('gunicorn --check-config app:app', False), ('node run --watch', False), ('flask -A app run', False),
             ('npm run dev & npx wait-on http://localhost:3000 && npx playwright test', False, 'amp'),
-            ('npm run dev &', True, 'amp'), ('cd web && npm run dev', True, 'amp'), ("printf $'it\\'s'; npm run dev", True)):
+            ('npm run dev &', True, 'amp'), ('cd web && npm run dev', True, 'amp'), ("printf $'it\\'s'; npm run dev", True),
+            ('x=$((1<<3)); npm run dev &\nnpx wait-on http://localhost:3000 && npx playwright test', False),
+            ('(( n <<= 1 )); npm run dev &\nsleep 5 && npm test', False), ('x=$((1<<3))\nnpm run dev', True),
+            ('git commit -m "$(cat <<\'EOF\'\nFix "quoted bug\nEOF\n)" && npm run dev', True),
+            ('git commit -m "$(cat <<\'EOF\'\nFix: start npm run dev\nEOF\n)" && npm test', False),
+            ('esbuild --watch=forever src/app.js', True), ('esbuild --watch src/app.js', True)):
         s.ctl("/_ctl/reset", {})
         out = stop("sv3-%d" % abs(hash(cmd)), [shell(cmd, "Run it")], amp=bool(flag))
         got = seqs(out).startswith("\x1b]9;simpleterm:state=done")
         s.check("service shell: %r -> %s" % (cmd, "service" if service else "waits"), got == service, repr(out))
+    # A command over 64 KiB is not looked at: not a service (the hook has seconds to answer).
+    s.ctl("/_ctl/reset", {})
+    out = stop("sv-big", [shell("echo " + "x" * 70000 + "; npm run dev", "Run it")])
+    s.check("service shell: a command over 64 KiB is not looked at", seqs(out).startswith("\x1b]9;simpleterm:state=background"), repr(out)[:200])
     time.sleep(1)
     # Mixes: only services (and the agent's own housekeeping) count as services.
     s.ctl("/_ctl/reset", {})

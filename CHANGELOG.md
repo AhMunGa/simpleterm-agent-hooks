@@ -53,7 +53,7 @@
     wrong service sends an early `done`, a missed one only delays it). The command is cut at `;`,
     `&&`, `||`, `&` and line breaks and only the last element counts (any command of its pipeline
     may be the service); comments dropped (`# ... & ...`), continuation lines joined, heredoc bodies dropped, quoted text
-    ignored, a pipeline whose last command ends early (`head`, `grep -q|-m`) is no service; at the command position (after `VAR=val`, `npx`, `pnpm exec|dlx`, `yarn dlx`, `bunx`,
+    ignored, a pipeline whose last command can end it (`head`, `grep -q|-m`: when the earlier command writes again, SIGPIPE) is no service; heredoc operators need a delimiter that starts with a letter or `_` (`$((1<<3))` is none), bodies in `"$(cat <<'EOF' ...)"` are dropped, a command over 64 KiB is not looked at; at the command position (after `VAR=val`, `npx`, `pnpm exec|dlx`, `yarn dlx`, `bunx`,
     `uv|poetry run`, `bundle exec`, `env`, `nohup`, `exec`, `sudo`) an explicit (tool, subcommand)
     table decides, with only known options between the two: `npm|pnpm|yarn|bun [run]
     dev|start|serve|preview|watch` (also `dev:web`, `--filter web`; `dev:setup`, `start:db` and

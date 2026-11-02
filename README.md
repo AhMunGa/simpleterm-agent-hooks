@@ -250,11 +250,16 @@ there):
   - The command is cut at `;`, `&&`, `||`, `&` and line breaks; only the **last** element counts
     (`cd web && npm run dev` and `npm run dev &` are services, `npm run dev & npx wait-on ... && npx
     playwright test` is not), and any command of its `|` pipeline may be the service, unless the
-    last command of the pipeline ends early (`head`, `grep -q|-l|-m N`: `tail -f x | grep -m1 ready`).
+    last command of the pipeline can end it (`head`, `grep -q|-l|-m N`: `tail -f x | grep -m1 ready`
+    ends once `tail` writes again and dies of SIGPIPE, not at the match; measured, so this is a guess
+    towards "not a service").
     One pass over the text drops comments (a `#` that starts a word, outside quotes, to the end of the
     line: `npm run build  # then: preview & serve`), heredoc bodies and the inside of `"..."`, `'...'`
     and `$'...'`, and joins backslash line continuations (`git commit -m "npm run dev"`, `sh -c
-    "..."` are not services). `\u00XX` escapes in the JSON are decoded (Go writes `&` as `\u0026`).
+    "..."` are not services). `\u00XX` escapes in the JSON are decoded for 0x20-0x7F (Go writes `&` as `\u0026`). A
+    command over 64 KiB is not looked at (not a service). Heredoc operators count only with a
+    delimiter that starts with a letter or `_` (or a quoted one), so `$((1<<3))` and `(( n <<= 1 ))`
+    are not heredocs; `"$(cat <<'EOF' ... EOF)"` bodies are dropped too.
   - Leading `VAR=val` words and the launchers `npx`, `bunx`, `pnpm exec|dlx`, `yarn dlx`, `uv|poetry
     run`, `bundle exec`, `env`, `nohup`, `exec`, `sudo` are skipped (an option we cannot read gives up).
     Between the tool and its subcommand only options are allowed: ones that take a value
@@ -515,9 +520,14 @@ Not tested on Windows yet.
   (a turn you type while it still runs is `done` at once). This holds on OpenCode 2.x too: an
   open shell no longer blocks the dones of later turns. Known services (`npm run dev`,
   `tail -f`, ...) get their `done` at once.
-- **Watch modes that read stdin.** `esbuild --watch` and `tailwindcss --watch` may end when stdin is
-  closed (a hypothesis, not measured); a background shell started that way is still treated as a
-  service, so its `done` can come at once while it has in fact already ended.
+- **Watch modes that read stdin.** `esbuild --watch` ends when stdin is closed (esbuild's docs);
+  `--watch=forever` keeps it running. Both count as services here. A background shell started
+  without `=forever` and with stdin closed ends by itself, which wakes the agent as any finished
+  task does. `tailwindcss --watch` may behave the same (not measured).
+- **Comments.** A `#` right after `$(...)` or after an escaped space is read as an ordinary
+  character (not a comment), and a `#` that starts a word inside `$(...)` as a comment start; at
+  worst the rest of the line is dropped or kept wrongly, which misses a service (a later `done`)
+  rather than invents one.
 - **A turn that ends with a question is a `done`.** Its `done` carries the question (the last
   message) and no `question` follows when Claude Code's `idle_prompt` comes 60 s later, so the
   alert does not change into "response needed". The lock-screen reply action that the old 60 s

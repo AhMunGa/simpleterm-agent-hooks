@@ -1490,7 +1490,8 @@ function svcseg(seg,   i, w, lw, c, j, k, t) {
 # One hex digit, -1 if it is none.
 function hexd(c) { return index("0123456789abcdef", tolower(c)) - 1 }
 # JSON string body to the text of the command: real characters, line breaks kept. A \u00XX
-# in the ASCII range is that character (Go writes & as &), any other \u escape a space.
+# in the ASCII range (0x20-0x7F) is that character (Go writes `&` as `\u0026`), any other \u
+# escape a space.
 function unesc(s,   out, p, c, d1, d2, d3, d4, v) {
   out = ""
   while ((p = index(s, "\\")) > 0) {
@@ -1512,7 +1513,34 @@ function unesc(s,   out, p, c, d1, d2, d3, d4, v) {
 # the line break) and heredoc bodies dropped, line continuations joined, the inside of quotes
 # emptied (one word `_` is left), redirections with & removed, then every list separator is a ;
 # and a pipe stays a |.
-function clean(s,   out, i, len, ch, pv, q, hd, e, de, bq, nl, ln, t, sq, dq, k) {
+# A heredoc operator at i (<<, not <<<): its delimiter, or "" when there is none. HDE is the index
+# of the last character of the operator. The delimiter starts with a letter or _ (so $((1<<3)) and
+# (( n <<= 1 )) are not heredocs) unless it is quoted.
+function hdparse(s, i, len,   e, bq, de, sq, dq) {
+  sq = "\047"; dq = "\""
+  e = i + 2
+  if (substr(s, e, 1) == "-") e++
+  while (substr(s, e, 1) == " " || substr(s, e, 1) == "\t") e++
+  bq = substr(s, e, 1)
+  if (bq == sq || bq == dq || bq == "\\") e++; else bq = ""
+  if (!(bq == sq || bq == dq || substr(s, e, 1) ~ /[A-Za-z_]/)) return ""
+  de = e
+  while (de <= len && index(" \t\n;&|()<>" sq dq, substr(s, de, 1)) == 0) de++
+  if (de <= e) return ""
+  if (bq == sq || bq == dq) HDE = de; else HDE = de - 1
+  return substr(s, e, de - e)
+}
+# From the line break at j: the index of the line break that ends the body (the line of hd).
+function hdskip(s, j, len, hd,   nl, ln, t) {
+  while (j < len) {
+    nl = index(substr(s, j + 1), "\n")
+    if (nl == 0) { ln = substr(s, j + 1); j = len } else { ln = substr(s, j + 1, nl - 1); j += nl }
+    t = ln; sub(/^[ \t]+/, "", t)
+    if (t == hd) break
+  }
+  return j
+}
+function clean(s,   out, i, len, ch, pv, q, hd, d, j, sq, dq) {
   sq = "\047"; dq = "\""
   out = ""; q = ""; hd = ""; len = length(s)
   for (i = 1; i <= len; i++) {
@@ -1525,15 +1553,7 @@ function clean(s,   out, i, len, ch, pv, q, hd, e, de, bq, nl, ln, t, sq, dq, k)
       }
       if (ch == "\n") {
         out = out "\n"
-        if (hd != "") {
-          while (i < len) {
-            nl = index(substr(s, i + 1), "\n")
-            if (nl == 0) { ln = substr(s, i + 1); i = len } else { ln = substr(s, i + 1, nl - 1); i += nl }
-            t = ln; sub(/^[ \t]+/, "", t)
-            if (t == hd) break
-          }
-          hd = ""
-        }
+        if (hd != "") { i = hdskip(s, i, len, hd); hd = "" }
         continue
       }
       if (ch == "\\") {
@@ -1545,25 +1565,24 @@ function clean(s,   out, i, len, ch, pv, q, hd, e, de, bq, nl, ln, t, sq, dq, k)
       if (ch == "$" && substr(s, i + 1, 1) == sq) { q = "a"; out = out "_"; i++; continue }
       if (ch == "<" && substr(s, i + 1, 1) == "<") {
         if (substr(s, i + 2, 1) == "<") { out = out "<<<"; i += 2; continue }
-        e = i + 2
-        if (substr(s, e, 1) == "-") e++
-        while (substr(s, e, 1) == " " || substr(s, e, 1) == "\t") e++
-        bq = substr(s, e, 1)
-        if (bq == sq || bq == dq || bq == "\\") e++; else bq = ""
-        de = e
-        while (de <= len && index(" \t\n;&|()<>" sq dq, substr(s, de, 1)) == 0) de++
-        if (de > e) {
-          hd = substr(s, e, de - e)
-          if (bq == sq || bq == dq) de++
-          i = de - 1
-          out = out " "
-          continue
-        }
+        d = hdparse(s, i, len)
+        if (d != "") { hd = d; i = HDE; out = out " "; continue }
       }
       out = out ch
     } else if (q == sq) { if (ch == sq) q = "" }
     else if (q == "a") { if (ch == "\\") i++; else if (ch == sq) q = "" }
-    else { if (ch == "\\") i++; else if (ch == dq) q = "" }
+    else {
+      if (ch == "\\") i++
+      else if (ch == dq) q = ""
+      else if (ch == "<" && substr(s, i + 1, 1) == "<" && substr(s, i + 2, 1) != "<") {
+        # a heredoc inside a $(...) in double quotes (the line break follows the delimiter): its body
+        # is not part of the command either
+        d = hdparse(s, i, len)
+        j = HDE + 1
+        while (substr(s, j, 1) == " " || substr(s, j, 1) == "\t") j++
+        if (d != "" && substr(s, j, 1) == "\n") i = hdskip(s, j, len, d)
+      }
+    }
   }
   gsub(/\|&/, "|", out)
   gsub(/[0-9]*[<>]&[0-9-]*/, " ", out)
@@ -1574,7 +1593,8 @@ function clean(s,   out, i, len, ch, pv, q, hd, e, de, bq, nl, ln, t, sq, dq, k)
   gsub(/\n/, ";", out)
   return out
 }
-# A last pipeline command that ends early (head, grep -q|-l|-m N) ends the pipeline too.
+# A last pipeline command that ends early (head, grep -q|-l|-m N) can end the pipeline too: when the
+# earlier command writes again it dies of SIGPIPE (not before; measured), so this is a guess.
 function consumer(seg,   m, X, k, c) {
   gsub(/[()\t]/, " ", seg)
   m = split(seg, X, " ")
@@ -1597,7 +1617,11 @@ function consumer(seg,   m, X, k, c) {
 }
 END { exit !found }'
 
-is_service_cmd() { printf '%s\n' "$1" | awk "$SVC_AWK" 2>/dev/null; }
+# A command over 64 KiB is not looked at (the hook has seconds, not a minute): not a service.
+is_service_cmd() {
+  [ "${#1}" -le 65536 ] || return 1
+  printf '%s\n' "$1" | awk "$SVC_AWK" 2>/dev/null
+}
 
 # Does the last message of a turn ask the user something? exit 0 if so (one
 # JSON-escaped line on stdin). Only the end of the message counts: its last

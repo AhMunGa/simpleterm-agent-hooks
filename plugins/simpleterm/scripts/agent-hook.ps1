@@ -1721,7 +1721,8 @@ function Test-ServiceSegment([string]$seg) {
 }
 
 # The JSON string body as the text of the command: real characters, line breaks kept. A
-# \u00XX in the ASCII range is that character (Go writes & as &), any other \u escape
+# \u00XX in the ASCII range (0x20-0x7F) is that character (Go writes `&` as `\u0026`), any
+# other \u escape
 # a space.
 function Get-SvcUnescape([string]$raw) {
     $sb = New-Object System.Text.StringBuilder
@@ -1749,6 +1750,36 @@ function Get-SvcUnescape([string]$raw) {
     return $sb.ToString()
 }
 
+# A heredoc operator at i (<<, not <<<): its delimiter, or '' when there is none. $SvcHde is the
+# index of the last character of the operator. The delimiter starts with a letter or _ (so
+# $((1<<3)) and (( n <<= 1 )) are not heredocs) unless it is quoted.
+$SvcHde = 0
+function Get-SvcHdParse([string]$s, [int]$i) {
+    $len = $s.Length
+    $e = $i + 2
+    if ($e -lt $len -and $s[$e] -eq '-') { $e++ }
+    while ($e -lt $len -and ($s[$e] -eq ' ' -or $s[$e] -eq "`t")) { $e++ }
+    $bq = ''
+    if ($e -lt $len -and ($s[$e] -eq "'" -or $s[$e] -eq '"' -or $s[$e] -eq '\')) { $bq = [string]$s[$e]; $e++ }
+    if (-not ($bq -eq "'" -or $bq -eq '"' -or ($e -lt $len -and ([string]$s[$e]) -cmatch '^[A-Za-z_]$'))) { return '' }
+    $de = $e
+    while ($de -lt $len -and " `t`n;&|()<>'`"".IndexOf($s[$de]) -lt 0) { $de++ }
+    if ($de -le $e) { return '' }
+    if ($bq -eq "'" -or $bq -eq '"') { $Script:SvcHde = $de } else { $Script:SvcHde = $de - 1 }
+    return $s.Substring($e, $de - $e)
+}
+
+# From the line break at j: the index of the line break that ends the body (the line of hd).
+function Get-SvcHdSkip([string]$s, [int]$j, [string]$hd) {
+    $len = $s.Length
+    while (($j + 1) -lt $len) {
+        $nl = $s.IndexOf([char]10, $j + 1)
+        if ($nl -lt 0) { $ln = $s.Substring($j + 1); $j = $len } else { $ln = $s.Substring($j + 1, $nl - $j - 1); $j = $nl }
+        if ($ln.TrimStart(' ', "`t") -ceq $hd) { break }
+    }
+    return $j
+}
+
 # The text of the command in one pass: comments (a # that starts a word, outside quotes, up
 # to the line break) and heredoc bodies dropped, line continuations joined, the inside of
 # quotes emptied (one word _ is left), redirections with & removed, then every list
@@ -1769,14 +1800,7 @@ function Get-SvcClean([string]$s) {
             }
             if ($ch -eq "`n") {
                 [void]$out.Append("`n")
-                if ($hd -ne '') {
-                    while (($i + 1) -lt $len) {
-                        $nl = $s.IndexOf("`n", $i + 1)
-                        if ($nl -lt 0) { $ln = $s.Substring($i + 1); $i = $len } else { $ln = $s.Substring($i + 1, $nl - $i - 1); $i = $nl }
-                        if ($ln.TrimStart(' ', "`t") -ceq $hd) { break }
-                    }
-                    $hd = ''
-                }
+                if ($hd -ne '') { $i = Get-SvcHdSkip $s $i $hd; $hd = '' }
                 continue
             }
             if ($ch -eq '\') {
@@ -1788,20 +1812,8 @@ function Get-SvcClean([string]$s) {
             if ($ch -eq '$' -and ($i + 1) -lt $len -and $s[$i + 1] -eq "'") { $q = 'a'; [void]$out.Append('_'); $i++; continue }
             if ($ch -eq '<' -and ($i + 1) -lt $len -and $s[$i + 1] -eq '<') {
                 if (($i + 2) -lt $len -and $s[$i + 2] -eq '<') { [void]$out.Append('<<<'); $i += 2; continue }
-                $e = $i + 2
-                if ($e -lt $len -and $s[$e] -eq '-') { $e++ }
-                while ($e -lt $len -and ($s[$e] -eq ' ' -or $s[$e] -eq "`t")) { $e++ }
-                $bq = ''
-                if ($e -lt $len -and ($s[$e] -eq "'" -or $s[$e] -eq '"' -or $s[$e] -eq '\')) { $bq = [string]$s[$e]; $e++ }
-                $de = $e
-                while ($de -lt $len -and " `t`n;&|()<>'`"".IndexOf($s[$de]) -lt 0) { $de++ }
-                if ($de -gt $e) {
-                    $hd = $s.Substring($e, $de - $e)
-                    if ($bq -eq "'" -or $bq -eq '"') { $de++ }
-                    $i = $de - 1
-                    [void]$out.Append(' ')
-                    continue
-                }
+                $d = Get-SvcHdParse $s $i
+                if ($d -ne '') { $hd = $d; $i = $Script:SvcHde; [void]$out.Append(' '); continue }
             }
             [void]$out.Append($ch)
         }
@@ -1813,6 +1825,14 @@ function Get-SvcClean([string]$s) {
         else {
             if ($ch -eq '\') { $i++ }
             elseif ($ch -eq '"') { $q = '' }
+            elseif ($ch -eq '<' -and ($i + 1) -lt $len -and $s[$i + 1] -eq '<' -and -not (($i + 2) -lt $len -and $s[$i + 2] -eq '<')) {
+                # a heredoc inside a $(...) in double quotes (the line break follows the delimiter): its body
+                # is not part of the command either
+                $d = Get-SvcHdParse $s $i
+                $j = $Script:SvcHde + 1
+                while ($j -lt $len -and ($s[$j] -eq ' ' -or $s[$j] -eq "`t")) { $j++ }
+                if ($d -ne '' -and $j -lt $len -and $s[$j] -eq "`n") { $i = Get-SvcHdSkip $s $j $d }
+            }
         }
     }
     $t = $out.ToString()
@@ -1822,7 +1842,8 @@ function Get-SvcClean([string]$s) {
     return $t.Replace('||', ';').Replace('&&', ';').Replace('&', ';').Replace("`n", ';')
 }
 
-# A last pipeline command that ends early (head, grep -q|-l|-m N) ends the pipeline too.
+# A last pipeline command that ends early (head, grep -q|-l|-m N) can end the pipeline too: when the
+# earlier command writes again it dies of SIGPIPE (not before; measured), so this is a guess.
 function Test-SvcConsumer([string]$seg) {
     $x = @([regex]::Replace($seg, '[()\t]', ' ') -split ' +' | Where-Object { $_ -ne '' })
     $k = 0
@@ -1839,6 +1860,8 @@ function Test-SvcConsumer([string]$seg) {
 }
 
 function Test-ServiceCmd([string]$cmd) {
+    # A command over 64 KiB is not looked at (the hook has seconds, not a minute): not a service.
+    if ($cmd.Length -gt 65536) { return $false }
     $last = ''
     foreach ($el in ((Get-SvcClean (Get-SvcUnescape $cmd)) -split ';')) {
         $t = $el -replace '[ \t]', ''
