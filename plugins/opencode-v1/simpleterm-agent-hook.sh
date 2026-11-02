@@ -58,12 +58,15 @@ log() {
   LOGGED=1
 }
 
+# $1 tells a background subshell's copy from the hook's own: they share $$,
+# and two trims writing one copy can leave an empty log.
 trim_log() {
   [ "$LOGGED" = 1 ] || return 0
   n=$(awk 'END { print NR }' "$LOG" 2>/dev/null) || return 0
   [ "${n:-0}" -gt 200 ] 2>/dev/null || return 0
-  tail -n 200 "$LOG" >"$LOG.$$" 2>/dev/null && mv -f "$LOG.$$" "$LOG" 2>/dev/null
-  rm -f "$LOG.$$" 2>/dev/null
+  tl="$LOG.$$${1:+.$1}"
+  tail -n 200 "$LOG" >"$tl" 2>/dev/null && mv -f "$tl" "$LOG" 2>/dev/null
+  rm -f "$tl" 2>/dev/null
 }
 
 finish() {
@@ -532,7 +535,7 @@ send_bg() { # ev [rid] [all|tunnel|relay] [file text]
           [ -n "$sb_file" ] && printf '%s\n' "$sb_text" >"$sb_file" 2>/dev/null
       done
     done
-    trim_log
+    trim_log "s$sb_rid"
   ) </dev/null >/dev/null 2>&1 &
 }
 
@@ -2207,7 +2210,7 @@ rq_finish() { # out [i] [act]
       rq_result "$i" req "$fo" "$fr" "$fa"
     done
     rm -f "$RUN_DIR"/rq."$$".* "$RUN_DIR"/ing."$$".* "$RUN_DIR"/dec."$$".* 2>/dev/null
-    trim_log
+    trim_log f
   ) </dev/null >/dev/null 2>&1 &
 }
 
