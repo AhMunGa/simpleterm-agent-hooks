@@ -286,14 +286,15 @@ function Get-Facts([string]$s, [string]$rawp) {
             $v = $m.Groups[2].Value
             $v = $v.Substring(1, $v.Length - 2)
             if ($d -gt 0 -and $jt[$d - 1] -eq 1 -and $je[$d - 1]) { $jk[$d - 1] = $v }
-            elseif ($d -gt 0 -and -not $rawp -and $count -lt 20000) {
+            elseif ($d -gt 0 -and -not $rawp -and $count -lt 20000 -and -not $jk[0].StartsWith('@', [StringComparison]::Ordinal)) {
                 $count++
                 $out.Add(($jk -join '.') + $Tab + 's' + $Tab + $CtrlRe.Replace($v, ' '))
             }
         } elseif ($m.Groups[3].Success) {
             break
         } elseif ($m.Groups[4].Success) {
-            if ($d -gt 0 -and -not $rawp -and $count -lt 20000) {
+            # A top-level key that starts with @ would read as one of the hook's own parameters: left out (sh: femit).
+            if ($d -gt 0 -and -not $rawp -and $count -lt 20000 -and -not $jk[0].StartsWith('@', [StringComparison]::Ordinal)) {
                 $count++
                 $out.Add(($jk -join '.') + $Tab + 'r' + $Tab + $m.Groups[4].Value)
             }

@@ -673,6 +673,9 @@ function fpath(   d, p) {
   return p
 }
 function femit(p, t, v) {
+  # A top-level key of the input that starts with @ would read as one of the
+  # parameters the hook adds (@.rkind and the like): left out.
+  if (substr(p, 1, 1) == "@") return
   if (FN_OUT >= 20000) return
   FN_OUT++
   if (t == "s") gsub(CTRLRE, " ", v)

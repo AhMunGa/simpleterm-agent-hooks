@@ -2852,6 +2852,23 @@ def t_v2_decisions(s):
         s.check("decision dropped (%s): the link's wait ends, not the cap" % name, el < 30, "%.2fs" % el)
 
 
+def t_v2_param_keys(s):
+    """The hook adds its own parameters to the input's facts as @.<name> (the request kind, the
+    window, ...): a top-level input key that starts with @ must not stand in for one of them."""
+    fixed = {"SIMPLETERM_HOOK_TEST": "1", "SIMPLETERM_HOOK_TEST_NONCE": V_NONCE, "SIMPLETERM_HOOK_TEST_RID": V_RID,
+             "SIMPLETERM_HOOK_TEST_TS": "1793232000", "SIMPLETERM_HOOK_TEST_TMS": "1793232000123"}
+    plains = []
+    for extra_keys in ({}, {"@": {"rkind": "claude_notif", "win": "web", "pv": "9.9.9"}, "@x": "y"}):
+        s.setup([(LINK_A, {"fmt": 2, "push": "disabled"})], conf={"claude_wait": 5})
+        inp = json.loads(v2_perm(session="sess-at"))
+        inp.update(extra_keys)
+        s.run("claude", json.dumps(inp), fixed)
+        recs = s.records("/v1/ingest")
+        plains.append(recs[0].get("plain") if recs else None)
+    s.check("param keys: an input key @ changes nothing in the request", plains[0] and plains[0] == plains[1],
+            "%s | %s" % (str(plains[0])[:300], str(plains[1])[:300]))
+
+
 def t_v2_n10(s):
     """Section 5.5 N10: a request the user did not see. OpenCode's reject also settles the session's other
     open requests: applied only if every one open now was seen; a v1 deny never while others are open;
@@ -3598,7 +3615,7 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js,
-         t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_not_sent,
+         t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_not_sent,
          t_v2_state, t_v2_sessions, t_v2_opencode_js, t_copilot_hooks, t_copilot,
          t_v2_versions, t_v2_claude_question_once]
 
