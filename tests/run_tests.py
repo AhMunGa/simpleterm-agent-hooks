@@ -585,7 +585,8 @@ def t_background_work(s):
             len(rec) == 1 and rec[0]["plain_json"].get("msg") == "Tests pass.", str(ingests(s))[:300])
     s.ctl("/_ctl/reset", {})
     s.run("claude", ev("Notification", notification_type="idle_prompt", message="Claude is waiting for your input"), st)
-    s.check("background work: idle_prompt after a done turn asks again", wait_for(lambda: ingests(s, "question"), 20))
+    time.sleep(1.5)
+    s.check("background work: idle_prompt after a done turn repeats it: no question", not ingests(s), str(ingests(s))[:200])
 
     many = [dict(shell, id="b%08d" % i) for i in range(12)]
     _, out6, _, _ = s.run("claude", ev("Stop", stop_hook_active=False, last_assistant_message="x",
@@ -781,6 +782,7 @@ def t_question_while_background(s):
     s.check("question while waiting: OSC 7501 blocked/question record, no working record",
             seqs(out) == "\x1b]9;simpleterm:state=waiting " + q + "\x07\x1b]7501;state=blocked:id=simpleterm-bg:kind=question:msg="
             + b64(q) + "\x07", repr(out))
+    wait_for(lambda: ingests(s, "question"), 20)  # its send must land before the reset below
     _, out3, _, _ = s.run("claude", cc_event("qb2", "UserPromptSubmit", prompt="yes, fix them"), st)
     s.check("question while waiting: the next turn takes the record back",
             seqs(out3) == "\x1b]9;simpleterm:state=running\x07\x1b]7501;state=clear:id=simpleterm-bg\x07", repr(out3))
@@ -1182,6 +1184,22 @@ def t_background_events_and_badges(s):
     d = ingests(s, "done")
     s.check("blocked Stop with an old task left: one done, for the real end",
             len(d) == 1 and d[0]["plain_json"].get("msg", "").startswith("Second."), str([r["plain_json"].get("msg") for r in d]))
+
+    # idle_prompt (60 s after a turn) repeats a done that was sent: no question and no badge change. Without a done
+    # (the turn ended by an interrupt) it stays the safety net; a new prompt takes the mark back.
+    idle = dict(notification_type="idle_prompt", message="Claude is waiting for your input")
+    s.setup([(LINK_A, {"push": "disabled"})])
+    stop("bev5", [], last="Finished.")
+    wait_for(lambda: ingests(s, "done"), 20)
+    s.ctl("/_ctl/reset", {})
+    out = run("bev5", "Notification", **idle)
+    time.sleep(1.5)
+    s.check("idle_prompt after a done: no question, no badge change", out == "" and not ingests(s), repr(out) + str(ingests(s))[:200])
+    run("bev5", "UserPromptSubmit", prompt="next")
+    run("bev5", "PostToolUseFailure", tool_name="Bash", tool_input={"command": "ls"}, is_interrupt=True, error="interrupted")
+    run("bev5", "Notification", **idle)
+    rec = wait_for(lambda: ingests(s, "question"), 20)
+    s.check("idle_prompt after an interrupt (no done): question as before", len(rec) == 1, str(ingests(s))[:200])
 
     # nit 1: the turn paused on a question; a subagent's tool call keeps the badge `waiting`.
     s.setup([(LINK_A, {"push": "disabled"})])
@@ -2307,6 +2325,13 @@ def t_grok(s):
     rec = wait_for(lambda: ingests(s, "done"), 20)
     s.check("grok background: done after the turn it reported back in", rec and rec[0]["plain_json"].get("msg")
             == "The background job finished.", str(ingests(s))[:200])
+    # idle_prompt after that done repeats it: no question.
+    s.ctl("/_ctl/reset", {})
+    idle2, ienv2 = grok_input("Notification", notificationType="idle_prompt", message="Waiting for input",
+                              timestamp="2026-10-29T10:23:00.000Z")
+    s.run("claude", idle2, dict(ienv2, GROK_HOOK_EVENT="notification"))
+    time.sleep(1.5)
+    s.check("grok: idle_prompt after a done repeats it (no question)", not ingests(s, "question"), str(ingests(s))[:200])
 
 
 def t_opencode_sh(s):

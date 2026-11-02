@@ -72,6 +72,10 @@
   main thread cancel the wait: a subagent's tool calls (hook input with `agent_id`) carry the
   session id too and no longer cancel a `done` that leaves background work running. A `done` of a `Stop` with `stop_hook_active: true` carries
   `"stop_hook_active":true`.
+- Claude Code and Grok Build: `idle_prompt` (60 s after a turn) is a repeat of a `done` that was
+  sent or is pending for that turn, so it sends no `question` and does not touch the badge; the
+  mark is taken back by the next prompt, an interrupt or `StopFailure`, so a turn that ended
+  without a `done` (interrupt, failure, no Stop hook) still gets the `question` as the safety net.
 - Claude Code: one `AskUserQuestion` sends one `question` (`PreToolUse` and `PermissionRequest`
   both reported it); `agent_needs_input` (another background session's) still alerts but no
   longer changes this tab's badge; `PostToolUseFailure` with `is_interrupt` (Esc) sets the badge

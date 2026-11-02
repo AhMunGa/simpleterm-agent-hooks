@@ -1640,7 +1640,7 @@ esac
 note() { # turn | tool fingerprint
   if [ "$1" = turn ]; then
     printf '%s turn -\n' "$(date +%s)" >"$RUN_DIR/$SID.res" 2>/dev/null
-    rm -f "$RUN_DIR/$SID.goal" 2>/dev/null
+    rm -f "$RUN_DIR/$SID.goal" "$RUN_DIR/$SID.done" 2>/dev/null
     if [ -f "$RUN_DIR/$SID.bg" ]; then
       [ "$(sed -n 2p "$RUN_DIR/$SID.bg" 2>/dev/null)" = 7501 ] &&
         BG_SEQ="\\u001b]7501;state=clear:id=$BG_ID\\u0007"
@@ -1939,6 +1939,9 @@ stop_done() {
   if [ -n "${1:-}" ]; then MSG=$(done_msg "$1"); else MSG=$(json_trim "$LAST" 200 800); fi
   [ "$STOPACT" = true ] && XFLAGS=',"stop_hook_active":true'
   done_later
+  # The turn's done is sent (or pending): Claude Code's idle_prompt, 60 s
+  # later, repeats it (the next turn note takes the mark back).
+  : >"$RUN_DIR/$SID.done" 2>/dev/null
   usage_report
   print_state done
   turn_end
@@ -2020,6 +2023,9 @@ case $AGENT:$EVENT in
         # Claude Code sends it 60 s after a turn while only background shells
         # or monitors run: the work is not waiting for the user.
         bg_paused && finish
+        # Already told by this turn's done: the prompt repeats it. Without a
+        # done (interrupt, StopFailure, no Stop hook) it stays the safety net.
+        [ -f "$RUN_DIR/$SID.done" ] && finish
         MSG=$(json_trim "$LAST" 200 800)
         send_bg question
         ;;
@@ -2174,7 +2180,7 @@ case $AGENT:$EVENT in
     # copy of one event.
     case $NTYPE in
       permission_prompt) ;;
-      idle_prompt) bg_paused && finish ;;
+      idle_prompt) bg_paused && finish; [ -f "$RUN_DIR/$SID.done" ] && finish ;;
       *) finish ;;
     esac
     once "$(printf '%s|%s|%s|%s|%s' "$EVENT" "$SID" "$NTYPE" "$GKEY" "$LAST" | cksum | awk '{ print $1 }')" || finish

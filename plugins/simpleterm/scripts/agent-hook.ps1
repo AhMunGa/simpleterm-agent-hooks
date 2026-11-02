@@ -1144,6 +1144,7 @@ function Add-Note([string]$kind, [string]$fp) {
         if ($kind -eq 'turn') {
             [IO.File]::WriteAllText($path, ([string](Now-Epoch) + " turn -`n"), $Utf8)
             [IO.File]::Delete((Join-Path $RunDir ($Sid + '.goal')))
+            [IO.File]::Delete((Join-Path $RunDir ($Sid + '.done')))
             $bg = Join-Path $RunDir ($Sid + '.bg')
             if ([IO.File]::Exists($bg)) {
                 $lines = [IO.File]::ReadAllLines($bg, $Utf8)
@@ -1166,6 +1167,7 @@ function Add-Note([string]$kind, [string]$fp) {
 # OSC 7501 `working` record (as agent-hook.sh explains: Claude Code 2.1.295+
 # reports `done` for its own turn through OSC 7501).
 $BgId = 'simpleterm-bg'
+function Test-TurnDone { return [IO.File]::Exists((Join-Path $RunDir ($Sid + '.done'))) }
 function Test-BgPaused { return [IO.File]::Exists((Join-Path $RunDir ($Sid + '.bg'))) }
 
 function Test-Claude7501 {
@@ -1576,6 +1578,9 @@ function Invoke-StopDone([string]$what) {
     if ($what) { $Script:Msg = Get-DoneMsg $what } else { $Script:Msg = Limit-JsonText $Last 200 800 }
     if ((Get-Field $f 'stop_hook_active') -eq 'true') { $Script:XFlag = '1' }
     Send-DoneLater
+    # The turn's done is sent (or pending): Claude Code's idle_prompt, 60 s
+    # later, repeats it (the next turn note takes the mark back).
+    try { [IO.File]::WriteAllText((Join-Path $RunDir ($Sid + '.done')), "`n", $Utf8) } catch { }
     Invoke-UsageReport
     Write-State 'done' ''
     Update-Cli
@@ -1828,6 +1833,9 @@ try {
                 # Claude Code sends it 60 s after a turn while only background
                 # shells or monitors run: the work is not waiting for the user.
                 if (Test-BgPaused) { break }
+                # Already told by this turn's done: the prompt repeats it. Without
+                # a done (interrupt, StopFailure, no Stop hook) it stays the safety net.
+                if (Test-TurnDone) { break }
                 $Script:Msg = Limit-JsonText (Get-Field $f 'message') 200 800
                 Send-Background 'question'
             } elseif ($nt -eq 'elicitation_dialog' -or $nt -eq 'elicitation_url_dialog') {
@@ -1925,7 +1933,7 @@ try {
             $nt = Get-Field $f 'notificationType'
             if (-not $nt) { $nt = Get-Field $f 'notification_type' }
             if (@('permission_prompt', 'idle_prompt') -notcontains $nt) { break }
-            if ($nt -eq 'idle_prompt' -and (Test-BgPaused)) { break }
+            if ($nt -eq 'idle_prompt' -and ((Test-BgPaused) -or (Test-TurnDone))) { break }
             $key = (Get-Sha256Hex ($HookEvent + '|' + $Sid + '|' + $nt + '|' + (Get-Field $f 'promptId') + '|' + (Get-Field $f 'timestamp') + '|' + $Last)).Substring(0, 16)
             if (-not (Test-Once $key)) { break }
             $Script:Msg = Limit-JsonText $Last 200 800

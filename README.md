@@ -188,7 +188,7 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | Agent event | Alert (`ev`) | Badge (Claude Code, SimpleTerm sessions only) |
 |---|---|---|
 | Claude `PermissionRequest` | `permission` (waits for your answer, up to 540 s) | waiting, then running |
-| Claude `PreToolUse` `AskUserQuestion`, `Notification` (idle, elicitation, input needed) | `question` (one per question: `PermissionRequest` repeats it) | waiting (idle keeps done; `agent_needs_input`, another session's, leaves the badge) |
+| Claude `PreToolUse` `AskUserQuestion`, `Notification` (idle, elicitation, input needed) | `question` (one per question: `PermissionRequest` repeats it; `idle_prompt` only when no `done` was sent for the turn) | waiting (idle keeps done; `agent_needs_input`, another session's, leaves the badge) |
 | Claude `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure` | none (context, see below) | running |
 | Claude `Stop` / `StopFailure` | `done` (sent 3 s later on Claude Code, see below) / `error` or `auth` | done |
 | Claude `Stop` with `background_tasks` in flight | none (and no idle question until the next turn), unless the last message asks you something (`question`), only services or tasks that ran before your prompt are left (`done`) | background (+ an OSC 7501 `working` record, see below); waiting (+ a `blocked` record) for a question |
@@ -203,7 +203,7 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | agy `PreToolUse` `run_command` (only with `agy_wait`) | `permission` | none |
 | agy `PreToolUse` `ask_question`, `ask_permission` | `question` | none |
 | agy `Stop` (fully idle) | `done`, or `error` | none |
-| Grok `Notification` `permission_prompt`, `idle_prompt` | `question` | none |
+| Grok `Notification` `permission_prompt`, `idle_prompt` | `question` (`idle_prompt` only when no `done` was sent for the turn) | none |
 | Grok `Stop` (`end_turn`) / `StopFailure` | `done` (none with `backgroundTasks` or `sessionCrons`, same rules as Claude) / `error` or `auth` | none |
 | OpenCode permission request | `permission` (waits up to 540 s) | none |
 | OpenCode turn finished / failed | `done` (none while a subagent of it runs; a background shell is judged as Claude Code's `background_tasks`) / `error` or `auth` | none |
