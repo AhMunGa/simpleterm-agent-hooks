@@ -877,31 +877,43 @@ def t_service_shells(s):
             and len(msg) <= 200, repr(msg))
     # The commands the table knows, and some it must leave alone.
     s.ctl("/_ctl/reset", {})
-    for cmd, service in (("npm run dev -- --port 3000", True), ("pnpm run watch", True), ("next dev", True),
-                         ("python3 -m http.server 8000", True), ("python manage.py runserver 0.0.0.0:8000", True),
-                         ("bin/rails server", True), ("flask --app app run", True), ("uvicorn app:app --reload", True),
-                         ("docker compose up", True), ("tail -f /var/log/app.log", True), ("tsc --watch", True),
-                         ("cd web && npm start", True), ("docker compose up -d", False), ("tail -n 20 app.log", False),
-                         ("npm test", False), ("vite build", False), ("grep -w main src/app.dart", False),
-                         ("sleep 45; echo shell-done", False),
-                         ("npm install && npm run dev", True), ("tsc -w", True),
-                         ("npm test -- --watchAll=false", False), ("npx jest --watch=false", False), ("npm test -- --no-watch", False),
-                         ("python -W ignore -m pytest", False), ("make -w all", False), ("docker exec -w /app api pytest", False),
-                         ("pip install flask && npm run build", False), ("tail -n 50 build.log | cut -f 2", False),
-                         ("kubectl get pods -w", True), ("vite &", True), ("npx vite &", True), ("npx vite | tee vite.log", True),
-                         ("npx tsc -w", True), ("npx webpack -w", True), ("npx tailwindcss -i a.css -o b.css -w", True),
-                         ("docker logs -f api", True), ("kubectl logs -f web-1", True), ("journalctl -f", True),
-                         ("vitest run", False), ("npx vitest --run", False), ("docker logs api", False),
-                         ("vitest", False), ("npx vitest", False), ("npx vitest -w", True), ("npx vitest --watch", True),
-                         ("npx vite 2>&1", True), ("npx vite > vite.log 2>&1 &", True), ("vite 2>&1 | tee vite.log", True),
-                         ("npx vite >vite.log", True), ("vite build", False), ("npm create vite@latest", False),
-                         ("pnpm --filter web dev", True), ("pnpm -F web dev", True), ("pnpm install", False), ("turbo dev", True),
-                         ("nx serve", True), ("ng serve", True), ("astro dev", True), ("nuxt dev", True), ("npx expo start", True),
-                         ("storybook dev", True), ("php artisan serve", True), ("hugo server", True),
-                         ("bundle exec jekyll serve", True), ("npx serve", True), ("npx http-server", True),
-                         ("gunicorn app:app", True), ("kubectl port-forward svc/api 8080:80", True),
-                         ("kubectl rollout status deploy/api -w", False),
-                         ('until curl -s -o /dev/null -w "%{http_code}" localhost:3000; do sleep 1; done', False)):
+    # One table (SVC_AWK): a command is a service only at the command position and when (tool, subcommand) is known.
+    for cmd, service in (
+            ('npm run dev -- --port 3000', True), ('pnpm run watch', True), ('next dev', True),
+            ('python3 -m http.server 8000', True), ('python manage.py runserver 0.0.0.0:8000', True), ('bin/rails server', True),
+            ('flask --app app run', True), ('uvicorn app:app --reload', True), ('docker compose up', True),
+            ('tail -f /var/log/app.log', True), ('tsc --watch', True), ('cd web && npm start', True),
+            ('docker compose up -d', False), ('tail -n 20 app.log', False), ('npm test', False), ('vite build', False),
+            ('grep -w main src/app.dart', False), ('sleep 45; echo shell-done', False), ('npm install && npm run dev', True),
+            ('tsc -w', True), ('npm test -- --watchAll=false', False), ('npx jest --watch=false', False),
+            ('npm test -- --no-watch', False), ('python -W ignore -m pytest', False), ('make -w all', False),
+            ('docker exec -w /app api pytest', False), ('pip install flask && npm run build', False),
+            ('tail -n 50 build.log | cut -f 2', False), ('kubectl get pods -w', True), ('vite &', True), ('npx vite &', True),
+            ('npx vite | tee vite.log', True), ('npx tsc -w', True), ('npx webpack -w', True),
+            ('npx tailwindcss -i a.css -o b.css -w', True), ('docker logs -f api', True), ('kubectl logs -f web-1', True),
+            ('journalctl -f', True), ('vitest run', False), ('npx vitest --run', False), ('docker logs api', False),
+            ('vitest', False), ('npx vitest', False), ('npx vitest -w', True), ('npx vitest --watch', True), ('npx vite 2>&1', True),
+            ('npx vite > vite.log 2>&1 &', True), ('vite 2>&1 | tee vite.log', True), ('npx vite >vite.log', True),
+            ('npm create vite@latest', False), ('pnpm --filter web dev', True), ('pnpm -F web dev', True), ('pnpm install', False),
+            ('turbo dev', True), ('nx serve', True), ('ng serve', True), ('astro dev', True), ('nuxt dev', True),
+            ('npx expo start', True), ('storybook dev', True), ('php artisan serve', True), ('hugo server', True),
+            ('bundle exec jekyll serve', True), ('npx serve', True), ('npx http-server', True), ('gunicorn app:app', True),
+            ('kubectl port-forward svc/api 8080:80', True), ('kubectl rollout status deploy/api -w', False),
+            ("until curl -s -o /dev/null -w \"%{http_code}\" localhost:3000; do sleep 1; done", False),
+            ('pnpm prisma migrate dev --name init', False), ('pnpm sst deploy --stage dev', False), ('pnpm build --mode dev', False),
+            ('nx build web -c dev', False), ('nx run-many -t build --configuration dev', False),
+            ('turbo run deploy -- --stage dev', False), ('pnpm add -D vite @vitejs/plugin-react', False),
+            ('yarn create vite my-app', False), ('npm install vite react', False), ('npm i -g http-server serve', False),
+            ('kubectl -n prod rollout status deploy/api -w', False), ("curl -w '%{http_code}' x", False), ('vitest dev', True),
+            ('vitest watch', True), ('watchexec -w src -- gcc -o a a.c', True), ('npm run dev:web', True), ('turbo run dev', True),
+            ('nx run web:serve', True), ('FOO=1 npm run dev', True), ('sudo -u x npm run dev', False),
+            ('kubectl -n prod get pods --watch', True), ('tail -F x', True), ('watch -n 1 ls', True), ('cargo watch -x run', True),
+            ('docker-compose up', True), ('docker compose -f a.yml up', True), ('yarn workspace web dev', True),
+            ('sass -w a.scss b.css', True), ('jest --watch', True), ('python -m flask run', True), ('vite --port 3000', True),
+            ('vite --version', False), ('npm --prefix web run dev', True), ('sudo npm run dev', True),
+            ('env FOO=1 npm run dev', True), ('./node_modules/.bin/vite', True), ('npx -y vite', True), ('uv run flask run', True),
+            ('pnpm dlx serve', True), ('pnpm exec vite', True),
+            ('npm run -- dev', False), ('tsc --noEmit -- -w', False)):
         s.ctl("/_ctl/reset", {})
         out = stop("sv3-%d" % abs(hash(cmd)), [shell(cmd, "Run it")])
         got = seqs(out).startswith("\x1b]9;simpleterm:state=done")
@@ -2034,6 +2046,17 @@ def notify_pty(s, args, extra=None):
     return os.waitstatus_to_exitcode(status), out
 
 
+def t_notify_no_tty(s):
+    """`simpleterm notify` with SIMPLETERM=1 and no controlling terminal still sends its event (the probe of
+    /dev/tty used a special builtin: dash ended the whole script when it could not open it)."""
+    s.setup([(LINK_A, {"push": "disabled"})])
+    p = subprocess.run([s.argv[0], str(SCRIPTS / "simpleterm-notify.sh"), "notify", "no tty title", "body"], capture_output=True,
+                       env=s.env({"SIMPLETERM": "1"}), cwd=str(s.tmp), timeout=30, start_new_session=True, stdin=subprocess.DEVNULL)
+    rec = wait_for(lambda: ingests(s, "notify"), 20)
+    s.check("notify without a terminal: exit 0 and the event is sent", p.returncode == 0 and rec and rec[0]["plain_json"].get("title") == "no tty title",
+            "%s %s %s" % (p.returncode, p.stderr[-200:], str(ingests(s))[:200]))
+
+
 def t_notify(s):
     """`simpleterm notify`: OSC 777 on a SimpleTerm terminal, `notify` to every link."""
     tun, tctl = s.spawn_mock()
@@ -2623,6 +2646,32 @@ def t_opencode_js(s):
     rec = wait_for(lambda: ingests(s, "done"), 20)
     s.check("opencode 2.x: a hung session lookup times out, the next turn event goes on", rec and rec[0]["plain_json"].get("msg") == "Hung",
             str(ingests(s))[:200])
+    # The job the lane gave up on does nothing when its lookup comes back late: no late UserPromptSubmit (it
+    # would undo the pause of a later Stop; only that hook writes <session>.turn), no late Stop.
+    run_dir = s.home / ".simpleterm" / "run"
+    s.setup([(LINK_A, {"push": "disabled"})])
+    node_plugin(s, "v2", {"directory": d, "sessions": {"ses_h": {"title": "Late"}}, "wait": 5000,
+                          "env": {"SIMPLETERM_LANE_TIMEOUT_MS": "600"}, "getDelay": {"ses_h": {"ms": 2500, "times": 1}},
+                          "steps": [ev(82, "session.execution.started", "ses_h"), ev(83, "session.execution.succeeded", "ses_h")]})
+    rec = ingests(s, "done")
+    s.check("opencode 2.x: the start the lane gave up on sends nothing when its lookup returns late",
+            len(rec) == 1 and not (run_dir / "ses_h.turn").exists(), str(rec)[:200] + str(list(run_dir.glob("ses_h*"))))
+    s.setup([(LINK_A, {"push": "disabled"})])
+    node_plugin(s, "v2", {"directory": d, "sessions": {"ses_g": {"title": "Late stop"}}, "wait": 5000,
+                          "env": {"SIMPLETERM_LANE_TIMEOUT_MS": "600"}, "getDelay": {"ses_g": {"ms": 2500, "times": 1}},
+                          "steps": [ev(84, "session.execution.succeeded", "ses_g"), ev(85, "session.execution.started", "ses_g")]})
+    s.check("opencode 2.x: the Stop the lane gave up on sends nothing when its lookup returns late",
+            not ingests(s, "done") and (run_dir / "ses_g.turn").exists(), str(ingests(s))[:200] + str(list(run_dir.glob("ses_g*"))))
+    # A permission request answered while it still waits on its session lane is dropped, not sent.
+    s.setup([(LINK_A, {"decision": "allow", "after": 1})])
+    ask_r = {"id": "evt_95", "type": "permission.asked", "location": {"directory": d},
+             "data": {"id": "per_95", "sessionID": "ses_r2", "action": "shell", "resources": ["make"]}}
+    replied_r = {"id": "evt_96", "type": "permission.replied", "data": {"sessionID": "ses_r2", "requestID": "per_95", "reply": "once"}}
+    calls = node_plugin(s, "v2", {"directory": d, "sessions": {"ses_r2": {}}, "wait": 3500,
+                                  "getDelay": {"ses_r2": {"ms": 1500, "times": 1}},
+                                  "steps": [ev(94, "session.execution.started", "ses_r2"), {"event": ask_r}, {"event": replied_r}]})
+    s.check("opencode 2.x: a request answered while it waited on the lane is not sent",
+            not ingests(s, "permission") and not replies(calls), str(ingests(s))[:200] + str(calls)[:200])
     s.setup([(LINK_A, {"decision": "allow", "after": 1})])
     ask_p = {"id": "evt_90", "type": "permission.asked", "location": {"directory": d},
              "data": {"id": "per_90", "sessionID": "ses_p", "action": "shell", "resources": ["make"]}}
@@ -2692,10 +2741,10 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_work_7501, t_question_while_background, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_done_delay, t_background_events_and_badges, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
-         t_cli_wrapper, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js]
+         t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js]
 
 # Tests of the sh hook only (scripts and behaviour the PowerShell hook does not have).
-SH_ONLY = {"t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_delivery", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_cli_wrapper",
+SH_ONLY = {"t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_delivery", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_notify_no_tty", "t_cli_wrapper",
            "t_agy", "t_agy_paths", "t_opencode_sh", "t_opencode_js"}
 
 

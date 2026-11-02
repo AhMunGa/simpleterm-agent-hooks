@@ -243,20 +243,33 @@ there):
   one extra alert. The word lists are one table (`ASK_AWK` in `agent-hook.sh`). Claude Code
   2.1.295+ gets a `blocked` (kind `question`) OSC 7501 record `simpleterm-bg` instead of the
   `working` one; the next turn takes it back. The idle question 60 s later stays suppressed.
-- **Services are not waited for.** A background shell whose command looks like a service (`npm
-  run dev`/`start`/`serve`/`preview`/`watch`, `next dev`, `vite`, `nodemon`, `python -m
-  http.server`, `manage.py runserver`, `rails s`, `flask run`, `uvicorn`, `docker compose up`
-  without `-d`, `tail -f`, `--watch`, `-w`, `watch`, `vite` (not `vite build`), `npx tsc|webpack|sass
-  -w`, `vitest -w`, `docker|kubectl logs -f`, `journalctl -f`, `kubectl port-forward`, `pnpm
-  --filter web dev`, `turbo dev`, `nx serve`, `ng serve`, `astro|nuxt|storybook dev`, `expo
-  start`, `php artisan serve`, `hugo server`, `jekyll serve`, `npx serve`, `http-server`,
-  `gunicorn`) never ends and never wakes the agent. A plain `vitest` is not one: it watches only on
-  a terminal and not under an agent. Each command of a pipeline or `&&` chain is read on its own;
-  `--watch=false`, `python -W`, `make -w`, `kubectl rollout status -w` and `curl -w` are not
-  services. When only
-  such shells (and the agent's housekeeping) are left, `done` goes at once, ending with `(still
-  running in the background: <task>)`, instead of after `bg_done_after`. The patterns are one
-  table (`SVC_AWK`); other shells keep the `bg_done_after` wait.
+- **Services are not waited for.** A background shell is a service when its command, at the
+  command position of a `;`/`&&`/`||`/`|` part (after `VAR=val`, `npx`, `pnpm exec|dlx`, `yarn dlx`,
+  `bunx`, `uv|poetry run`, `bundle exec`, `env`, `nohup`, `exec`, `sudo`), is one of a known list; a
+  command that is not in it is not a service, since a wrong "service" ends the turn early and sends
+  a second `done` later, while a missed one only delays the `done` to `bg_done_after`. The list
+  (`SVC_AWK`; between the tool and the subcommand only options, `run` and the values of
+  `--filter/-F/-C/--cwd/--prefix/--dir/-p/--project/--workspace` are allowed):
+  - package managers `npm|pnpm|yarn|bun [run]` `dev|start|serve|preview|watch` (also `dev:web`
+    style scripts, `pnpm --filter web dev`, `yarn workspace web dev`); `turbo [run] dev`; `nx
+    serve|dev|start` and `nx run proj:serve`; `next dev|start`; `ng serve`; `astro dev`; `nuxt
+    dev`; `expo start`; `storybook dev`; `vite` (not `vite build`); `vitest -w|--watch|dev|watch`
+    (a plain `vitest` is not one: it watches only on a terminal and not under an agent);
+  - `nodemon`, `uvicorn`, `gunicorn`, `python -m http.server`, `manage.py runserver`, `rails
+    s|server`, `flask run`, `php artisan serve`, `hugo server`, `jekyll serve`, `serve`,
+    `http-server`;
+  - `docker compose up` / `docker-compose up` without `-d`, `docker logs -f`, `kubectl logs -f`,
+    `kubectl port-forward`, `kubectl get ... -w|--watch`, `tail -f|-F|--follow`, `journalctl -f`,
+    `watch`;
+  - watchers by their own flag: `tsc|webpack|sass|esbuild|rollup|swc|tailwindcss|jest|mocha|tsx|
+    parcel` with `-w|--watch`, `cargo watch`, `tsx watch`, `watchexec`.
+
+  `-w` counts only for those watchers, never elsewhere (`make -w`, `curl -w`, `docker exec -w`,
+  `kubectl rollout status -w`, `python -W` are not services), and `--watch=false`, `pnpm prisma
+  migrate dev`, `pnpm sst deploy --stage dev`, `nx build web -c dev`, `npm install vite`, `npm i -g
+  http-server` are not either. When only such shells (and the agent's housekeeping) are left,
+  `done` goes at once, ending with `(still running in the background: <task>)`, instead of after
+  `bg_done_after`; other shells keep the `bg_done_after` wait.
 - **Your own prompt is answered.** At every `Stop` the hook records the ids of the tasks running.
   When you typed the prompt that started the turn and every task still running was already running
   before it, the turn is a report: `done`, with the same `(still running in the background: ...)`
@@ -478,14 +491,16 @@ Not tested on Windows yet.
 - **Background work that never ends.** A dev server the table of services does not know, or
   another endless job left in the background, never wakes the agent: `done` comes only after
   `bg_done_after` (default 10 minutes), and the badge stays `background` until the next turn
-  (a turn you type while it still runs is `done` at once).
+  (a turn you type while it still runs is `done` at once). This holds on OpenCode 2.x too: an
+  open shell no longer blocks the dones of later turns. Known services (`npm run dev`,
+  `tail -f`, ...) get their `done` at once.
 - **A turn that ends with a question is a `done`.** Its `done` carries the question (the last
   message) and no `question` follows when Claude Code's `idle_prompt` comes 60 s later, so the
   alert does not change into "response needed". The lock-screen reply action that the old 60 s
   `question` push offered is gone for these turns: type the follow-up in the app or the terminal.
-  (A question that leaves background work running is still a `question`, see above.) This holds on OpenCode 2.x too: an
-  open shell no longer blocks the dones of later turns. Commands that look like services
-  (`npm run dev`, `tail -f`, ...) get their `done` at once.
+  The same holds at a `Stop` that lists only services or tasks that ran before your prompt (the
+  `done` carries the question). Only where the agent still waits for work it started (not a
+  service, not older than your prompt) the question is sent as a `question` (see above).
 - **Questions are read from text.** Whether the last message asks something is a guess from its
   last two sentences (see above); a question phrased in another way is read wrongly now and then. A report that
   ends with a sign-off such as `Let me know if you need anything else` or `If you want me to ...`, a

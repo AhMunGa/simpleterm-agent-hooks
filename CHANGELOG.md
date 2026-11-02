@@ -47,18 +47,22 @@
     `참고해 주세요`, `양해 바랍니다` and `if you want me to ...` are not asks), the user gets a `question` alert with the message and the badge says `waiting`; Claude Code
     2.1.295+ gets a `blocked` (kind `question`) OSC 7501 record `simpleterm-bg` instead of the
     `working` one. The word lists are one table in the script.
-  - **Services are not waited for**: a background shell whose command looks like a service (`npm
-    run dev`, `next dev`, `vite`, `nodemon`, `python -m http.server`, `manage.py runserver`,
-    `rails s`, `flask run`, `uvicorn`, `docker compose up` without `-d`, `tail -f`, `--watch`,
-    `-w`, `watch`, `vite`, `npx tsc|webpack -w`, `docker|kubectl logs -f`, `journalctl -f`,
-    `kubectl port-forward`, `pnpm --filter web dev`, `turbo dev`, `nx serve`, `ng serve`, `astro dev`,
-    `expo start`, `php artisan serve`, `hugo server`, `jekyll serve`, `npx serve`, `gunicorn`; a
-    plain `vitest` is not one, it watches only on a terminal and not under an agent) sends `done` at once with `(still running in the background: ...)` instead of
-    after `bg_done_after`; the note is kept whole when the message is long. A command is split at
-    `;`, `&&`, `||`, `|` and each part is read on its own, so `pip install flask && npm run build`
-    and `tail -n 50 x.log | cut -f 2` are not services; `--watch=false`, `--watchAll=false`,
-    `--no-watch`, `python -W`, `make -w`, `docker exec -w`, `kubectl rollout status -w` and
-    `curl -w` are not either.
+  - **Services are not waited for**: a background shell whose command is a known service sends
+    `done` at once with `(still running in the background: ...)` instead of after
+    `bg_done_after`; the note is kept whole when the message is long. Only the command position of
+    each `;`/`&&`/`||`/`|` part counts (after `VAR=val`, `npx`, `pnpm exec|dlx`, `yarn dlx`,
+    `bunx`, `uv|poetry run`, `bundle exec`, `env`, `nohup`, `exec`, `sudo`), with an explicit
+    (tool, subcommand) table: `npm|pnpm|yarn|bun [run] dev|start|serve|preview|watch` (also
+    `dev:web`, `--filter web`), `turbo dev`, `nx serve`, `next dev`, `ng serve`, `astro|nuxt|
+    storybook dev`, `expo start`, `vite` (not `vite build`), `vitest -w|dev|watch` (a plain
+    `vitest` runs once under an agent), `nodemon`, `uvicorn`, `gunicorn`, `python -m http.server`,
+    `manage.py runserver`, `rails s`, `flask run`, `php artisan serve`, `hugo server`, `jekyll
+    serve`, `serve`, `http-server`, `docker compose up` without `-d`, `docker|kubectl logs -f`,
+    `kubectl port-forward`, `kubectl get -w`, `tail -f`, `journalctl -f`, `watch`, and watchers by
+    their own `-w`/`--watch` (`tsc`, `webpack`, `sass`, `esbuild`, `rollup`, `swc`, `tailwindcss`,
+    `cargo watch`, `watchexec`, ...). Everything else is not a service: a wrong "service" ends the
+    turn early and sends a second `done`, a missed one only delays it. `-w` is never global
+    (`make -w`, `curl -w`, `docker exec -w`, `kubectl rollout status -w` are not services).
   - **A prompt you typed is answered**: every `Stop` records the ids of the running tasks; when a
     person typed the prompt of the turn and only tasks that ran before it are left, the turn is a
     report (`done` with the note). Turns started by a task's report or a schedule still wait. The
@@ -80,7 +84,9 @@
   60 s later adds no `question` (the lock-screen reply of that push is gone for these turns).
 - The hook no longer redirects with the special builtin `:` (a failed redirection ended the shell:
   exit 2 from a Stop hook means "block and continue"); the OpenCode plugin's per-session event
-  lane has a 15 s timeout, and a permission request waits for the turn events before it.
+  lane has a 15 s timeout (a job it gave up on starts no hook when its lookup returns late, and a
+  running hook is stopped), and a permission request waits for the turn events before it (one
+  answered meanwhile is dropped).
 - Claude Code and Grok Build: `idle_prompt` (60 s after a turn) is a repeat of a `done` that was
   sent or is pending for that turn, so it sends no `question` and does not touch the badge; the
   mark is taken back by the next prompt, an interrupt or `StopFailure`, so a turn that ended
