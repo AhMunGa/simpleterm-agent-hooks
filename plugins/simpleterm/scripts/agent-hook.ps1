@@ -25,7 +25,7 @@ if ($ScriptArgs.Count -gt 1) { $Mode = [string]$ScriptArgs[1] }
 $MaxInput = 262144
 $MaxLinks = 16
 # The plugin release of this script (the manifests carry the same).
-$HookVersion = '0.3.0'
+$HookVersion = '0.3.1'
 # Bumped when the ~/.simpleterm/bin/simpleterm.cmd wrapper must be rewritten.
 $CliRev = 2
 $Inv = [Globalization.CultureInfo]::InvariantCulture
@@ -439,6 +439,8 @@ function New-Plaintext($link, [string]$rid, [string]$ev, [string]$nonce) {
     if ($ev -eq 'usage') { $p += $Script:UsageJson }
     elseif ($ev -eq 'notify') { $p += ',"title":"' + $Script:Title + '","msg":"' + $Script:Msg + '"' }
     else { $p += ',"msg":"' + $Script:Msg + '"' }
+    # A done of a Stop that another Stop hook had already kept going.
+    if ($ev -eq 'done' -and $Script:XFlag -eq '1') { $p += ',"stop_hook_active":true' }
     if ($nonce) { $p += ',"nonce":"' + $nonce + '"' }
     return $p + ',"ts":' + $Ts + '}'
 }
@@ -483,8 +485,8 @@ function Send-Background([string]$ev, [string]$eventRid, [string]$scope, [string
     $usage = [Convert]::ToBase64String($Utf8.GetBytes([string]$Script:UsageJson))
     $mark = [Convert]::ToBase64String($Utf8.GetBytes([string]$markText))
     $payload = '{"ev":"' + $ev + '","rid":"' + $eventRid + '","ts":"' + $Ts + '","cwd":"' + $CwdBase +
-        '","msg":"' + $Script:Msg + '","title":"' + $Script:Title + '","usage":"' + $usage + '","scope":"' + $scope +
-        '","mark":"' + $markName + '","marktext":"' + $mark + '"}'
+        '","msg":"' + $Script:Msg + '","title":"' + $Script:Title + '","xflag":"' + $Script:XFlag + '","usage":"' + $usage + '","scope":"' + $scope +
+        '","mark":"' + $markName + '","marktext":"' + $mark + '"' + $Script:LaterJson + '}'
     $env:SIMPLETERM_HOOK_PAYLOAD = [Convert]::ToBase64String($Utf8.GetBytes($payload))
     $exe = (Get-Process -Id $PID).Path
     $argList = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'), $Agent, '__send')
@@ -502,16 +504,54 @@ function Send-Background([string]$ev, [string]$eventRid, [string]$scope, [string
     Remove-Item Env:\SIMPLETERM_HOOK_PAYLOAD -ErrorAction SilentlyContinue
 }
 
+# Sends `done` later from the background child: after $wait seconds, if the
+# file $file still holds $token on line $line (a pause or a goal turn not
+# ended meanwhile) and, for a goal, the rollout $path got no task_started
+# after $offset. The event is made then (fresh rid and time).
+function Start-LaterSend([string]$kind, [int]$wait, [string]$file, [int]$line, [string]$token, [string]$path, [int64]$offset) {
+    $Script:LaterJson = ',"lkind":"' + $kind + '","lwait":"' + $wait + '","lline":"' + $line + '","ltoken":"' + $token +
+        '","lfile":"' + [Convert]::ToBase64String($Utf8.GetBytes($file)) + '","lpath":"' + [Convert]::ToBase64String($Utf8.GetBytes($path)) +
+        '","loff":"' + $offset + '"'
+    Send-Background 'done'
+    $Script:LaterJson = ''
+}
+
+function Test-LaterStillDue($f) {
+    $wait = Get-Field $f 'lwait'
+    $line = Get-Field $f 'lline'
+    $off = Get-Field $f 'loff'
+    if (-not (Test-UInt $wait) -or -not (Test-UInt $line) -or -not (Test-UInt $off)) { return $false }
+    Start-Sleep -Seconds ([int]$wait)
+    try {
+        $file = $Utf8.GetString([Convert]::FromBase64String((Get-Field $f 'lfile')))
+        $lines = [IO.File]::ReadAllLines($file, $Utf8)
+        if ($lines.Count -le [int]$line -or $lines[[int]$line] -ne (Get-Field $f 'ltoken')) { return $false }
+        if ((Get-Field $f 'lkind') -eq 'goal') {
+            $path = $Utf8.GetString([Convert]::FromBase64String((Get-Field $f 'lpath')))
+            $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+            try {
+                [void]$fs.Seek([int64]$off, 'Begin')
+                $rest = (New-Object IO.StreamReader($fs, $Utf8)).ReadToEnd()
+            } finally { $fs.Dispose() }
+            if ($rest.Contains('"type":"task_started"')) { return $false }
+        }
+        [IO.File]::Delete($file)
+    } catch { return $false }
+    return $true
+}
+
 function Invoke-SendChild {
     $raw = $env:SIMPLETERM_HOOK_PAYLOAD
     if (-not $raw) { return }
     $json = $Utf8.GetString([Convert]::FromBase64String($raw))
-    $f = Get-JsonFields $json @('ev', 'rid', 'ts', 'msg', 'cwd', 'title', 'usage', 'scope', 'mark', 'marktext')
+    $f = Get-JsonFields $json @('ev', 'rid', 'ts', 'msg', 'cwd', 'title', 'xflag', 'usage', 'scope', 'mark', 'marktext',
+        'lkind', 'lwait', 'lline', 'ltoken', 'lfile', 'lpath', 'loff')
     $ev = Get-Field $f 'ev'
     $Script:Rid = Get-Field $f 'rid'
     $Script:Ts = Get-Field $f 'ts'
     $Script:Msg = Get-Field $f 'msg'
     $Script:Title = Get-Field $f 'title'
+    $Script:XFlag = Get-Field $f 'xflag'
     $Script:CwdBase = Get-Field $f 'cwd'
     $scope = Get-Field $f 'scope'
     $mark = Get-Field $f 'mark'
@@ -521,6 +561,12 @@ function Invoke-SendChild {
     try { $Script:UsageJson = $Utf8.GetString([Convert]::FromBase64String((Get-Field $f 'usage'))) } catch { $Script:UsageJson = '' }
     if (-not ($ev -cmatch '^[a-z]{1,16}$') -or -not (Test-Hex $Script:Rid 16) -or -not (Test-UInt $Script:Ts)) { return }
     if ($ev -eq 'usage' -and -not $Script:UsageJson) { return }
+    if (Get-Field $f 'lkind') {
+        if (-not (Test-LaterStillDue $f)) { return }
+        $Script:Rid = New-RandomHex 8
+        $Script:Ts = [string](Now-Epoch)
+        if (-not (Test-Hex $Script:Rid 16)) { return }
+    }
     $ops = @()
     foreach ($file in (Get-LinkFiles)) {
         $link = Read-Link $file
@@ -540,12 +586,13 @@ function Invoke-SendChild {
 
 # --- terminal sequence (Claude Code only, SimpleTerm sessions only) -------
 
-# $Script:UsageSeq is the JSON-escaped usage OSC to append, if any.
+# $Script:UsageSeq is the JSON-escaped usage OSC to append, if any;
+# $Script:BgSeq the hook's OSC 7501 record for background work.
 function Write-State([string]$state, [string]$message) {
     if ($Agent -ne 'claude' -or $env:SIMPLETERM -ne '1') { return }
     $m = ''
     if ($message) { $m = ' ' + (Limit-JsonText $message 80 320) }
-    Write-Out ('{"terminalSequence":"\u001b]9;simpleterm:state=' + $state + $m + '\u0007' + $Script:UsageSeq + '"}')
+    Write-Out ('{"terminalSequence":"\u001b]9;simpleterm:state=' + $state + $m + '\u0007' + $Script:BgSeq + $Script:UsageSeq + '"}')
 }
 
 function Write-UsageOnly {
@@ -742,6 +789,23 @@ function Read-TailLines([string]$path, [int]$bytes) {
 
 function ConvertFrom-JsonLine([string]$line) {
     try { return ($line | ConvertFrom-Json) } catch { return $null }
+}
+
+# JSON-escaped text with only \" \\ \/ escapes decoded, or '' for others.
+function ConvertFrom-SimpleEscapes([string]$raw) {
+    $sb = New-Object System.Text.StringBuilder
+    for ($i = 0; $i -lt $raw.Length; $i++) {
+        $c = $raw[$i]
+        if ($c -eq '\') {
+            if ($i + 1 -ge $raw.Length) { return '' }
+            $e = $raw[$i + 1]
+            if ($e -ne '\' -and $e -ne '/' -and $e -ne '"') { return '' }
+            $c = $e
+            $i++
+        }
+        [void]$sb.Append($c)
+    }
+    return $sb.ToString()
 }
 
 # A readable file named by a JSON-escaped path from the hook input, or ''.
@@ -1046,6 +1110,14 @@ function Test-Once([string]$key) {
     return $false
 }
 
+# True for the first alert for this question of this session within 30
+# seconds: Claude Code reports one AskUserQuestion twice (PreToolUse and
+# PermissionRequest).
+function Test-AskOnce([string]$question) {
+    $key = 'q.' + (Get-Sha256Hex ($Sid + '|' + $question)).Substring(0, 16)
+    return (Test-Once $key)
+}
+
 # --- main ------------------------------------------------------------------
 
 function Read-Input {
@@ -1069,9 +1141,431 @@ function Read-Input {
 function Add-Note([string]$kind, [string]$fp) {
     $path = Join-Path $RunDir ($Sid + '.res')
     try {
-        if ($kind -eq 'turn') { [IO.File]::WriteAllText($path, ([string](Now-Epoch) + " turn -`n"), $Utf8) }
+        if ($kind -eq 'turn') {
+            [IO.File]::WriteAllText($path, ([string](Now-Epoch) + " turn -`n"), $Utf8)
+            [IO.File]::Delete((Join-Path $RunDir ($Sid + '.goal')))
+            $bg = Join-Path $RunDir ($Sid + '.bg')
+            if ([IO.File]::Exists($bg)) {
+                $lines = [IO.File]::ReadAllLines($bg, $Utf8)
+                if ($lines.Count -gt 1 -and $lines[1] -eq '7501') {
+                    $Script:BgSeq = '\u001b]7501;state=clear:id=' + $BgId + '\u0007'
+                }
+                [IO.File]::Delete($bg)
+            }
+        }
         else { [IO.File]::AppendAllText($path, ([string](Now-Epoch) + ' tool ' + $fp + "`n"), $Utf8) }
     } catch { }
+}
+
+# Claude Code ended a turn while work it started still runs (Stop
+# `background_tasks`, Claude Code 2.1.145+: shells, subagents, monitors,
+# workflows). It takes the turn up again when that work reports back, so the
+# session is not done: no `done` event, a `background` state instead, and no
+# idle question until the next turn note. $RunDir\$Sid.bg holds the state's
+# message meanwhile, and `7501` on its second line when the hook wrote an
+# OSC 7501 `working` record (as agent-hook.sh explains: Claude Code 2.1.295+
+# reports `done` for its own turn through OSC 7501).
+$BgId = 'simpleterm-bg'
+function Test-BgPaused { return [IO.File]::Exists((Join-Path $RunDir ($Sid + '.bg'))) }
+
+function Test-Claude7501 {
+    if ($env:TMUX -or $env:STY) { return $false }
+    if (@('', '0', 'false', 'FALSE', 'False') -notcontains [string]$env:CLAUDE_CODE_DISABLE_TERMINAL_TITLE) { return $false }
+    $p = Get-InputFile (Get-Field $f 'transcript_path')
+    if (-not $p) { return $false }
+    $v = ''
+    try {
+        $fs = [IO.File]::Open($p, 'Open', 'Read', 'ReadWrite')
+        try {
+            $n = [Math]::Min([int64]65536, $fs.Length)
+            [void]$fs.Seek(-$n, 'End')
+            $buf = New-Object byte[] $n
+            $read = $fs.Read($buf, 0, $n)
+            $ms = [regex]::Matches($Utf8.GetString($buf, 0, $read), '"version":"([0-9][0-9.]*)"')
+            if ($ms.Count -gt 0) { $v = $ms[$ms.Count - 1].Groups[1].Value }
+        } finally { $fs.Dispose() }
+    } catch { return $false }
+    $x = $v.Split('.')
+    if ($x.Count -lt 3) { return $false }
+    try { $a = [int]$x[0]; $b = [int]$x[1]; $c = [int]$x[2] } catch { return $false }
+    return ($a -gt 2 -or ($a -eq 2 -and ($b -gt 1 -or ($b -eq 1 -and $c -ge 295))))
+}
+
+# Codex `/goal`: while a goal is active Codex starts the next turn itself and
+# each turn ends with a Stop. The rollout records `thread_goal_updated` with
+# the goal's status; the model ends a goal with an `update_goal` call.
+function Test-CodexGoalActive {
+    $p = Get-InputFile (Get-Field $f 'transcript_path')
+    if (-not $p) { return $false }
+    $active = $false
+    $called = $false
+    try {
+        foreach ($line in [IO.File]::ReadLines($p)) {
+            if ($line.Contains('"type":"thread_goal_updated"')) { $active = $line.Contains('"status":"active"'); $called = $false }
+            elseif ($line.Contains('"name":"update_goal"')) { $called = $true }
+        }
+    } catch { return $false }
+    return ($active -and -not $called)
+}
+
+# The first counted task (or, with only scheduled wake-ups, the first
+# schedule) as a short line for the badge and the pause note.
+function Get-BgSummary {
+    if ($BgN -gt 0) {
+        $m = $BgDesc
+        if (-not $m) { $m = 'task' }
+        if ($BgType) { $m = $BgType + ': ' + $m }
+        if ($BgN -ge 10) { $m += ' (+9 or more)' }
+        elseif ($BgN -gt 1) { $m += ' (+' + ($BgN - 1) + ' more)' }
+    } else {
+        $sch = $CronSched
+        if (-not $sch) { $sch = 'wake-up' }
+        $m = 'scheduled: ' + $sch
+        if ($CronN -gt 1) { $m += ' (+' + ($CronN - 1) + ' more)' }
+    }
+    return (Limit-JsonText $m 80 320)
+}
+
+# The last message and what still runs, as the text of a done: the suffix is
+# kept whole and the message gives way (200 characters, 800 bytes in all).
+function Get-DoneMsg([string]$what) {
+    $sfx = Limit-JsonText ('(still running in the background: ' + $what + ')') 120 480
+    $room = 200 - $sfx.Length - 1
+    if ($Last -and $room -gt 20) {
+        return ((Limit-JsonText $Last $room (800 - $sfx.Length - 1)) + ' ' + $sfx)
+    }
+    return $sfx
+}
+
+# The turn ended and the agent waits for background work or a schedule. Not
+# done: the badge says background (note in $Sid.bg), unless the last message
+# asks the user something ($ask): then the user is told, as question, the
+# badge says waiting, and Claude Code 2.1.295+ gets a blocked OSC 7501 record
+# (kind question) instead of the working one.
+function Invoke-BgPause([bool]$ask) {
+    $m = Get-BgSummary
+    $flag = ''
+    if ($Agent -eq 'claude' -and $env:SIMPLETERM -eq '1' -and (Test-Claude7501)) {
+        $flag = '7501'
+        $e = ''
+        if ($ask) { $t = ConvertFrom-SimpleEscapes (Limit-JsonText $Last 200 800) }
+        else { $t = ConvertFrom-SimpleEscapes $m }
+        if ($t) { $e = [Convert]::ToBase64String($Utf8.GetBytes($t)) }
+        if ($ask) { $Script:BgSeq = '\u001b]7501;state=blocked:id=' + $BgId + ':kind=question' }
+        else { $Script:BgSeq = '\u001b]7501;state=working:id=' + $BgId }
+        if ($e) { $Script:BgSeq += ':msg=' + $e }
+        $Script:BgSeq += '\u0007'
+    }
+    $bgFile = Join-Path $RunDir ($Sid + '.bg')
+    try { [IO.File]::WriteAllText($bgFile, $m + "`n" + $flag + "`n" + $Rid + "`n", $Utf8) } catch { }
+    if ($ask) {
+        $Script:Msg = Limit-JsonText $Last 200 800
+        Send-Background 'question'
+        Write-State 'waiting' $Last
+        return
+    }
+    Write-State 'background' $m
+    # Only work that may run for good is left (a dev server): after
+    # bg_done_after seconds (default 600) of the same pause, done once.
+    $wait = Get-ConfInt 'bg_done_after' 600
+    if ($BgN -gt 0 -and $BgFinite -eq 0 -and $wait -gt 0 -and $LinkFiles.Count -gt 0) {
+        $Script:Msg = Get-DoneMsg $m
+        Start-LaterSend 'bg' $wait $bgFile 2 $Rid '' 0
+    }
+}
+
+# Sends done (text Msg) done_delay seconds from now (default 3; 0: at once)
+# unless something of the session happens first: another Stop hook may have
+# kept the agent going, and then its next event (or Stop) comes within
+# moments. The event is made then (fresh rid and time).
+function Send-DoneLater {
+    if ($LinkFiles.Count -eq 0) { return }
+    $dw = Get-ConfInt 'done_delay' 3
+    if ($dw -le 0) { Send-Background 'done'; return }
+    $pendFile = Join-Path $RunDir ($Sid + '.pend')
+    try { [IO.File]::WriteAllText($pendFile, $Rid + "`n", $Utf8) } catch { Send-Background 'done'; return }
+    Start-LaterSend 'pend' $dw $pendFile 0 $Rid '' 0
+}
+
+# --- who started a turn, and what ran before it -----------------------------
+
+# Prompt ids of the turns Grok Build starts itself (static, from the 1.0.70
+# binary); a person's prompt id is a UUID.
+$GrokAutoPrefixes = @('task-completed-', 'bash-completed-', 'monitor-completed-', 'subagent-completed-',
+    'workflow-completed-', 'parent-agent-message-', 'parent-message-', 'notifications-', 'goal-summary-',
+    'goal-classifier-nudge-', 'plan-resume-', 'scheduler-fired-')
+
+# Checksum of the start of a prompt, to compare a scheduled prompt (Stop
+# session_crons) with the prompt a later UserPromptSubmit carries.
+function Get-PromptSum([string]$text) {
+    return (Get-Sha256Hex (Limit-JsonText $text 200 800)).Substring(0, 16)
+}
+
+# True if a person typed the prompt (or we cannot tell), false if the agent
+# started the turn itself: background work reporting back, a scheduled
+# wake-up. Claude Code names it in UserPromptSubmit source where it sends one
+# (2.1.316 sends none): then a task-notification or agent-message prompt, the
+# /loop sentinel, or the prompt of a wake-up listed at the last Stop says so.
+function Get-PromptUser {
+    if ($Agent -eq 'grok') {
+        $promptIdText = Get-Field $f 'promptId'
+        foreach ($pre in $GrokAutoPrefixes) {
+            if ($promptIdText.StartsWith($pre, [StringComparison]::Ordinal)) { return $false }
+        }
+        return $true
+    }
+    $src = Get-Field $f 'source'
+    if ($src -eq 'user' -or $src -eq 'sdk') { return $true }
+    if ($src) { return $false }
+    $pr = Get-Field $f 'prompt'
+    if (-not $pr) { return $true }
+    foreach ($pre in @('<task-notification>', '<agent-message ', '<<autonomous-loop')) {
+        if ($pr.StartsWith($pre, [StringComparison]::Ordinal)) { return $false }
+    }
+    $cronFile = Join-Path $RunDir ($Sid + '.crons')
+    try {
+        if ([IO.File]::Exists($cronFile)) {
+            $sums = ([IO.File]::ReadAllText($cronFile, $Utf8)).Trim() -split ' +'
+            if ($sums -contains (Get-PromptSum $pr)) { return $false }
+        }
+    } catch { }
+    return $true
+}
+
+# Sid.turn: line 1 user or auto (who started this turn), line 2 the ids of the
+# background tasks that already ran when it started (Sid.stopids, the last
+# Stop list), for the Stop that ends it.
+function Write-TurnMark([bool]$user) {
+    $ids = ''
+    try {
+        $idsFile = Join-Path $RunDir ($Sid + '.stopids')
+        if ([IO.File]::Exists($idsFile)) { $ids = ([IO.File]::ReadAllText($idsFile, $Utf8) -split "`n")[0] }
+        $who = 'auto'
+        if ($user) { $who = 'user' }
+        [IO.File]::WriteAllText((Join-Path $RunDir ($Sid + '.turn')), ($who + "`n" + $ids + "`n"), $Utf8)
+    } catch { }
+}
+
+# --- reading the last message of a turn -------------------------------------
+
+# Does the last message ask the user something? Only the end counts: its last
+# two sentences, fenced code blocks left out. A sentence asks when it ends
+# with ? or a full-width question mark, ends with a Korean request or question
+# ending, or contains an English ask. A reading of text, not a protocol: a
+# wrong guess costs one extra alert. The tables are the same as ASK_AWK in
+# agent-hook.sh (Korean as \u escapes: this file stays ASCII).
+$AskKo = @([regex]::Unescape('\uAE4C\uC694'), [regex]::Unescape('\uB2C8\uAE4C'), [regex]::Unescape('\uD558\uC2DC\uACA0\uC5B4\uC694'),
+    [regex]::Unescape('\uC8FC\uC138\uC694'), [regex]::Unescape('\uC8FC\uC2DC\uACA0\uC5B4\uC694'), [regex]::Unescape('\uC8FC\uC2E4\uB798\uC694'),
+    [regex]::Unescape('\uB098\uC694'), [regex]::Unescape('\uC778\uAC00\uC694'), [regex]::Unescape('\uBC14\uB78D\uB2C8\uB2E4'),
+    [regex]::Unescape('\uD560\uB798\uC694'))
+$AskEn = @('should i', 'shall i', 'would you like', 'do you want', 'let me know which', 'let me know whether', 'want me to', 'please confirm',
+    'please choose', 'please select', 'please tell me')
+$AskFwQ = [string][char]0xFF1F
+$AskTermChars = @($AskFwQ, [string][char]0xFF01, [string][char]0x3002)
+$AskCloseChars = @([string][char]0x300D, [string][char]0x300F, [string][char]0x201D, [string][char]0x2019, [string][char]0xFF09)
+
+function ConvertFrom-JsonEscapes([string]$raw) {
+    $sb = New-Object System.Text.StringBuilder
+    for ($i = 0; $i -lt $raw.Length; $i++) {
+        $c = $raw[$i]
+        if ($c -ne '\') { [void]$sb.Append($c); continue }
+        if ($i + 1 -ge $raw.Length) { break }
+        $e = $raw[$i + 1]
+        $i++
+        if ($e -eq 'n' -or $e -eq 'r') { [void]$sb.Append("`n") }
+        elseif ($e -eq 't') { [void]$sb.Append(' ') }
+        elseif ($e -eq 'u') {
+            $hex = ''
+            if ($i + 4 -lt $raw.Length) { $hex = $raw.Substring($i + 1, 4) }
+            if (Test-Hex4 $hex) { [void]$sb.Append([char][Convert]::ToInt32($hex, 16)); $i += 4 }
+            else { [void]$sb.Append(' ') }
+        }
+        else { [void]$sb.Append($e) }
+    }
+    return $sb.ToString()
+}
+
+$AskCoreChars = " `t`n*_``" + '"' + "'" + ')]}>.,;:!?'
+
+function Get-AskCore([string]$text) {
+    $again = $true
+    while ($again -and $text.Length -gt 0) {
+        $again = $false
+        $endCh = $text.Substring($text.Length - 1)
+        if ($AskCoreChars.IndexOf($endCh, [StringComparison]::Ordinal) -ge 0) {
+            $text = $text.Substring(0, $text.Length - 1)
+            $again = $true
+            continue
+        }
+        foreach ($cl in ($AskCloseChars + $AskTermChars)) {
+            if ($text.EndsWith($cl, [StringComparison]::Ordinal)) {
+                $text = $text.Substring(0, $text.Length - $cl.Length)
+                $again = $true
+                break
+            }
+        }
+    }
+    return $text
+}
+
+function Test-AskText([string]$raw) {
+    if (-not $raw) { return $false }
+    $s = $raw
+    $fence = $false
+    if ($s.Length -gt 2000) {
+        $head = $s.Substring(0, $s.Length - 2000)
+        $s = $s.Substring($s.Length - 2000)
+        $p = $s.IndexOf('\n', [StringComparison]::Ordinal)
+        if ($p -ge 0) { $head += $s.Substring(0, $p + 2); $s = $s.Substring($p + 2) }
+        $fence = (([regex]::Matches($head, '```')).Count % 2) -eq 1
+    }
+    $lines = (ConvertFrom-JsonEscapes $s) -split "`n"
+    $kept = New-Object System.Text.StringBuilder
+    foreach ($ln in $lines) {
+        if ($ln.TrimStart().StartsWith('```', [StringComparison]::Ordinal)) { $fence = -not $fence; continue }
+        if (-not $fence) { [void]$kept.Append($ln + "`n") }
+    }
+    $txt = $kept.ToString()
+    $sent = New-Object System.Collections.ArrayList
+    $cur = New-Object System.Text.StringBuilder
+    for ($i = 0; $i -lt $txt.Length; $i++) {
+        $c = [string]$txt[$i]
+        [void]$cur.Append($c)
+        $term = ''
+        $nx = ''
+        if ($i + 1 -lt $txt.Length) { $nx = [string]$txt[$i + 1] }
+        if ($c -eq "`n") { $term = 'nl' }
+        elseif ($c -eq '?' -or $c -eq '!') { if ($nx -notmatch '[A-Za-z0-9]') { $term = $c } }
+        elseif ($c -eq '.') { if ($nx -eq '' -or $nx -eq ' ' -or $nx -eq "`n") { $term = $c } }
+        elseif ($AskTermChars -contains $c) { $term = $c }
+        if ($term) {
+            $x = $cur.ToString().Trim()
+            $cur.Length = 0
+            if ($x -match '[A-Za-z0-9]' -or $x -match '[^\u0000-\u007F]') {
+                if ($x -notmatch '^[0-9]+[.)]?$') {
+                    $tt = $term
+                    if ($term -eq 'nl') { $tt = '' }
+                    [void]$sent.Add(@($x, $tt))
+                }
+            }
+        }
+    }
+    $x = $cur.ToString().Trim()
+    if (($x -match '[A-Za-z0-9]' -or $x -match '[^\u0000-\u007F]') -and $x -notmatch '^[0-9]+[.)]?$') { [void]$sent.Add(@($x, '')) }
+    for ($k = $sent.Count - 1; $k -ge 0 -and $k -ge $sent.Count - 2; $k--) {
+        if ($sent[$k][1] -eq '?' -or $sent[$k][1] -eq $AskFwQ) { return $true }
+        $core = Get-AskCore $sent[$k][0]
+        foreach ($ko in $AskKo) { if ($core.EndsWith($ko, [StringComparison]::Ordinal)) { return $true } }
+        $low = ' ' + $core.ToLowerInvariant() + ' '
+        foreach ($en in $AskEn) { if ($low.Contains(' ' + $en + ' ')) { return $true } }
+    }
+    return $false
+}
+
+# --- services ------------------------------------------------------------------
+
+# A shell task whose command looks like a service (a dev server, a watcher, a
+# follower) is not something the agent waits for: it never ends and never
+# wakes the agent. One @(pattern, exception) per line, matched against the
+# lowercased command with ; & | ( ) and JSON escapes turned into single
+# spaces and one space at each end (the same table as SVC_AWK in agent-hook.sh).
+$ServiceCmds = @(
+    @(' (npm|pnpm|yarn|bun)( run| run-script)? (dev|start|serve|preview|watch)(:[a-z0-9_-]+)? ', ''),
+    @(' next (dev|start) ', ''),
+    @(' vite (dev |serve |preview |-)| vite $', ''),
+    @(' nodemon ', ''),
+    @(' python[0-9.]* -m http[.]server ', ''),
+    @('manage[.]py runserver ', ''),
+    @('[ /]rails (s|server) ', ''),
+    @('[ /]flask ([^ ]+ )*run ', ''),
+    @('[ /]uvicorn ', ''),
+    @('docker[ -]compose ([^ ]+ )*up ', ' (-d|--detach) '),
+    @(' tail ([^ ]+ )*(-[a-z]*f[a-z]*|--follow[^ ]*) ', ''),
+    @(' --watch[a-z-]*(=[^ ]*)? ', ''),
+    @(' -w ', ' (grep|egrep|fgrep|rg|wc|ls|sort|diff|cut|tr|sed|awk|ps|date|stat|find|git|npm|pnpm|yarn|npx) '),
+    @(' watch ', '')
+)
+
+function Test-ServiceCmd([string]$cmd) {
+    $c = $cmd.ToLowerInvariant()
+    $c = [regex]::Replace($c, '\\[nrt"]', ' ')
+    $c = [regex]::Replace($c, '[;&|()\t]', ' ')
+    $c = ' ' + $c + ' '
+    $c = [regex]::Replace($c, ' +', ' ')
+    foreach ($e in $ServiceCmds) {
+        if ($c -match $e[0]) {
+            if (-not $e[1] -or $c -notmatch $e[1]) { return $true }
+        }
+    }
+    return $false
+}
+
+# --- the end of a turn ----------------------------------------------------------
+
+# True if every counted task was already running before the turn began.
+function Test-BgAllOld([string]$prevIds) {
+    if ($BgN -le 0 -or $BgNoId -gt 0) { return $false }
+    $prev = @($prevIds -split ' +')
+    foreach ($bi in $BgIds) { if ($prev -notcontains $bi) { return $false } }
+    return $true
+}
+
+# A done for the turn that just ended (what: what still runs, if anything).
+function Invoke-StopDone([string]$what) {
+    if ($what) { $Script:Msg = Get-DoneMsg $what } else { $Script:Msg = Limit-JsonText $Last 200 800 }
+    if ((Get-Field $f 'stop_hook_active') -eq 'true') { $Script:XFlag = '1' }
+    Send-DoneLater
+    Invoke-UsageReport
+    Write-State 'done' ''
+    Update-Cli
+}
+
+# A Stop (Claude Code, Codex, Grok): done, or not yet. Not done while the agent
+# waits for work it started or for a schedule, unless a person typed this turn
+# and only work that ran before it is left, only services are left, or the
+# last message asks the user something (then they are told). A turn the agent
+# started itself while a schedule (/loop, cron) is set stays quiet:
+# background with "scheduled: ...". The same as stop_flow in agent-hook.sh.
+function Invoke-StopFlow {
+    $turnUser = $true
+    $prevIds = ''
+    $turnFile = Join-Path $RunDir ($Sid + '.turn')
+    try {
+        if ([IO.File]::Exists($turnFile)) {
+            $tl = [IO.File]::ReadAllText($turnFile, $Utf8) -split "`n"
+            if ($tl.Count -gt 0 -and $tl[0] -eq 'auto') { $turnUser = $false }
+            if ($tl.Count -gt 1) { $prevIds = $tl[1] }
+        }
+        [IO.File]::WriteAllText((Join-Path $RunDir ($Sid + '.stopids')), (($BgIds -join ' ') + "`n"), $Utf8)
+        $cronFile = Join-Path $RunDir ($Sid + '.crons')
+        if ($CronN -gt 0) { [IO.File]::WriteAllText($cronFile, (($CronSums -join ' ') + "`n"), $Utf8) }
+        else { [IO.File]::Delete($cronFile) }
+    } catch { }
+    if ($BgN -eq 0 -and $CronN -eq 0) { Invoke-StopDone ''; return }
+    if ($turnUser -and ($BgN -eq 0 -or (Test-BgAllOld $prevIds))) {
+        if ($BgN -gt 0) { Invoke-StopDone (Get-BgSummary) } else { Invoke-StopDone '' }
+        return
+    }
+    if ($BgN -gt 0 -and $BgSvc -eq $BgN -and ($CronN -eq 0 -or $turnUser)) {
+        Invoke-StopDone (Get-BgSummary)
+        return
+    }
+    Invoke-UsageReport
+    Invoke-BgPause (Test-AskText $Last)
+    Update-Cli
+}
+
+# The status of a running turn: `background` while a paused session's
+# background subagents run tools, `running` otherwise.
+function Write-Running {
+    $path = Join-Path $RunDir ($Sid + '.bg')
+    if ([IO.File]::Exists($path)) {
+        $m = ''
+        try { $m = ([IO.File]::ReadAllText($path, $Utf8) -split "`n")[0] } catch { }
+        Write-State 'background' $m
+    } else {
+        Write-State 'running' ''
+    }
 }
 
 try {
@@ -1088,8 +1582,11 @@ try {
         default { exit 0 }
     }
     $Script:UsageSeq = ''
+    $Script:BgSeq = ''
+    $Script:LaterJson = ''
     $Script:UsageJson = ''
     $Script:Title = ''
+    $Script:XFlag = ''
 
     if ($Mode -eq '__send') {
         Invoke-SendChild
@@ -1103,11 +1600,16 @@ try {
     if ($LinkFiles.Count -eq 0 -and $env:SIMPLETERM -ne '1') { exit 0 }
     if (-not [IO.Directory]::Exists($RunDir)) { [void][IO.Directory]::CreateDirectory($RunDir) }
 
-    $f = Get-JsonFields $InputText @('hook_event_name', 'hookEventName', 'notification_type', 'notificationType', 'type',
+    # Stop `background_tasks` (Claude Code) or `backgroundTasks` (Grok): the first ten tasks.
+    $bgWant = @(foreach ($i in 0..9) { foreach ($k in 'background_tasks', 'backgroundTasks') { "$k.$i.id"; "$k.$i.type"; "$k.$i.description"; "$k.$i.command" } })
+    # session_crons (Claude Code) or sessionCrons (Grok): the first five wake-ups.
+    $cronWant = @(foreach ($i in 0..4) { foreach ($k in 'session_crons', 'sessionCrons') { "$k.$i.id"; "$k.$i.schedule"; "$k.$i.prompt" } })
+    $f = Get-JsonFields $InputText (@('hook_event_name', 'hookEventName', 'notification_type', 'notificationType', 'type',
         'tool_name', 'tool_input.command', 'tool_input.file_path', 'tool_input.url', 'tool_input.description',
         'tool_input.questions.0.question', 'session_id', 'sessionId', 'cwd', 'message', 'last_assistant_message',
         'lastAssistantMessage', 'last-assistant-message', 'input-messages.0', 'error', 'transcript_path', 'context_tokens',
-        'model', 'to_model', 'promptId', 'toolUseId', 'reason', 'timestamp')
+        'model', 'to_model', 'promptId', 'toolUseId', 'reason', 'timestamp', 'prompt', 'source', 'stop_hook_active',
+        'is_interrupt') + $bgWant + $cronWant)
     $HookEvent = Get-Field $f 'hook_event_name'
     if (-not $HookEvent) { $HookEvent = Get-Field $f 'hookEventName' }
     if ($Agent -eq 'codex-notify') { $HookEvent = 'notify' }
@@ -1116,6 +1618,7 @@ try {
         if ($HookEvent -eq 'notification') { $HookEvent = 'Notification' }
         elseif ($HookEvent -eq 'stop') { $HookEvent = 'Stop' }
         elseif ($HookEvent -eq 'stop_failure') { $HookEvent = 'StopFailure' }
+        elseif ($HookEvent -eq 'user_prompt_submit') { $HookEvent = 'UserPromptSubmit' }
     }
     $Tool = Get-Field $f 'tool_name'
     $Detail = ''
@@ -1144,6 +1647,51 @@ try {
     $CwdBase = Limit-JsonText (Get-Field $f 'cwd') 64 256 -Base
     $Fp = (Get-Sha256Hex ($Tool + "`t" + (Limit-JsonText $Detail 200 800))).Substring(0, 16)
     $Script:Msg = ''
+    # Stop `background_tasks` (Claude Code) or `backgroundTasks` (Grok): the
+    # first task and up to ten ids.
+    $bgKey = 'background_tasks'
+    if ($Agent -eq 'grok') { $bgKey = 'backgroundTasks' }
+    # Claude Code 2.1.316 type labels: subagent, workflow, cloud session and
+    # MCP task report back (they end); shell, monitor, an idle teammate (and
+    # labels we do not know) may run for good; dream, auto-mode scan, memory
+    # import and memory save are its own housekeeping and never wake it.
+    $BgN = 0
+    $BgFinite = 0
+    $BgType = ''
+    $BgDesc = ''
+    $BgSvc = 0
+    $BgNoId = 0
+    $BgIds = @()
+    for ($i = 0; $i -lt 10; $i++) {
+        $t = Get-Field $f ($bgKey + '.' + $i + '.type')
+        if (-not $t -or @('dream', 'auto-mode scan', 'memory import', 'memory save') -contains $t) { continue }
+        $BgN++
+        if (@('subagent', 'workflow', 'cloud session', 'MCP task') -contains $t) { $BgFinite++ }
+        $bgId = Get-Field $f ($bgKey + '.' + $i + '.id')
+        if ($bgId -cmatch '^[A-Za-z0-9_-]+$') { $BgIds += $bgId } else { $BgNoId++ }
+        $bgCmd = Get-Field $f ($bgKey + '.' + $i + '.command')
+        if ($t -eq 'shell' -and $bgCmd -and (Test-ServiceCmd $bgCmd)) { $BgSvc++ }
+        if (-not $BgType) {
+            $BgType = $t
+            $BgDesc = Get-Field $f ($bgKey + '.' + $i + '.description')
+            if (-not $BgDesc) { $BgDesc = $bgCmd }
+        }
+    }
+    # Scheduled wake-ups: how many, the first one's schedule, a checksum of each prompt.
+    $cronKey = 'session_crons'
+    if ($Agent -eq 'grok') { $cronKey = 'sessionCrons' }
+    $CronN = 0
+    $CronSched = ''
+    $CronSums = @()
+    for ($i = 0; $i -lt 5; $i++) {
+        $cId = Get-Field $f ($cronKey + '.' + $i + '.id')
+        $cSch = Get-Field $f ($cronKey + '.' + $i + '.schedule')
+        $cPr = Get-Field $f ($cronKey + '.' + $i + '.prompt')
+        if (-not ($cId -or $cSch -or $cPr)) { continue }
+        if ($i + 1 -gt $CronN) { $CronN = $i + 1 }
+        if ($i -eq 0) { $CronSched = $cSch }
+        if ($cPr) { $CronSums += (Get-PromptSum $cPr) }
+    }
 
     # `simpleterm notify "title" ["body"]`: an OSC 777 notification on this
     # console (in a SimpleTerm session) and a `notify` event to every link.
@@ -1168,6 +1716,13 @@ try {
         exit 0
     }
 
+    # A done waits done_delay seconds (Send-DoneLater) in case another Stop
+    # hook keeps the agent going; any later event of the session ends that
+    # wait. Only the Stop events that send a done themselves leave it be.
+    if (@('claude:Stop', 'codex:Stop', 'grok:Stop') -notcontains ($Agent + ':' + $HookEvent)) {
+        try { [IO.File]::Delete((Join-Path $RunDir ($Sid + '.pend'))) } catch { }
+    }
+
     switch ($Agent + ':' + $HookEvent) {
         { $_ -eq 'claude:PermissionRequest' -or $_ -eq 'codex:PermissionRequest' } {
             if ($Mode -eq 'signal') {
@@ -1176,7 +1731,7 @@ try {
                 $q = Get-Field $f 'tool_input.questions.0.question'
                 if (-not $q) { $q = $Desc }
                 $Script:Msg = Limit-JsonText $q 200 800
-                Send-Background 'question'
+                if (Test-AskOnce $q) { Send-Background 'question' }
             } else {
                 $d = $Detail
                 if ($Tool -eq 'apply_patch') { $d = $Desc; if (-not $d) { $d = 'patch' } }
@@ -1188,8 +1743,9 @@ try {
         }
         'claude:PreToolUse' {
             if ($Tool -eq 'AskUserQuestion') {
-                $Script:Msg = Limit-JsonText (Get-Field $f 'tool_input.questions.0.question') 200 800
-                Send-Background 'question'
+                $q = Get-Field $f 'tool_input.questions.0.question'
+                $Script:Msg = Limit-JsonText $q 200 800
+                if (Test-AskOnce $q) { Send-Background 'question' }
                 Write-State 'waiting' ''
             }
             break
@@ -1199,10 +1755,18 @@ try {
             # wait (one relay event per agent wait). idle_prompt keeps the done badge.
             $nt = Get-Field $f 'notification_type'
             if ($nt -eq 'idle_prompt') {
+                # Claude Code sends it 60 s after a turn while only background
+                # shells or monitors run: the work is not waiting for the user.
+                if (Test-BgPaused) { break }
                 $Script:Msg = Limit-JsonText (Get-Field $f 'message') 200 800
                 Send-Background 'question'
-            } elseif ($nt -eq 'elicitation_dialog' -or $nt -eq 'elicitation_url_dialog' -or $nt -eq 'agent_needs_input') {
+            } elseif ($nt -eq 'elicitation_dialog' -or $nt -eq 'elicitation_url_dialog') {
                 Write-State 'waiting' ''
+                $Script:Msg = Limit-JsonText (Get-Field $f 'message') 200 800
+                Send-Background 'question'
+            } elseif ($nt -eq 'agent_needs_input') {
+                # Another background session of the user's needs input, not
+                # this one: the alert stays, this tab's badge does not change.
                 $Script:Msg = Limit-JsonText (Get-Field $f 'message') 200 800
                 Send-Background 'question'
             }
@@ -1210,11 +1774,18 @@ try {
         }
         'claude:UserPromptSubmit' {
             Add-Note 'turn' ''
+            Write-TurnMark (Get-PromptUser)
             Invoke-UsageReport
             Write-State 'running' ''
             break
         }
         { $_ -eq 'claude:PostToolUse' -or $_ -eq 'claude:PostToolUseFailure' } {
+            if ($HookEvent -eq 'PostToolUseFailure' -and (Get-Field $f 'is_interrupt') -eq 'true') {
+                # Esc during a tool call: the turn is over (no Stop follows).
+                Add-Note 'turn' ''
+                Write-State 'idle' ''
+                break
+            }
             Add-Note 'tool' $Fp
             # Context grows with each tool call; look again every 20 seconds at most.
             $utPath = Join-Path $RunDir ($Sid + '.ut')
@@ -1225,7 +1796,7 @@ try {
                 try { [IO.File]::WriteAllText($utPath, [string]$now, $Utf8) } catch { }
                 Invoke-UsageReport
             }
-            Write-State 'running' ''
+            Write-Running
             break
         }
         { $_ -eq 'claude:SessionStart' -or $_ -eq 'claude:PostCompact' -or $_ -eq 'claude:PostModelSwitch' -or
@@ -1238,11 +1809,24 @@ try {
         { $_ -eq 'claude:Stop' -or $_ -eq 'codex:Stop' } {
             Add-Note 'turn' ''
             if ($Last.StartsWith('{\"title\":')) { break }
-            $Script:Msg = Limit-JsonText $Last 200 800
-            Send-Background 'done'
-            Invoke-UsageReport
-            Write-State 'done' ''
-            Update-Cli
+            if ($Agent -eq 'codex' -and (Test-CodexGoalActive)) {
+                Invoke-UsageReport
+                # A goal can end without a trace in the rollout (blocked, a
+                # budget or usage limit, /goal clear): if no next turn started
+                # codex_goal_check seconds (default 5) later, this was the last.
+                $roll = Get-InputFile (Get-Field $f 'transcript_path')
+                if ($roll -and $LinkFiles.Count -gt 0) {
+                    $goalFile = Join-Path $RunDir ($Sid + '.goal')
+                    try {
+                        [IO.File]::WriteAllText($goalFile, $Rid + "`n", $Utf8)
+                        $Script:Msg = Limit-JsonText $Last 200 800
+                        Start-LaterSend 'goal' (Get-ConfInt 'codex_goal_check' 5) $goalFile 0 $Rid $roll ((Get-Item -LiteralPath $roll).Length)
+                    } catch { }
+                }
+                Update-Cli
+                break
+            }
+            Invoke-StopFlow
             break
         }
         'claude:StopFailure' {
@@ -1256,6 +1840,12 @@ try {
             Write-State 'done' ''
             break
         }
+        'grok:UserPromptSubmit' {
+            # Also the turn Grok starts itself when background work reports back.
+            Add-Note 'turn' ''
+            Write-TurnMark (Get-PromptUser)
+            break
+        }
         'grok:Notification' {
             # Grok asks in its own prompt and takes no answer from a hook:
             # permission_prompt and idle_prompt are alerts. The key includes
@@ -1263,6 +1853,7 @@ try {
             $nt = Get-Field $f 'notificationType'
             if (-not $nt) { $nt = Get-Field $f 'notification_type' }
             if (@('permission_prompt', 'idle_prompt') -notcontains $nt) { break }
+            if ($nt -eq 'idle_prompt' -and (Test-BgPaused)) { break }
             $key = (Get-Sha256Hex ($HookEvent + '|' + $Sid + '|' + $nt + '|' + (Get-Field $f 'promptId') + '|' + (Get-Field $f 'timestamp') + '|' + $Last)).Substring(0, 16)
             if (-not (Test-Once $key)) { break }
             $Script:Msg = Limit-JsonText $Last 200 800
@@ -1277,9 +1868,11 @@ try {
             $err = Get-Field $f 'error'
             $key = (Get-Sha256Hex ($HookEvent + '|' + $Sid + '|' + (Get-Field $f 'promptId') + '|' + (Get-Field $f 'timestamp') + '|' + $err + '|' + $Last)).Substring(0, 16)
             if (-not (Test-Once $key)) { break }
+            Add-Note 'turn' ''
+            # Grok 1.0.70 lists work still in flight in backgroundTasks, as
+            # Claude Code does, and takes the turn up again when it reports back.
             if ($HookEvent -eq 'Stop') {
-                $Script:Msg = Limit-JsonText $Last 200 800
-                Send-Background 'done'
+                Invoke-StopFlow
             } else {
                 $ev = 'error'
                 if ($err -eq 'authentication_failed' -or $err -eq 'oauth_org_not_allowed' -or $err -eq 'cloud_credential_error') { $ev = 'auth' }

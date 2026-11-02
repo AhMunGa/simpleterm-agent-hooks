@@ -40,7 +40,7 @@ LOGGED=0
 MAX_INPUT=262144
 MAX_LINKS=16
 # The plugin release of this script (the manifests carry the same).
-HOOK_VERSION=0.3.0
+HOOK_VERSION=0.3.1
 # Bumped when the ~/.simpleterm/bin/simpleterm wrapper must be rewritten.
 CLI_REV=2
 CR=$(printf '\r')
@@ -430,6 +430,8 @@ plaintext() { # rid ev nonce
     notify) p=$p',"title":"'$TITLE'","msg":"'$MSG'"' ;;
     *) p=$p',"msg":"'$MSG'"' ;;
   esac
+  # A `done` of a Stop that another Stop hook had already kept going.
+  [ "$2" = done ] && [ -n "${XFLAGS:-}" ] && p=$p$XFLAGS
   [ -n "$3" ] && p=$p',"nonce":"'$3'"'
   printf '%s,"ts":%s}' "$p" "$TS"
 }
@@ -490,13 +492,14 @@ send_bg() { # ev [rid] [all|tunnel|relay] [file text]
 
 # --- terminal sequence (Claude Code only, SimpleTerm sessions only) ---------
 
-# USAGE_SEQ is the JSON-escaped usage OSC to append, if any (usage_report).
-print_state() { # running|waiting|done [message]
+# USAGE_SEQ is the JSON-escaped usage OSC to append, if any (usage_report);
+# BG_SEQ the hook's OSC 7501 record for background work (bg_pause, note).
+print_state() { # running|waiting|done|background [message]
   [ "$AGENT" = claude ] || return 0
   [ "${SIMPLETERM:-}" = 1 ] || return 0
   m=''
   [ -n "${2:-}" ] && m=' '$(json_trim "$2" 80 320)
-  printf '{"terminalSequence":"\\u001b]9;simpleterm:state=%s%s\\u0007%s"}\n' "$1" "$m" "$USAGE_SEQ"
+  printf '{"terminalSequence":"\\u001b]9;simpleterm:state=%s%s\\u0007%s%s"}\n' "$1" "$m" "$BG_SEQ" "$USAGE_SEQ"
 }
 
 print_usage() {
@@ -1167,6 +1170,13 @@ once() { # key
   return 1
 }
 
+# True for the first alert for this question of this session within 30
+# seconds: Claude Code reports one AskUserQuestion twice (PreToolUse and
+# PermissionRequest).
+ask_once() {
+  once "q.$(printf '%s|%s' "$SID" "${QTEXT:-$DESC}" | cksum | awk '{ print $1 }')"
+}
+
 # --- main ----------------------------------------------------------------
 
 case $AGENT in
@@ -1266,27 +1276,261 @@ fi
 # (Grok sends camelCase and snake_case, Antigravity camelCase).
 case $AGENT in
   claude | opencode)
-    WANT='hook_event_name,notification_type,tool_name,tool_input.command,tool_input.file_path,tool_input.url,tool_input.description,tool_input.questions.0.question,session_id,cwd,message,last_assistant_message,error,transcript_path,context_tokens,model,to_model'
+    # background_tasks (Claude Code Stop): the first ten tasks.
+    # session_crons (the first five): scheduled wake-ups. prompt/source tell
+    # who started a turn; stop_hook_active and is_interrupt are flags.
+    WANT='hook_event_name,notification_type,tool_name,tool_input.command,tool_input.file_path,tool_input.url,tool_input.description,tool_input.questions.0.question,session_id,cwd,message,last_assistant_message,error,transcript_path,context_tokens,model,to_model,prompt,source,stop_hook_active,is_interrupt'
+    for i in 0 1 2 3 4 5 6 7 8 9; do WANT=$WANT,background_tasks.$i.id,background_tasks.$i.type,background_tasks.$i.description,background_tasks.$i.command; done
+    for i in 0 1 2 3 4; do WANT=$WANT,session_crons.$i.id,session_crons.$i.schedule,session_crons.$i.prompt; done
     ;;
   codex)
-    WANT='hook_event_name,tool_name,tool_input.command,tool_input.file_path,tool_input.description,session_id,cwd,last_assistant_message,transcript_path'
+    WANT='hook_event_name,tool_name,tool_input.command,tool_input.file_path,tool_input.description,session_id,cwd,last_assistant_message,transcript_path,stop_hook_active'
     ;;
   codex-notify) WANT='type,cwd,last-assistant-message,input-messages.0' ;;
   gemini)
-    WANT='hook_event_name,notification_type,message,details.type,details.command,details.rootCommand,details.filePath,details.fileName,details.toolName,details.serverName,details.urls.0,details.prompt,prompt_response,session_id,cwd,transcript_path'
+    WANT='hook_event_name,notification_type,message,details.type,details.command,details.rootCommand,details.filePath,details.fileName,details.toolName,details.serverName,details.urls.0,details.prompt,prompt_response,session_id,cwd,transcript_path,stop_hook_active'
     ;;
   agy)
     WANT='conversationId,workspacePaths.0,toolCall.name,toolCall.args.CommandLine,toolCall.args.Cwd,toolCall.args.questions.0.question,toolCall.args.Action,toolCall.args.Target,terminationReason,error,fullyIdle'
     ;;
   grok)
-    WANT='hook_event_name,hookEventName,notificationType,sessionId,cwd,message,lastAssistantMessage,error,reason,promptId,timestamp'
+    # backgroundTasks (Grok's Stop, camelCase): the first ten tasks.
+    # sessionCrons (the first five): scheduled wake-ups; a prompt id that is
+    # not a person's marks a turn Grok started itself.
+    WANT='hook_event_name,hookEventName,notificationType,sessionId,cwd,message,lastAssistantMessage,error,reason,promptId,timestamp,prompt,stop_hook_active'
+    for i in 0 1 2 3 4 5 6 7 8 9; do WANT=$WANT,backgroundTasks.$i.id,backgroundTasks.$i.type,backgroundTasks.$i.description,backgroundTasks.$i.command; done
+    for i in 0 1 2 3 4; do WANT=$WANT,sessionCrons.$i.id,sessionCrons.$i.schedule,sessionCrons.$i.prompt; done
     ;;
 esac
 
 EVENT='' NTYPE='' TOOL='' DETAIL='' DESC='' SID='' CWD='' LAST='' ERR='' QTEXT='' FIRSTIN='' NTYPE2=''
 TPATH='' CTXTOK='' MODEL='' GTYPE='' FULLYIDLE='' TERMREASON='' EXTRA='' GKEY='' REASON=''
+PROMPT='' SRC='' STOPACT='' ISINT='' PROMPTID='' XFLAGS=''
+BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_SEQ=''
+BG_SVC=0 BG_IDMAP='' BG_KEEP='' BG_SHELLS='' BG_IDS='' BG_NOID=0 BG_M=''
+CRON_N=0 CRON_SCHED='' CRON_SUMS=''
+
+# --- what the hook reads from the text of a turn ------------------------------
+
+# A shell task whose command looks like a service (a dev server, a watcher, a
+# follower) is not something the agent waits for: it never ends and never
+# wakes the agent. exit 0 when the command (one JSON-escaped line on stdin) is
+# one. One `svc(pattern, exception)` per line, matched against the lowercased
+# command with ; & | ( ) and JSON escapes turned into single spaces and one
+# space at each end; add a line to teach it another.
+SVC_AWK='
+function svc(re, ex) { if (c ~ re && (ex == "" || c !~ ex)) found = 1 }
+{
+  c = tolower($0)
+  gsub(/\\[nrt"]/, " ", c)
+  gsub(/[;&|()\t]/, " ", c)
+  c = " " c " "
+  gsub(/  +/, " ", c)
+  svc(" (npm|pnpm|yarn|bun)( run| run-script)? (dev|start|serve|preview|watch)(:[a-z0-9_-]+)? ", "")
+  svc(" next (dev|start) ", "")
+  svc(" vite (dev |serve |preview |-)| vite $", "")
+  svc(" nodemon ", "")
+  svc(" python[0-9.]* -m http[.]server ", "")
+  svc("manage[.]py runserver ", "")
+  svc("[ /]rails (s|server) ", "")
+  svc("[ /]flask ([^ ]+ )*run ", "")
+  svc("[ /]uvicorn ", "")
+  svc("docker[ -]compose ([^ ]+ )*up ", " (-d|--detach) ")
+  svc(" tail ([^ ]+ )*(-[a-z]*f[a-z]*|--follow[^ ]*) ", "")
+  svc(" --watch[a-z-]*(=[^ ]*)? ", "")
+  svc(" -w ", " (grep|egrep|fgrep|rg|wc|ls|sort|diff|cut|tr|sed|awk|ps|date|stat|find|git|npm|pnpm|yarn|npx) ")
+  svc(" watch ", "")
+}
+END { exit !found }'
+
+is_service_cmd() { printf '%s\n' "$1" | awk "$SVC_AWK" 2>/dev/null; }
+
+# Does the last message of a turn ask the user something? exit 0 if so (one
+# JSON-escaped line on stdin). Only the end of the message counts: its last
+# two sentences, fenced code blocks left out. A sentence asks when it ends
+# with ? or a full-width question mark, ends with a Korean request or question ending
+# (table KO), or contains an English ask (table EN). This is a reading of text,
+# not a protocol: a wrong guess costs one extra alert, or the answer to come
+# with the final report. Korean is written as octal escapes to keep this file
+# ASCII; the endings, in order: kkayo (halkkayo, deurilkkayo), nikka
+# (hasigetseumnikka), hasigesseoyo, juseyo (allyeo juseyo, golla juseyo,
+# hwaginhae juseyo), jusigesseoyo, jusilraeyo, nayo (itnayo), ingayo,
+# baramnida, hallaeyo.
+ASK_AWK='
+BEGIN {
+  nk = split("\352\271\214\354\232\224|\353\213\210\352\271\214|\355\225\230\354\213\234\352\262\240\354\226\264\354\232\224|\354\243\274\354\204\270\354\232\224|\354\243\274\354\213\234\352\262\240\354\226\264\354\232\224|\354\243\274\354\213\244\353\236\230\354\232\224|\353\202\230\354\232\224|\354\235\270\352\260\200\354\232\224|\353\260\224\353\236\215\353\213\210\353\213\244|\355\225\240\353\236\230\354\232\224", KO, "|")
+  ne = split("should i|shall i|would you like|do you want|let me know which|let me know whether|want me to|please confirm|please choose|please select|please tell me", EN, "|")
+  FWQ = "\357\274\237"; FWE = "\357\274\201"; IDEO = "\343\200\202"
+  nc = split("\343\200\215|\343\200\217|\342\200\235|\342\200\231|\357\274\211|" FWQ "|" FWE "|" IDEO, CL, "|")
+}
+function hexv(h,   k, v, c) {
+  v = 0; h = tolower(h)
+  if (length(h) != 4) return -1
+  for (k = 1; k <= 4; k++) {
+    c = index("0123456789abcdef", substr(h, k, 1))
+    if (c == 0) return -1
+    v = v * 16 + c - 1
+  }
+  return v
+}
+function u8(cp) {
+  if (cp < 32) return " "
+  if (cp < 128) return sprintf("%c", cp)
+  if (cp < 2048) return sprintf("%c%c", 192 + int(cp / 64), 128 + cp % 64)
+  if (cp >= 55296 && cp <= 57343) return " "
+  return sprintf("%c%c%c", 224 + int(cp / 4096), 128 + int(cp / 64) % 64, 128 + cp % 64)
+}
+function unesc(s,   out, p, c, cp) {
+  out = ""
+  while ((p = index(s, "\\")) > 0) {
+    out = out substr(s, 1, p - 1)
+    c = substr(s, p + 1, 1)
+    if (c == "n" || c == "r") { out = out "\n"; s = substr(s, p + 2) }
+    else if (c == "t") { out = out " "; s = substr(s, p + 2) }
+    else if (c == "u") {
+      cp = hexv(substr(s, p + 2, 4))
+      if (cp < 0) { out = out " "; s = substr(s, p + 2) }
+      else { out = out u8(cp); s = substr(s, p + 6) }
+    } else { out = out c; s = substr(s, p + 2) }
+  }
+  return out s
+}
+function ends(s, suf) { return length(s) >= length(suf) && substr(s, length(s) - length(suf) + 1) == suf }
+# The sentence without trailing space, markup, quotes and punctuation.
+function core(s,   k, again, t) {
+  again = 1
+  while (again && length(s) > 0) {
+    again = 0
+    t = substr(s, length(s))
+    if (index(" \t\n*_`\"\047)]}>.,;:!?", t)) { s = substr(s, 1, length(s) - 1); again = 1; continue }
+    for (k = 1; k <= nc; k++) if (ends(s, CL[k])) { s = substr(s, 1, length(s) - length(CL[k])); again = 1; break }
+  }
+  return s
+}
+function add(x, term,   y) {
+  y = x; sub(/^[ \t\n]+/, "", y); sub(/[ \t\n]+$/, "", y)
+  if (!(y ~ /[A-Za-z0-9\200-\377]/)) return
+  if (y ~ /^[0-9]+[.)]?$/) return
+  m++; S[m] = y; T[m] = term
+}
+function asks(k,   x, cr, low, j) {
+  x = S[k]
+  if (T[k] == "?" || T[k] == FWQ) return 1
+  cr = core(x)
+  for (j = 1; j <= nk; j++) if (ends(cr, KO[j])) return 1
+  low = " " tolower(cr) " "
+  for (j = 1; j <= ne; j++) if (index(low, " " EN[j] " ")) return 1
+  return 0
+}
+NR == 1 {
+  s = $0; len = length(s); fence = 0; W = 2000
+  if (len > W) {
+    head = substr(s, 1, len - W); s = substr(s, len - W + 1)
+    p = index(s, "\\n")
+    if (p > 0) { head = head substr(s, 1, p + 1); s = substr(s, p + 2) }
+    fence = gsub(/```/, "&", head) % 2
+  }
+  n = split(unesc(s), L, "\n"); txt = ""
+  for (i = 1; i <= n; i++) {
+    tr = L[i]; sub(/^[ \t]+/, "", tr)
+    if (substr(tr, 1, 3) == "```") { fence = !fence; continue }
+    if (!fence) txt = txt L[i] "\n"
+  }
+  m = 0; cur = ""; tl = length(txt)
+  for (i = 1; i <= tl; i++) {
+    c = substr(txt, i, 1); cur = cur c; term = ""
+    if (c == "\n") { add(cur, ""); cur = "" }
+    else if (c == "?" || c == "!") { nx = substr(txt, i + 1, 1); if (!(nx ~ /[A-Za-z0-9]/)) term = c }
+    else if (c == ".") { nx = substr(txt, i + 1, 1); if (nx == "" || nx == " " || nx == "\n") term = c }
+    else if (c >= "\200") {
+      t3 = substr(txt, i, 3)
+      if (t3 == FWQ || t3 == FWE || t3 == IDEO) { term = t3; cur = cur substr(txt, i + 1, 2); i += 2 }
+    }
+    if (term != "") { add(cur, term); cur = "" }
+  }
+  add(cur, "")
+  for (k = m; k >= 1 && k > m - 2; k--) if (asks(k)) exit 0
+  exit 1
+}'
+
+ask_detect() { [ -n "$1" ] && printf '%s\n' "$1" | awk "$ASK_AWK" 2>/dev/null; }
+
+# Checksum of the start of a prompt, to compare a scheduled prompt (Stop's
+# session_crons) with the prompt a later UserPromptSubmit carries.
+prompt_sum() { printf '%s' "$(json_trim "$1" 200 800)" | cksum | awk '{ print $1 }'; }
+
+# One field of a background task (Stop `background_tasks`, Grok
+# `backgroundTasks`), in document order: a task's id and type come before its
+# description and command. Claude Code 2.1.316 type labels: work that
+# reports back and wakes the agent (subagent, workflow, cloud session,
+# MCP task: they end), work that may run for good (shell, monitor, an idle
+# teammate; and labels we do not know), and its own housekeeping that never
+# wakes it (dream, auto-mode scan, memory import, memory save: not counted).
+# A shell whose command is_service_cmd counts in BG_SVC; BG_KEEP lists the
+# counted tasks and BG_IDMAP the ids by index (bg_ids_finish).
+bg_field() { # path=value
+  bk=${1#*.}
+  bk=${bk%%.*}
+  bf=${1#*.*.}
+  bf=${bf%%=*}
+  bv=${1#*=}
+  case $bf in
+    id) case $bv in '' | *[!A-Za-z0-9_-]*) ;; *) BG_IDMAP="$BG_IDMAP $bk=$bv" ;; esac ;;
+    type)
+      case $bv in
+        dream | 'auto-mode scan' | 'memory import' | 'memory save') return 0 ;;
+        subagent | workflow | 'cloud session' | 'MCP task') BG_FINITE=$((BG_FINITE + 1)) ;;
+        shell) BG_SHELLS="$BG_SHELLS $bk" ;;
+      esac
+      BG_N=$((BG_N + 1))
+      BG_KEEP="$BG_KEEP $bk"
+      [ -n "$BG_PICK" ] || BG_PICK=$bk BG_TYPE=$bv
+      ;;
+    description) [ "$bk" = "$BG_PICK" ] && [ -z "$BG_DESC" ] && BG_DESC=$bv ;;
+    command)
+      [ "$bk" = "$BG_PICK" ] && [ -z "$BG_CMD" ] && BG_CMD=$bv
+      case "$BG_SHELLS " in *" $bk "*) is_service_cmd "$bv" && BG_SVC=$((BG_SVC + 1)) ;; esac
+      ;;
+  esac
+  return 0
+}
+
+# The ids of the counted tasks in BG_IDS; BG_NOID counts those with none.
+bg_ids_finish() {
+  BG_IDS='' BG_NOID=0
+  for bk in $BG_KEEP; do
+    bi=''
+    for bp in $BG_IDMAP; do
+      [ "${bp%%=*}" = "$bk" ] && bi=${bp#*=}
+    done
+    if [ -n "$bi" ]; then BG_IDS="$BG_IDS $bi"; else BG_NOID=$((BG_NOID + 1)); fi
+  done
+}
+
+# One field of a scheduled wake-up (Stop `session_crons`, Grok
+# `sessionCrons`): how many, the first one's schedule, and a checksum of each
+# prompt (the prompt of the turn it starts is that text).
+cron_field() { # path=value
+  ck=${1#*.}
+  ck=${ck%%.*}
+  cf=${1#*.*.}
+  cf=${cf%%=*}
+  cv=${1#*=}
+  [ $((ck + 1)) -gt "$CRON_N" ] && CRON_N=$((ck + 1))
+  case $cf in
+    schedule) [ "$ck" = 0 ] && CRON_SCHED=$cv ;;
+    prompt) [ -n "$cv" ] && CRON_SUMS="$CRON_SUMS $(prompt_sum "$cv")" ;;
+  esac
+  return 0
+}
 while IFS= read -r kv; do
   case $kv in
+    background_tasks.[0-9].* | backgroundTasks.[0-9].*) bg_field "$kv" ;;
+    session_crons.[0-9].* | sessionCrons.[0-9].*) cron_field "$kv" ;;
+    prompt=*) PROMPT=${kv#*=} ;;
+    source=*) SRC=${kv#*=} ;;
+    stop_hook_active=*) STOPACT=${kv#*=} ;;
+    is_interrupt=*) ISINT=${kv#*=} ;;
     # Grok sends both: hook_event_name has Claude's PascalCase names.
     hook_event_name=*) EVENT=${kv#*=} ;;
     hookEventName=*) [ -n "$EVENT" ] || EVENT=${kv#*=} ;;
@@ -1315,7 +1559,8 @@ while IFS= read -r kv; do
     fullyIdle=*) FULLYIDLE=${kv#*=} ;;
     terminationReason=*) TERMREASON=${kv#*=} ;;
     reason=*) REASON=${kv#*=} ;;
-    promptId=* | timestamp=*) GKEY=$GKEY.${kv#*=} ;;
+    promptId=*) PROMPTID=${kv#*=}; GKEY=$GKEY.$PROMPTID ;;
+    timestamp=*) GKEY=$GKEY.${kv#*=} ;;
   esac
 done <<EOF
 $(printf '%s' "$INPUT" | awk -v want="$WANT" "$JSON_GET" 2>/dev/null)
@@ -1329,6 +1574,7 @@ if [ "$AGENT" = grok ]; then
     notification) EVENT=Notification ;;
     stop) EVENT=Stop ;;
     stop_failure) EVENT=StopFailure ;;
+    user_prompt_submit) EVENT=UserPromptSubmit ;;
   esac
 fi
 SID=$(printf '%s' "$SID" | tr -c 'A-Za-z0-9_-' '_' | cut -c1-80)
@@ -1337,13 +1583,238 @@ SID=$(printf '%s' "$SID" | tr -c 'A-Za-z0-9_-' '_' | cut -c1-80)
 CWD_BASE=$(json_trim "${CWD:-$EXTRA}" 64 256 base)
 FP=$(printf '%s\t%s' "$TOOL" "$(json_trim "$DETAIL" 200 800)" | cksum | awk '{ print $1 }')
 
+# A `done` waits done_delay seconds (done_later) in case another Stop hook
+# keeps the agent going; any later event of the session ends that wait. Only
+# the turn-end events that send a `done` themselves leave it be (a newer one
+# replaces it).
+case $AGENT:$EVENT in
+  claude:Stop | codex:Stop | grok:Stop | gemini:AfterAgent) ;;
+  *) [ -f "$RUN_DIR/$SID.pend" ] && rm -f "$RUN_DIR/$SID.pend" 2>/dev/null ;;
+esac
+
 # Lets a waiting permission hook see that the agent moved on. A new turn
-# starts the file over, so it holds at most one turn of tool calls.
+# starts the file over, so it holds at most one turn of tool calls, and ends
+# a background pause (bg_pause), taking back its OSC 7501 record.
 note() { # turn | tool fingerprint
   if [ "$1" = turn ]; then
     printf '%s turn -\n' "$(date +%s)" >"$RUN_DIR/$SID.res" 2>/dev/null
+    rm -f "$RUN_DIR/$SID.goal" 2>/dev/null
+    if [ -f "$RUN_DIR/$SID.bg" ]; then
+      [ "$(sed -n 2p "$RUN_DIR/$SID.bg" 2>/dev/null)" = 7501 ] &&
+        BG_SEQ="\\u001b]7501;state=clear:id=$BG_ID\\u0007"
+      rm -f "$RUN_DIR/$SID.bg" 2>/dev/null
+    fi
   else
     printf '%s tool %s\n' "$(date +%s)" "$2" >>"$RUN_DIR/$SID.res" 2>/dev/null
+  fi
+}
+
+# Claude Code ended a turn while work it started still runs (Stop
+# `background_tasks`, Claude Code 2.1.145+: shells, subagents, monitors,
+# workflows). It takes the turn up again when that work reports back, so the
+# session is not done: no `done` event, a `background` state instead, and no
+# idle question until the next turn note. $RUN_DIR/$SID.bg holds the state's
+# message meanwhile, and `7501` on its second line when the hook wrote the
+# OSC 7501 record below.
+#
+# Claude Code 2.1.295+ reports itself through OSC 7501 and SimpleTerm then
+# follows that, not `simpleterm:state`. For its own turn it reports `done`
+# (it counts background subagents as working, shells and monitors not), so
+# the hook adds a `working` record of its own, id $BG_ID: SimpleTerm shows the
+# most urgent record of a terminal. Claude Code runs Stop hooks before it
+# reports the turn's end, so the record is there first. Only where Claude
+# Code speaks OSC 7501 itself: elsewhere a record of the hook's would make
+# SimpleTerm stop reading `simpleterm:state`.
+BG_ID=simpleterm-bg
+bg_paused() { [ -f "$RUN_DIR/$SID.bg" ]; }
+
+claude_speaks_7501() {
+  [ -z "${TMUX:-}" ] && [ -z "${STY:-}" ] || return 1
+  case ${CLAUDE_CODE_DISABLE_TERMINAL_TITLE:-} in '' | 0 | false | FALSE | False) ;; *) return 1 ;; esac
+  f=$(input_file "$TPATH")
+  [ -n "$f" ] || return 1
+  # Each transcript entry carries the version that wrote it.
+  tail -c 65536 "$f" 2>/dev/null | awk '
+    { s = $0; while (match(s, /"version"[ ]*:[ ]*"[0-9][0-9.]*"/)) { v = substr(s, RSTART, RLENGTH - 1); s = substr(s, RSTART + RLENGTH); sub(/.*"/, "", v) } }
+    END { n = split(v, x, "."); exit !(n >= 3 && (x[1] > 2 || (x[1] == 2 && (x[2] > 1 || (x[2] == 1 && x[3] >= 295))))) }'
+}
+
+# Text (JSON-escaped) as standard base64 for an OSC 7501 field; nothing for
+# escapes other than \" \\ \/ or without openssl.
+b64_text() {
+  t=$(printf '%s\n' "$1" | awk '{
+    s = $0; out = ""
+    for (i = 1; i <= length(s); i++) {
+      c = substr(s, i, 1)
+      if (c == "\\") {
+        e = substr(s, i + 1, 1)
+        if (e != "\\" && e != "/" && e != "\"") exit 1
+        c = e; i++
+      }
+      out = out c
+    }
+    print out
+  }' 2>/dev/null) || return 0
+  command -v openssl >/dev/null 2>&1 || return 0
+  printf '%s' "$t" | openssl base64 -A 2>/dev/null
+}
+
+# The first counted task (or, with only scheduled wake-ups, the first
+# schedule) as a short line for the badge and the pause note: BG_M.
+bg_summary() {
+  if [ "$BG_N" -gt 0 ]; then
+    BG_M=${BG_DESC:-$BG_CMD}
+    [ -n "$BG_M" ] || BG_M=task
+    [ -n "$BG_TYPE" ] && BG_M="$BG_TYPE: $BG_M"
+    if [ "$BG_N" -ge 10 ]; then
+      BG_M="$BG_M (+9 or more)"
+    elif [ "$BG_N" -gt 1 ]; then
+      BG_M="$BG_M (+$((BG_N - 1)) more)"
+    fi
+  else
+    BG_M="scheduled: ${CRON_SCHED:-wake-up}"
+    [ "$CRON_N" -gt 1 ] && BG_M="$BG_M (+$((CRON_N - 1)) more)"
+  fi
+  BG_M=$(json_trim "$BG_M" 80 320)
+}
+
+# The turn ended and the agent waits for background work or a schedule. Not
+# done: the badge says `background` (note in $SID.bg), unless the last
+# message asks the user something (pause ask): then the user is told, as
+# `question`, the badge says `waiting`, and Claude Code 2.1.295+ gets a
+# `blocked` OSC 7501 record (kind question) instead of the `working` one.
+bg_pause() {
+  bg_summary
+  flag=''
+  if [ "$AGENT" = claude ] && [ "${SIMPLETERM:-}" = 1 ] && claude_speaks_7501; then
+    flag=7501
+    if [ "${1:-}" = ask ]; then
+      e=$(b64_text "$(json_trim "$LAST" 200 800)")
+      case $e in *[!A-Za-z0-9+/=]*) e='' ;; esac
+      BG_SEQ="\\u001b]7501;state=blocked:id=$BG_ID:kind=question${e:+:msg=$e}\\u0007"
+    else
+      e=$(b64_text "$BG_M")
+      case $e in *[!A-Za-z0-9+/=]*) e='' ;; esac
+      BG_SEQ="\\u001b]7501;state=working:id=$BG_ID${e:+:msg=$e}\\u0007"
+    fi
+  fi
+  printf '%s\n%s\n%s\n' "$BG_M" "$flag" "$RID" >"$RUN_DIR/$SID.bg" 2>/dev/null
+  if [ "${1:-}" = ask ]; then
+    MSG=$(json_trim "$LAST" 200 800)
+    send_bg question
+    print_state waiting "$LAST"
+    return 0
+  fi
+  bgm=$BG_M # print_state reuses m
+  print_state background "$bgm"
+  [ "$BG_N" -gt 0 ] && [ "$BG_FINITE" -eq 0 ] && bg_later "$RID" "$bgm"
+  return 0
+}
+
+# Only work that may run for good is left (a dev server, a monitor, an idle
+# teammate, or agy's own `fullyIdle: false`): it may never wake the agent,
+# and then nothing else would come. After bg_done_after seconds (default
+# 600) of the same pause, `done` goes once, saying what still runs. A new
+# turn or another pause ends the wait. The event is made then (fresh rid and
+# time: a link refuses events more than 5 minutes old).
+bg_later() { # token what
+  [ -n "$LINKS" ] || return 0
+  w=$(conf_int bg_done_after 600)
+  [ "$w" -gt 0 ] || return 0
+  MSG=$(done_msg "$2")
+  trap '' HUP
+  (
+    sleep "$w"
+    [ "$(sed -n 3p "$RUN_DIR/$SID.bg" 2>/dev/null)" = "$1" ] || exit 0
+    rm -f "$RUN_DIR/$SID.bg" 2>/dev/null
+    later_send done
+  ) </dev/null >/dev/null 2>&1 &
+}
+
+# The last message and what still runs, as the text of a `done`: the suffix
+# is kept whole and the message gives way (200 characters, 800 bytes in all).
+done_msg() { # what
+  dm=$(json_trim "(still running in the background: $1)" 120 480)
+  dr=$((200 - ${#dm} - 1))
+  if [ -n "$LAST" ] && [ "$dr" -gt 20 ]; then
+    printf '%s %s' "$(json_trim "$LAST" "$dr" $((800 - ${#dm} - 1)))" "$dm"
+  else
+    printf '%s' "$dm"
+  fi
+}
+
+# Sends `done` (text MSG) done_delay seconds from now (default 3; 0: at once)
+# unless something of the session happens first: another Stop hook may have
+# kept the agent going, and then its next event (or Stop) comes within
+# moments. The event is made then (fresh rid and time).
+done_later() {
+  [ -n "$LINKS" ] || return 0
+  dw=$(conf_int done_delay 3)
+  if [ "$dw" -le 0 ] || ! printf '%s\n' "$RID" >"$RUN_DIR/$SID.pend" 2>/dev/null; then
+    send_bg done
+    return 0
+  fi
+  trap '' HUP
+  (
+    sleep "$dw"
+    [ "$(cat "$RUN_DIR/$SID.pend" 2>/dev/null)" = "$RID" ] || exit 0
+    rm -f "$RUN_DIR/$SID.pend" 2>/dev/null
+    later_send done
+  ) </dev/null >/dev/null 2>&1 &
+}
+
+later_send() { # ev
+  TS=$(date +%s)
+  NOW=$TS
+  is_uint "$TS" || TS=0
+  RID=$(rand_hex 8)
+  is_hex "$RID" 16 || return 0
+  send_bg "$1"
+}
+
+# Codex `/goal` (on by default since 0.16x): while a goal is active Codex
+# starts the next turn itself, and each turn ends with a Stop. The rollout
+# (transcript) records `thread_goal_updated` with the goal's status, and the
+# model ends a goal with an `update_goal` call; the turns between are not
+# done. Measured with Codex 0.165.0.
+codex_goal_active() {
+  f=$(input_file "$TPATH")
+  [ -n "$f" ] || return 1
+  awk '
+    /"type":"thread_goal_updated"/ { active = ($0 ~ /"status":"active"/); called = 0; next }
+    /"name":"update_goal"/ { called = 1 }
+    END { exit !(active && !called) }' "$f" 2>/dev/null
+}
+
+# A goal can also end without a trace in the rollout (blocked after an
+# error, a usage or token budget limit, `/goal clear`), and then no next
+# turn starts. Measured: Codex starts a goal's next turn within milliseconds
+# (task_started). If none started codex_goal_check seconds (default 5) after
+# this Stop, the turn was the last: `done` goes then.
+codex_goal_later() {
+  [ -n "$LINKS" ] || return 0
+  off=$(wc -c <"$f" 2>/dev/null | tr -d ' ')
+  is_uint "$off" || return 0
+  w=$(conf_int codex_goal_check 5)
+  MSG=$(json_trim "$LAST" 200 800)
+  printf '%s\n' "$RID" >"$RUN_DIR/$SID.goal" 2>/dev/null
+  trap '' HUP
+  (
+    sleep "$w"
+    [ "$(cat "$RUN_DIR/$SID.goal" 2>/dev/null)" = "$RID" ] || exit 0
+    tail -c +$((off + 1)) "$f" 2>/dev/null | awk '/"type":"task_started"/ { found = 1 } END { exit !found }' && exit 0
+    rm -f "$RUN_DIR/$SID.goal" 2>/dev/null
+    later_send done
+  ) </dev/null >/dev/null 2>&1 &
+}
+
+# The status of a running turn: `background` while a paused session's
+# background subagents run tools, `running` otherwise.
+print_running() {
+  if bg_paused; then
+    print_state background "$(head -c 400 "$RUN_DIR/$SID.bg" 2>/dev/null | head -n 1)"
+  else
+    print_state running
   fi
 }
 
@@ -1353,13 +1824,127 @@ turn_end() {
   find "$RUN_DIR" -type f -mtime +0 -exec rm -f {} + 2>/dev/null
 }
 
+# --- who started a turn, and what ran before it ------------------------------
+
+# Sets PROMPT_USER: 1 if a person typed the prompt (or we cannot tell), 0 if
+# the agent started the turn itself: background work reporting back, a
+# scheduled wake-up. Claude Code 2.1.3xx names it in UserPromptSubmit
+# `source` (user and sdk are people; system, loop_wakeup, schedule_wakeup and
+# poll_event are not); where `source` is missing (2.1.316 sends none) a
+# <task-notification> or <agent-message> prompt, the /loop sentinel, or the
+# prompt of a wake-up listed at the last Stop (session_crons) says so. Grok
+# Build has no such field: the prompt id of a turn it starts itself begins
+# with a fixed word (task-completed-, scheduler-fired-, ...; static, from the
+# 1.0.70 binary), a person's is a UUID.
+PROMPT_USER=1
+prompt_origin() {
+  PROMPT_USER=1
+  if [ "$AGENT" = grok ]; then
+    case $PROMPTID in
+      task-completed-* | bash-completed-* | monitor-completed-* | subagent-completed-* | workflow-completed-* | \
+        parent-agent-message-* | parent-message-* | notifications-* | goal-summary-* | goal-classifier-nudge-* | \
+        plan-resume-* | scheduler-fired-*) PROMPT_USER=0 ;;
+    esac
+    return 0
+  fi
+  case $SRC in
+    user | sdk) ;;
+    '')
+      case $PROMPT in
+        '<task-notification>'* | '<agent-message '* | '<<autonomous-loop'*) PROMPT_USER=0 ;;
+        '') ;;
+        *)
+          if [ -f "$RUN_DIR/$SID.crons" ]; then
+            case " $(cat "$RUN_DIR/$SID.crons" 2>/dev/null) " in *" $(prompt_sum "$PROMPT") "*) PROMPT_USER=0 ;; esac
+          fi
+          ;;
+      esac
+      ;;
+    *) PROMPT_USER=0 ;;
+  esac
+}
+
+# $SID.turn: line 1 `user` or `auto` (who started this turn), line 2 the ids
+# of the background tasks that already ran when it started ($SID.stopids, the
+# last Stop's list), for the Stop that ends it.
+turn_mark() {
+  tm_ids=''
+  [ -f "$RUN_DIR/$SID.stopids" ] && IFS= read -r tm_ids <"$RUN_DIR/$SID.stopids"
+  if [ "$PROMPT_USER" = 1 ]; then tm_who=user; else tm_who=auto; fi
+  printf '%s\n%s\n' "$tm_who" "$tm_ids" >"$RUN_DIR/$SID.turn" 2>/dev/null
+}
+
+# True if every counted task was already running before the turn began.
+bg_all_old() {
+  [ "$BG_N" -gt 0 ] && [ "$BG_NOID" -eq 0 ] || return 1
+  for bi in $BG_IDS; do
+    case " $PREV_IDS " in *" $bi "*) ;; *) return 1 ;; esac
+  done
+  return 0
+}
+
+# A `done` for the turn that just ended ($1: what still runs, if anything).
+stop_done() {
+  if [ -n "${1:-}" ]; then MSG=$(done_msg "$1"); else MSG=$(json_trim "$LAST" 200 800); fi
+  [ "$STOPACT" = true ] && XFLAGS=',"stop_hook_active":true'
+  done_later
+  usage_report
+  print_state done
+  turn_end
+}
+
+# A Stop (Claude Code, Codex, Grok): done, or not yet. Not done while the
+# agent waits for work it started or for a schedule, unless
+#  - a person typed this turn and only work that ran before it is left (the
+#    answer to the person is not held back by an older task; scheduled
+#    turns and turns started by a task's report are not this),
+#  - only services are left (a dev server, a watcher: nothing the agent
+#    waits for), or
+#  - the last message asks the user something: then they are told (pause ask).
+# A turn the agent started itself while a schedule (/loop, cron) is set stays
+# quiet: `background` with "scheduled: ..."; the Stop that finds the
+# schedule gone is the done. TURN_USER defaults to 1 (a person) when the
+# turn's start was not seen.
+stop_flow() {
+  TURN_USER=1 PREV_IDS='' t1='' t2=''
+  if [ -f "$RUN_DIR/$SID.turn" ]; then
+    { IFS= read -r t1; IFS= read -r t2; } <"$RUN_DIR/$SID.turn"
+    [ "$t1" = auto ] && TURN_USER=0
+    PREV_IDS=$t2
+  fi
+  bg_ids_finish
+  printf '%s\n' "$BG_IDS" >"$RUN_DIR/$SID.stopids" 2>/dev/null
+  if [ "$CRON_N" -gt 0 ]; then
+    printf '%s\n' "$CRON_SUMS" >"$RUN_DIR/$SID.crons" 2>/dev/null
+  elif [ -f "$RUN_DIR/$SID.crons" ]; then
+    rm -f "$RUN_DIR/$SID.crons" 2>/dev/null
+  fi
+  if [ "$BG_N" -eq 0 ] && [ "$CRON_N" -eq 0 ]; then
+    stop_done
+    return 0
+  fi
+  if [ "$TURN_USER" = 1 ] && { [ "$BG_N" -eq 0 ] || bg_all_old; }; then
+    bg_summary
+    if [ "$BG_N" -gt 0 ]; then stop_done "$BG_M"; else stop_done; fi
+    return 0
+  fi
+  if [ "$BG_N" -gt 0 ] && [ "$BG_SVC" -eq "$BG_N" ] && { [ "$CRON_N" -eq 0 ] || [ "$TURN_USER" = 1 ]; }; then
+    bg_summary
+    stop_done "$BG_M"
+    return 0
+  fi
+  usage_report
+  if ask_detect "$LAST"; then bg_pause ask; else bg_pause; fi
+  turn_end
+}
+
 case $AGENT:$EVENT in
   claude:PermissionRequest | codex:PermissionRequest | opencode:PermissionRequest)
     if [ "$MODE" = signal ]; then
       print_state waiting "approve $TOOL: $DETAIL"
     elif [ "$TOOL" = AskUserQuestion ]; then
       MSG=$(json_trim "${QTEXT:-$DESC}" 200 800)
-      send_bg question
+      ask_once && send_bg question
     else
       d=$DETAIL
       [ "$TOOL" = apply_patch ] && d=${DESC:-patch}
@@ -1371,7 +1956,7 @@ case $AGENT:$EVENT in
   claude:PreToolUse)
     if [ "$TOOL" = AskUserQuestion ]; then
       MSG=$(json_trim "$QTEXT" 200 800)
-      send_bg question
+      ask_once && send_bg question
       print_state waiting
     fi
     ;;
@@ -1380,11 +1965,20 @@ case $AGENT:$EVENT in
     # wait (one relay event per agent wait). idle_prompt keeps the done badge.
     case $NTYPE in
       idle_prompt)
+        # Claude Code sends it 60 s after a turn while only background shells
+        # or monitors run: the work is not waiting for the user.
+        bg_paused && finish
         MSG=$(json_trim "$LAST" 200 800)
         send_bg question
         ;;
-      elicitation_dialog | elicitation_url_dialog | agent_needs_input)
+      elicitation_dialog | elicitation_url_dialog)
         print_state waiting
+        MSG=$(json_trim "$LAST" 200 800)
+        send_bg question
+        ;;
+      agent_needs_input)
+        # Another background session of the user's needs input, not this
+        # one: the alert stays, this tab's badge does not change.
         MSG=$(json_trim "$LAST" 200 800)
         send_bg question
         ;;
@@ -1392,10 +1986,18 @@ case $AGENT:$EVENT in
     ;;
   claude:UserPromptSubmit)
     note turn
+    prompt_origin
+    turn_mark
     usage_report
     print_state running
     ;;
   claude:PostToolUse | claude:PostToolUseFailure)
+    if [ "$EVENT" = PostToolUseFailure ] && [ "$ISINT" = true ]; then
+      # Esc during a tool call: the turn is over (no Stop follows).
+      note turn
+      print_state idle
+      finish
+    fi
     note tool "$FP"
     # Context grows with each tool call; look again every 20 seconds at most.
     t=$(cat "$RUN_DIR/$SID.ut" 2>/dev/null)
@@ -1403,7 +2005,7 @@ case $AGENT:$EVENT in
       printf '%s\n' "$NOW" >"$RUN_DIR/$SID.ut" 2>/dev/null
       usage_report
     fi
-    print_state running
+    print_running
     ;;
   claude:SessionStart | claude:PostCompact | claude:PostModelSwitch)
     usage_report
@@ -1413,11 +2015,13 @@ case $AGENT:$EVENT in
   claude:Stop | codex:Stop)
     note turn
     case $LAST in '{\"title\":'*) finish ;; esac
-    MSG=$(json_trim "$LAST" 200 800)
-    send_bg done
-    usage_report
-    print_state done
-    turn_end
+    if [ "$AGENT" = codex ] && codex_goal_active; then
+      usage_report
+      codex_goal_later
+      turn_end
+      finish
+    fi
+    stop_flow
     ;;
   claude:StopFailure)
     note turn
@@ -1446,8 +2050,19 @@ case $AGENT:$EVENT in
     send_bg question
     ;;
   gemini:AfterAgent)
-    MSG=$(json_trim "$LAST" 200 800)
-    send_bg done
+    case $LAST in
+      '[no response text]'*)
+        # What Gemini CLI passes when the turn produced no answer: an API
+        # error, a cancelled stream or a detected loop.
+        MSG=$(json_trim "no_response: the turn ended without an answer" 200 800)
+        send_bg error
+        ;;
+      *)
+        MSG=$(json_trim "$LAST" 200 800)
+        [ "$STOPACT" = true ] && XFLAGS=',"stop_hook_active":true'
+        done_later
+        ;;
+    esac
     usage_report
     turn_end
     ;;
@@ -1474,14 +2089,27 @@ case $AGENT:$EVENT in
   agy:Stop)
     # Only a fully idle agent is done (background tasks may still run).
     # Cancelling (Esc) sends no Stop at all.
+    note turn
     if [ -n "$ERR" ] && [ "$ERR" != null ]; then
       MSG=$(json_trim "${TERMREASON:-error}: $ERR" 200 800)
       send_bg error
     elif [ "$FULLYIDLE" = true ]; then
       MSG=''
       send_bg done
+    elif [ "$FULLYIDLE" = false ]; then
+      # Background commands, schedules or subagents still run; agy does not
+      # say which, so the wait is bounded as for a dev server.
+      BG_N=1
+      bg_pause
     fi
     turn_end
+    ;;
+  grok:UserPromptSubmit)
+    # Also the turn Grok starts itself when background work reports back
+    # (promptId task-completed-<id> or subagent-completed-<id>).
+    note turn
+    prompt_origin
+    turn_mark
     ;;
   grok:Notification)
     # Grok asks in its own prompt and takes no answer from a hook:
@@ -1489,7 +2117,8 @@ case $AGENT:$EVENT in
     # are alerts. The key includes the event's timestamp, the same in every
     # copy of one event.
     case $NTYPE in
-      permission_prompt | idle_prompt) ;;
+      permission_prompt) ;;
+      idle_prompt) bg_paused && finish ;;
       *) finish ;;
     esac
     once "$(printf '%s|%s|%s|%s|%s' "$EVENT" "$SID" "$NTYPE" "$GKEY" "$LAST" | cksum | awk '{ print $1 }')" || finish
@@ -1501,16 +2130,18 @@ case $AGENT:$EVENT in
     # shutdown); only end_turn ends a turn.
     [ "$EVENT" = Stop ] && [ -n "$REASON" ] && [ "$REASON" != end_turn ] && finish
     once "$(printf '%s|%s|%s|%s|%s' "$EVENT" "$SID" "$GKEY" "$ERR" "$LAST" | cksum | awk '{ print $1 }')" || finish
+    note turn
+    # Grok 1.0.70 lists work still in flight in backgroundTasks, as Claude
+    # Code does, and takes the turn up again when it reports back.
     if [ "$EVENT" = Stop ]; then
-      MSG=$(json_trim "$LAST" 200 800)
-      send_bg done
+      stop_flow
     else
       ev=error
       case $ERR in authentication_failed | oauth_org_not_allowed | cloud_credential_error) ev=auth ;; esac
       MSG=$(json_trim "$ERR: $LAST" 200 800)
       send_bg "$ev"
+      turn_end
     fi
-    turn_end
     ;;
   opencode:Notification)
     MSG=$(json_trim "$LAST" 200 800)
