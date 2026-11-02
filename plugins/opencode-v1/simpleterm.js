@@ -53,6 +53,10 @@ function runHook(event, cwd, waits, key) {
 
 export const SimpleTermAgentHooks = async ({ client, directory }) => {
   const waits = new Map();
+  // Sessions OpenCode reports busy. With background subagents (1.19,
+  // OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS) the parent goes idle while a
+  // child still works, and the child's report wakes the parent again.
+  const busy = new Set();
 
   async function session(id) {
     try {
@@ -63,8 +67,22 @@ export const SimpleTermAgentHooks = async ({ client, directory }) => {
     }
   }
 
+  async function busyChild(id) {
+    for (const other of [...busy]) {
+      if (other !== id && (await session(other)).parentID === id) return true;
+    }
+    return false;
+  }
+
   async function handle(event) {
     const p = event.properties || {};
+    if (event.type === "session.status" && p.sessionID) {
+      const type = p.status && p.status.type;
+      if (type === "busy" || type === "retry") {
+        busy.add(p.sessionID);
+        if (busy.size > 500) busy.delete(busy.values().next().value);
+      } else if (type === "idle") busy.delete(p.sessionID);
+    }
     switch (event.type) {
       // 1.19: permission.asked {id, sessionID, permission, patterns, metadata}
       // 1.0:  permission.updated {id, sessionID, type, pattern, title, metadata}
@@ -102,8 +120,10 @@ export const SimpleTermAgentHooks = async ({ client, directory }) => {
         return;
       }
       case "session.idle": {
+        busy.delete(p.sessionID);
         const info = await session(p.sessionID);
         if (info.parentID) return; // a subagent's session
+        if (await busyChild(p.sessionID)) return; // its report wakes this one
         await runHook(
           { hook_event_name: "Stop", session_id: p.sessionID, cwd: directory, last_assistant_message: String(info.title || "") },
           directory,

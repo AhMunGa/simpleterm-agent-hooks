@@ -24,6 +24,8 @@ const TYPES = [
   "session.execution.failed",
   "session.execution.interrupted",
   "form.created",
+  "shell.created",
+  "shell.exited",
 ];
 
 // Each project directory gets its own plugin instance and every instance sees
@@ -32,6 +34,11 @@ const seen = (globalThis.__simpletermSeen ??= new Set());
 // Which sessions are running and whose child each one is, as every instance
 // sees it (an event may be handled by any of them).
 const sessions = (globalThis.__simpletermSessions ??= { running: new Set(), parent: new Map() });
+// Background shells still running (shell id -> session id). A shell started
+// with `background: true` outlives the turn, and its exit starts the session
+// again (measured on 2.2.5: execution.succeeded 0.1 s after shell.created,
+// shell.exited 25 s later, then execution.started and .succeeded again).
+const shells = (globalThis.__simpletermShells ??= new Map());
 
 function firstSeen(id) {
   if (!id) return true;
@@ -50,6 +57,19 @@ function remember(set, value, max) {
 // session as running from session.execution.started until it ends).
 function track(event) {
   const d = event.data || {};
+  if (event.type === "shell.created") {
+    const info = d.info || {};
+    const owner = info.metadata && info.metadata.sessionID;
+    if (info.id && owner && info.status !== "exited") {
+      shells.set(info.id, owner);
+      if (shells.size > 500) shells.delete(shells.keys().next().value);
+    }
+    return;
+  }
+  if (event.type === "shell.exited") {
+    shells.delete(d.id);
+    return;
+  }
   const id = d.sessionID;
   if (!id) return;
   switch (event.type) {
@@ -125,6 +145,16 @@ async function parentOf(ctx, sessionID) {
   return parent;
 }
 
+// True if a background shell of the session or of a direct child was still
+// running (`open`, the owners taken when the event arrived): its exit wakes
+// that session again.
+async function hasOpenShell(ctx, sessionID, open) {
+  for (const owner of open) {
+    if (owner === sessionID || (await parentOf(ctx, owner)) === sessionID) return true;
+  }
+  return false;
+}
+
 // True if a direct child of the session was running (`running`, taken when
 // the event arrived). Its report wakes the session again, so the session is
 // not done yet; a grandchild reports to its own parent. The same check as the
@@ -145,7 +175,9 @@ export default {
 
     async function handle(event) {
       track(event);
-      const running = event.type === "session.execution.succeeded" ? [...sessions.running] : [];
+      const done = event.type === "session.execution.succeeded";
+      const running = done ? [...sessions.running] : [];
+      const open = done ? [...new Set(shells.values())] : [];
       const d = event.data || {};
       if (event.type === "permission.replied") {
         // Answered (in the terminal, or by us): stop waiting for a device.
@@ -192,6 +224,7 @@ export default {
           if (info.parentID) return; // a subagent's session
           const failed = event.type === "session.execution.failed";
           if (!failed && (await hasRunningChild(ctx, d.sessionID, running))) return;
+          if (!failed && (await hasOpenShell(ctx, d.sessionID, open))) return;
           const err = d.error || {};
           await runHook(
             failed

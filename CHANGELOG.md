@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.3.1 - 2026-11-02
+
+- **A turn that ends with background work in flight is not done**:
+  - **Claude Code**: a `Stop` whose `background_tasks` (2.1.145+) is not empty sends no `done` and
+    no idle question until the next turn (`UserPromptSubmit`, which also comes when the
+    background work reports back, `Stop`, `StopFailure`); the badge is
+    `simpleterm:state=background <first task>`. Measured on 2.1.316: the turn the background work
+    wakes ends with `background_tasks: []` and sends `done`. Claude Code 2.1.295+ reports `done`
+    for its own turn through OSC 7501 even then (it counts only background subagents as working),
+    so the hook adds an OSC 7501 `working` record `id=simpleterm-bg` (taken back at the next
+    turn) when the transcript names 2.1.295 or later, outside tmux and screen, and without
+    `CLAUDE_CODE_DISABLE_TERMINAL_TITLE`. A background subagent's tool calls keep the
+    `background` badge. Only work that reports back holds `done` back for good (subagent,
+    workflow, cloud session, MCP task); Claude Code's own housekeeping (dream, auto-mode scan,
+    memory import or save) is not counted; with only work that may run for good left (shell,
+    monitor, idle teammate) `done` comes once after `bg_done_after` seconds (default 600) of the
+    same pause, saying what still runs (made then: fresh rid and time).
+  - **Grok Build** (1.0.70, measured with a local model stub): the same for `backgroundTasks`;
+    `UserPromptSubmit` ends the pause.
+  - **Codex**: no `done` while a `/goal` is active (the rollout's last `thread_goal_updated` is
+    `active` and no `update_goal` call followed it); Codex starts each next turn itself. If no
+    next turn starts within `codex_goal_check` seconds (default 5), `done` goes then: a goal can
+    end blocked, on a limit or by `/goal clear` without a trace in the rollout.
+    Background terminals and subagents do not wake Codex, so their `Stop` stays done.
+  - **OpenCode 2.x** (2.2.5, measured with a local model stub): a background shell
+    (`shell {background: true}`) of the session or of a direct subagent holds back `done`
+    (`shell.created` / `shell.exited`); its exit starts the session again, and that turn's end is
+    done. Background subagents were already counted.
+  - **OpenCode 1.x** (1.19.5 with `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS`): no `done` while a
+    child session is busy (`session.status`); the child's report wakes the parent again.
+  - **Antigravity**: `done` only when fully idle, as before; `fullyIdle: false` now pauses the
+    same way (agy does not say what still runs, so the wait is bounded by `bg_done_after`).
+  - **Questions while waiting** (Claude Code, Grok Build): when the last message of a turn that
+    leaves background work or schedules asks the user something (last two sentences, fenced code
+    left out: `?`, a full-width `?`, a Korean request or question ending, an English ask), the
+    user gets a `question` alert with the message and the badge says `waiting`; Claude Code
+    2.1.295+ gets a `blocked` (kind `question`) OSC 7501 record `simpleterm-bg` instead of the
+    `working` one. The word lists are one table in the script.
+  - **Services are not waited for**: a background shell whose command looks like a service (`npm
+    run dev`, `next dev`, `vite`, `nodemon`, `python -m http.server`, `manage.py runserver`,
+    `rails s`, `flask run`, `uvicorn`, `docker compose up` without `-d`, `tail -f`, `--watch`,
+    `-w`, `watch`) sends `done` at once with `(still running in the background: ...)` instead of
+    after `bg_done_after`; the note is kept whole when the message is long.
+  - **A prompt you typed is answered**: every `Stop` records the ids of the running tasks; when a
+    person typed the prompt of the turn and only tasks that ran before it are left, the turn is a
+    report (`done` with the note). Turns started by a task's report or a schedule still wait. The
+    origin comes from `UserPromptSubmit` `source` (Claude Code, where sent), a
+    `<task-notification>`/`<agent-message>` prompt, the `/loop` sentinel or the prompt of a
+    listed schedule; Grok Build: the prompt id (`task-completed-`, `scheduler-fired-`, ...).
+  - **Loops and schedules are quiet**: with `session_crons` / `sessionCrons` set, the turns a
+    schedule starts send no `done` (badge `background`, `scheduled: ...`); typed turns, questions
+    and errors still alert, and the `Stop` that finds the schedule gone is the `done`.
+- **A `done` waits 3 seconds** (`done_delay`, 0 sends at once) and is cancelled by any newer event
+  of the session, so a Stop that another Stop hook blocks (the agent works on,
+  `stop_hook_active: true`) no longer sends a `done` before and another after (Claude Code, Codex,
+  Grok Build, Gemini CLI). A `done` of a `Stop` with `stop_hook_active: true` carries
+  `"stop_hook_active":true`.
+- Claude Code: one `AskUserQuestion` sends one `question` (`PreToolUse` and `PermissionRequest`
+  both reported it); `agent_needs_input` (another background session's) still alerts but no
+  longer changes this tab's badge; `PostToolUseFailure` with `is_interrupt` (Esc) sets the badge
+  idle, not running, and ends a background pause.
+- Gemini CLI: an `AfterAgent` with `[no response text]` (API error, cancelled stream, loop) sends
+  `error`, not `done`.
+
 ## 0.3.0 - 2026-10-29
 
 - More agents (#347):
