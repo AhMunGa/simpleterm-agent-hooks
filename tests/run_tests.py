@@ -877,7 +877,8 @@ def t_service_shells(s):
             and len(msg) <= 200, repr(msg))
     # The commands the table knows, and some it must leave alone.
     s.ctl("/_ctl/reset", {})
-    # One table (SVC_AWK): a command is a service only at the command position and when (tool, subcommand) is known.
+    # One table (SVC_AWK): a command is a service only at the command position of the last list element and when
+    # (tool, subcommand) is known; when in doubt it is not one (a wrong service sends an early done).
     for cmd, service in (
             ('npm run dev -- --port 3000', True), ('pnpm run watch', True), ('next dev', True),
             ('python3 -m http.server 8000', True), ('python manage.py runserver 0.0.0.0:8000', True), ('bin/rails server', True),
@@ -892,16 +893,17 @@ def t_service_shells(s):
             ('npx vite | tee vite.log', True), ('npx tsc -w', True), ('npx webpack -w', True),
             ('npx tailwindcss -i a.css -o b.css -w', True), ('docker logs -f api', True), ('kubectl logs -f web-1', True),
             ('journalctl -f', True), ('vitest run', False), ('npx vitest --run', False), ('docker logs api', False),
-            ('vitest', False), ('npx vitest', False), ('npx vitest -w', True), ('npx vitest --watch', True), ('npx vite 2>&1', True),
-            ('npx vite > vite.log 2>&1 &', True), ('vite 2>&1 | tee vite.log', True), ('npx vite >vite.log', True),
-            ('npm create vite@latest', False), ('pnpm --filter web dev', True), ('pnpm -F web dev', True), ('pnpm install', False),
-            ('turbo dev', True), ('nx serve', True), ('ng serve', True), ('astro dev', True), ('nuxt dev', True),
-            ('npx expo start', True), ('storybook dev', True), ('php artisan serve', True), ('hugo server', True),
-            ('bundle exec jekyll serve', True), ('npx serve', True), ('npx http-server', True), ('gunicorn app:app', True),
-            ('kubectl port-forward svc/api 8080:80', True), ('kubectl rollout status deploy/api -w', False),
-            ("until curl -s -o /dev/null -w \"%{http_code}\" localhost:3000; do sleep 1; done", False),
-            ('pnpm prisma migrate dev --name init', False), ('pnpm sst deploy --stage dev', False), ('pnpm build --mode dev', False),
-            ('nx build web -c dev', False), ('nx run-many -t build --configuration dev', False),
+            ('vitest', False), ('npx vitest', False), ('npx vitest -w', True), ('npx vitest --watch', True),
+            ('npx vite 2>&1', True), ('npx vite > vite.log 2>&1 &', True), ('vite 2>&1 | tee vite.log', True),
+            ('npx vite >vite.log', True), ('npm create vite@latest', False), ('pnpm --filter web dev', True),
+            ('pnpm -F web dev', True), ('pnpm install', False), ('turbo dev', True), ('nx serve', True), ('ng serve', True),
+            ('astro dev', True), ('nuxt dev', True), ('npx expo start', True), ('storybook dev', True),
+            ('php artisan serve', True), ('hugo server', True), ('bundle exec jekyll serve', True), ('npx serve', True),
+            ('npx http-server', True), ('gunicorn app:app', True), ('kubectl port-forward svc/api 8080:80', True),
+            ('kubectl rollout status deploy/api -w', False),
+            ('until curl -s -o /dev/null -w "%{http_code}" localhost:3000; do sleep 1; done', False),
+            ('pnpm prisma migrate dev --name init', False), ('pnpm sst deploy --stage dev', False),
+            ('pnpm build --mode dev', False), ('nx build web -c dev', False), ('nx run-many -t build --configuration dev', False),
             ('turbo run deploy -- --stage dev', False), ('pnpm add -D vite @vitejs/plugin-react', False),
             ('yarn create vite my-app', False), ('npm install vite react', False), ('npm i -g http-server serve', False),
             ('kubectl -n prod rollout status deploy/api -w', False), ("curl -w '%{http_code}' x", False), ('vitest dev', True),
@@ -909,11 +911,47 @@ def t_service_shells(s):
             ('nx run web:serve', True), ('FOO=1 npm run dev', True), ('sudo -u x npm run dev', False),
             ('kubectl -n prod get pods --watch', True), ('tail -F x', True), ('watch -n 1 ls', True), ('cargo watch -x run', True),
             ('docker-compose up', True), ('docker compose -f a.yml up', True), ('yarn workspace web dev', True),
-            ('sass -w a.scss b.css', True), ('jest --watch', True), ('python -m flask run', True), ('vite --port 3000', True),
-            ('vite --version', False), ('npm --prefix web run dev', True), ('sudo npm run dev', True),
-            ('env FOO=1 npm run dev', True), ('./node_modules/.bin/vite', True), ('npx -y vite', True), ('uv run flask run', True),
-            ('pnpm dlx serve', True), ('pnpm exec vite', True),
-            ('npm run -- dev', False), ('tsc --noEmit -- -w', False)):
+            ('jest --watch', True), ('python -m flask run', True), ('vite --port 3000', True), ('vite --version', False),
+            ('npm --prefix web run dev', True), ('sudo npm run dev', True), ('env FOO=1 npm run dev', True),
+            ('./node_modules/.bin/vite', True), ('npx -y vite', True), ('uv run flask run', True), ('pnpm dlx serve', True),
+            ('pnpm exec vite', True), ('npm run -- dev', False), ('tsc --noEmit -- -w', False),
+            ('sass --watch a.scss b.css', True), ('sass -w a.scss b.css', False), ('npx jest -w 4', False),
+            ('jest -w 2 --ci', False), ('npx jest --maxWorkers=2', False), ('npx jest --watchAll=false -w 2', False),
+            ('jest --watchAll', True), ('tsx scripts/gen.ts -w', False), ('tsx watch src/index.ts', True),
+            ('node scripts/gen.js --watch', False), ('python script.py -m http.server', False),
+            ('docker compose up --abort-on-container-exit --exit-code-from tests', False),
+            ('docker compose up --build --exit-code-from e2e', False), ('docker compose up --wait', False),
+            ('docker compose up -d --wait', False),
+            ('docker-compose -f docker-compose.test.yml up --abort-on-container-exit', False),
+            ('docker compose up --no-start', False), ('docker compose up --dry-run', False),
+            ('docker compose up --build \\\n  -d', False), ('docker compose up --build \\\n  --abort-on-container-exit', False),
+            ('vite \\\n  build', False), ('docker compose up --build', True),
+            ("cat > start.sh <<'EOF2'\n#!/bin/sh\nnpm run dev\nEOF2\nsh -n start.sh", False),
+            ('grep -E "error|watch" app.log', False), ('grep -rE "TODO|vite" src/app.ts', False),
+            ('until grep -qE "Ready|serve" server.log; do sleep 1; done', False),
+            ('git commit -m "fix; npm run dev now works"', False), ('echo "step 1; tail -f log next"', False),
+            ('node -e "const w = 1; watch(\'src\')"', False), ("printf 'Run:\\nnpm run dev\\n'", False),
+            ("bash -c 'npm run build; npm test'", False), ('sh -c "cd web && npm run dev"', False),
+            ('timeout 120 npm run dev', False), ('npm run dev & npx wait-on http://localhost:3000 && npx playwright test', False),
+            ('npm run dev > dev.log 2>&1 & sleep 8 && curl -sf localhost:3000 && npm run test:e2e', False),
+            ('python -m http.server 8000 & sleep 2; curl -s localhost:8000 | head', False), ('cd web && npm run dev', True),
+            ('npm run dev &', True), ('python3 -m http.server 8000 &', True), ('npm run dev:setup', False),
+            ('npm run dev:seed', False), ('pnpm start:db', False), ('yarn dev:migrate', False), ('turbo run dev:setup', False),
+            ('npm run start:prod', True), ('kubectl logs -f job/db-migrate', False),
+            ('kubectl -n prod logs --follow job/seed', False), ('kubectl logs -f jobs/x', False),
+            ('kubectl logs -f deploy/api', True), ('docker compose logs -f migrate', True),
+            ('tail -f build.log --pid=1234', False), ('watch -g ls', False), ("watch -g 'kubectl get pods'", False),
+            ('npm --tag dev publish', False), ('yarn --frozen-lockfile dev', False), ('pnpm -w dev', False),
+            ('pnpm --filter "@app/*" dev', True), ('pnpm dev --filter web', True), ('npx live-server', True),
+            ('browser-sync start --server', True), ('node --watch server.js', True), ('bun --watch run index.ts', True),
+            ('deno run --watch main.ts', True), ('hugo serve', True), ('astro preview', True), ('nuxt preview', True),
+            ('storybook start', True), ('webpack serve', True), ('npx webpack-dev-server', True), ('rails server -d', False),
+            ('rails s', True), ('vite optimize', False), ('vite build --watch', False), ('npx vite@5', False),
+            ('bunx --bun vite', False), ('npm exec vite', False), ('php -S localhost:8000', False), ('make dev', False),
+            ('./gradlew bootRun', False), ('go run ./cmd/server', False), ('mocha -w', True), ('cargo watch -x test', True),
+            ('nx run web:serve-static', False), ('npx vite --open', True), ('python -m pytest tests -m uvicorn', False),
+            ('npm test -- -w 4', False), ('npx jest --watch', True), ("cat <<EOF > notes\ndon't stop\nEOF\nnpm run dev", True),
+            ('npm run dev \\\n  -- --port 3000', True)):
         s.ctl("/_ctl/reset", {})
         out = stop("sv3-%d" % abs(hash(cmd)), [shell(cmd, "Run it")])
         got = seqs(out).startswith("\x1b]9;simpleterm:state=done")
@@ -2662,6 +2700,20 @@ def t_opencode_js(s):
                           "steps": [ev(84, "session.execution.succeeded", "ses_g"), ev(85, "session.execution.started", "ses_g")]})
     s.check("opencode 2.x: the Stop the lane gave up on sends nothing when its lookup returns late",
             not ingests(s, "done") and (run_dir / "ses_g.turn").exists(), str(ingests(s))[:200] + str(list(run_dir.glob("ses_g*"))))
+    # A hook the lane gave up on is stopped: a fake `sh` (first in PATH) that waits and notes its SIGTERM.
+    fake = s.tmp / "fakebin"
+    fake.mkdir(exist_ok=True)
+    mark = s.tmp / "fake-sh-killed"
+    mark.unlink(missing_ok=True)
+    (fake / "sh").write_text("#!/bin/sh\ntrap 'echo killed >\"$SIMPLETERM_FAKE_MARK\"; exit 0' TERM\n"
+                             "i=0; while [ $i -lt 100 ]; do /bin/sleep 0.2; i=$((i+1)); done\n")
+    (fake / "sh").chmod(0o755)
+    s.setup([(LINK_A, {"push": "disabled"})])
+    node_plugin(s, "v2", {"directory": d, "sessions": {"ses_k": {}}, "wait": 2500,
+                          "env": {"SIMPLETERM_LANE_TIMEOUT_MS": "600", "SIMPLETERM_FAKE_MARK": str(mark),
+                                  "PATH": str(fake) + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")},
+                          "steps": [ev(86, "session.execution.started", "ses_k")]})
+    s.check("opencode 2.x: a hook the lane gave up on is stopped (SIGTERM)", mark.exists(), "no mark: the hook was left running")
     # A permission request answered while it still waits on its session lane is dropped, not sent.
     s.setup([(LINK_A, {"decision": "allow", "after": 1})])
     ask_r = {"id": "evt_95", "type": "permission.asked", "location": {"directory": d},

@@ -243,32 +243,48 @@ there):
   one extra alert. The word lists are one table (`ASK_AWK` in `agent-hook.sh`). Claude Code
   2.1.295+ gets a `blocked` (kind `question`) OSC 7501 record `simpleterm-bg` instead of the
   `working` one; the next turn takes it back. The idle question 60 s later stays suppressed.
-- **Services are not waited for.** A background shell is a service when its command, at the
-  command position of a `;`/`&&`/`||`/`|` part (after `VAR=val`, `npx`, `pnpm exec|dlx`, `yarn dlx`,
-  `bunx`, `uv|poetry run`, `bundle exec`, `env`, `nohup`, `exec`, `sudo`), is one of a known list; a
-  command that is not in it is not a service, since a wrong "service" ends the turn early and sends
-  a second `done` later, while a missed one only delays the `done` to `bg_done_after`. The list
-  (`SVC_AWK`; between the tool and the subcommand only options, `run` and the values of
-  `--filter/-F/-C/--cwd/--prefix/--dir/-p/--project/--workspace` are allowed):
-  - package managers `npm|pnpm|yarn|bun [run]` `dev|start|serve|preview|watch` (also `dev:web`
-    style scripts, `pnpm --filter web dev`, `yarn workspace web dev`); `turbo [run] dev`; `nx
-    serve|dev|start` and `nx run proj:serve`; `next dev|start`; `ng serve`; `astro dev`; `nuxt
-    dev`; `expo start`; `storybook dev`; `vite` (not `vite build`); `vitest -w|--watch|dev|watch`
-    (a plain `vitest` is not one: it watches only on a terminal and not under an agent);
-  - `nodemon`, `uvicorn`, `gunicorn`, `python -m http.server`, `manage.py runserver`, `rails
-    s|server`, `flask run`, `php artisan serve`, `hugo server`, `jekyll serve`, `serve`,
-    `http-server`;
-  - `docker compose up` / `docker-compose up` without `-d`, `docker logs -f`, `kubectl logs -f`,
-    `kubectl port-forward`, `kubectl get ... -w|--watch`, `tail -f|-F|--follow`, `journalctl -f`,
-    `watch`;
-  - watchers by their own flag: `tsc|webpack|sass|esbuild|rollup|swc|tailwindcss|jest|mocha|tsx|
-    parcel` with `-w|--watch`, `cargo watch`, `tsx watch`, `watchexec`.
+- **Services are not waited for.** A background shell is a service when its command is a known
+  one, at the command position. When in doubt it is not: a wrong "service" ends the turn early and
+  sends a second `done` later, while a missed one only delays the `done` to `bg_done_after`. The
+  rules (`SVC_AWK`, one table):
+  - The command is cut at `;`, `&&`, `||`, `&` and line breaks; only the **last** element counts
+    (`cd web && npm run dev` and `npm run dev &` are services, `npm run dev & npx wait-on ... && npx
+    playwright test` is not), and any command of its `|` pipeline may be the service. Backslash line
+    continuations are joined, heredoc bodies are dropped and the inside of `"..."` and `'...'` is
+    ignored (`git commit -m "npm run dev"`, `sh -c "..."` are not services).
+  - Leading `VAR=val` words and the launchers `npx`, `bunx`, `pnpm exec|dlx`, `yarn dlx`, `uv|poetry
+    run`, `bundle exec`, `env`, `nohup`, `exec`, `sudo` are skipped (an option we cannot read gives up).
+    Between the tool and its subcommand only options are allowed: ones that take a value
+    (`--filter -F -C --cwd --prefix --dir -p --project --workspace -w --app -A --namespace -n
+    --context --kubeconfig -f --file --env-file --project-name --profile --port --host --config -c
+    --mode -m --base --logLevel -l --outDir`), a few flags without one (`-r --recursive -s --silent
+    -q --quiet --if-present --workspaces -ws --include-workspace-root --stream --parallel --no-bail
+    --open --force --strictPort --debug --verbose -v --no-color --offline --prefer-offline
+    --ignore-scripts`), `--name=value`, and `run`; any other option gives up. Words after a lone
+    `--` belong to another command; tools that run a script (`node`, `python`, `tsx`) stop at it.
+  - Package managers `npm|pnpm|yarn|bun [run]` `dev|start|serve|preview|watch`, also `dev:web`
+    style names, `pnpm --filter web dev`, `yarn workspace web dev`, `bun --watch|--hot`; a name whose
+    suffix is a finite task (`setup migrate migration db seed build init prepare install reset
+    clean test lint check generate gen codegen`: `dev:setup`, `start:db`) is a job, not a server.
+    Likewise `turbo [run] dev`, `nx serve|dev|start` and `nx run proj:serve`, `next dev|start`, `ng
+    serve`, `astro|nuxt dev|preview`, `expo start`, `storybook dev|start`, `browser-sync start`,
+    `vite` (not `vite build|optimize`), `vitest -w|--watch|dev|watch` (a plain `vitest` runs once under
+    an agent), `webpack serve|watch`, `webpack-dev-server`, `live-server`.
+  - `nodemon`, `uvicorn`, `gunicorn`, `python -m http.server|uvicorn|gunicorn|flask run`, `manage.py
+    runserver`, `rails s` (not with `-d`), `flask run`, `php artisan serve`, `hugo server|serve`, `jekyll
+    serve`, `serve`, `http-server`, `node --watch`, `deno run --watch`.
+  - `docker compose up` / `docker-compose up` unless it ends by itself (`-d`, `--detach`, `--wait`,
+    `--abort-on-container-exit|failure`, `--exit-code-from`, `--no-start`, `--dry-run`), `docker|
+    kubectl logs -f` (not for a `job/`), `kubectl port-forward`, `kubectl get ... -w`, `tail -f|-F|
+    --follow` (not with `--pid`), `journalctl -f`, `watch` (not with `-g`/`-e`).
+  - Watchers by their own flag: `tsc|webpack|rollup|swc|mocha -w|--watch`, `tailwindcss -w`, `sass|
+    esbuild --watch`, `jest --watch|--watchAll`, `cargo watch`, `tsx watch`, `watchexec`.
 
-  `-w` counts only for those watchers, never elsewhere (`make -w`, `curl -w`, `docker exec -w`,
-  `kubectl rollout status -w`, `python -W` are not services), and `--watch=false`, `pnpm prisma
-  migrate dev`, `pnpm sst deploy --stage dev`, `nx build web -c dev`, `npm install vite`, `npm i -g
-  http-server` are not either. When only such shells (and the agent's housekeeping) are left,
-  `done` goes at once, ending with `(still running in the background: <task>)`, instead of after
+  `-w` counts only for those tools (`make -w`, `curl -w`, `docker exec -w`, `jest -w` (that is
+  `--maxWorkers`), `kubectl rollout status -w` are not services), and so are not `--watch=false`,
+  `pnpm prisma migrate dev`, `pnpm sst deploy --stage dev`, `nx build web -c dev`, `npm install
+  vite`, `npm i -g http-server`. When only such shells (and the agent's housekeeping) are left, `done`
+  goes at once, ending with `(still running in the background: <task>)`, instead of after
   `bg_done_after`; other shells keep the `bg_done_after` wait.
 - **Your own prompt is answered.** At every `Stop` the hook records the ids of the tasks running.
   When you typed the prompt that started the turn and every task still running was already running

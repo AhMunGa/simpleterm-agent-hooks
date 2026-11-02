@@ -49,20 +49,24 @@
     `working` one. The word lists are one table in the script.
   - **Services are not waited for**: a background shell whose command is a known service sends
     `done` at once with `(still running in the background: ...)` instead of after
-    `bg_done_after`; the note is kept whole when the message is long. Only the command position of
-    each `;`/`&&`/`||`/`|` part counts (after `VAR=val`, `npx`, `pnpm exec|dlx`, `yarn dlx`,
-    `bunx`, `uv|poetry run`, `bundle exec`, `env`, `nohup`, `exec`, `sudo`), with an explicit
-    (tool, subcommand) table: `npm|pnpm|yarn|bun [run] dev|start|serve|preview|watch` (also
-    `dev:web`, `--filter web`), `turbo dev`, `nx serve`, `next dev`, `ng serve`, `astro|nuxt|
-    storybook dev`, `expo start`, `vite` (not `vite build`), `vitest -w|dev|watch` (a plain
-    `vitest` runs once under an agent), `nodemon`, `uvicorn`, `gunicorn`, `python -m http.server`,
-    `manage.py runserver`, `rails s`, `flask run`, `php artisan serve`, `hugo server`, `jekyll
-    serve`, `serve`, `http-server`, `docker compose up` without `-d`, `docker|kubectl logs -f`,
-    `kubectl port-forward`, `kubectl get -w`, `tail -f`, `journalctl -f`, `watch`, and watchers by
-    their own `-w`/`--watch` (`tsc`, `webpack`, `sass`, `esbuild`, `rollup`, `swc`, `tailwindcss`,
-    `cargo watch`, `watchexec`, ...). Everything else is not a service: a wrong "service" ends the
-    turn early and sends a second `done`, a missed one only delays it. `-w` is never global
-    (`make -w`, `curl -w`, `docker exec -w`, `kubectl rollout status -w` are not services).
+    `bg_done_after`; the note is kept whole when the message is long. When in doubt it is not one (a
+    wrong service sends an early `done`, a missed one only delays it). The command is cut at `;`,
+    `&&`, `||`, `&` and line breaks and only the last element counts (any command of its pipeline
+    may be the service); continuation lines are joined, heredoc bodies dropped, quoted text
+    ignored; at the command position (after `VAR=val`, `npx`, `pnpm exec|dlx`, `yarn dlx`, `bunx`,
+    `uv|poetry run`, `bundle exec`, `env`, `nohup`, `exec`, `sudo`) an explicit (tool, subcommand)
+    table decides, with only known options between the two: `npm|pnpm|yarn|bun [run]
+    dev|start|serve|preview|watch` (also `dev:web`, `--filter web`; `dev:setup`, `start:db` and
+    other finite suffixes are jobs), `turbo`, `nx`, `next`, `ng`, `astro|nuxt`, `expo`, `storybook`,
+    `vite` (not `vite build`), `vitest -w|dev|watch` (a plain `vitest` runs once under an agent),
+    `webpack serve`, `live-server`, `nodemon`, `uvicorn`, `gunicorn`, `python -m http.server`,
+    `manage.py runserver`, `rails s`, `flask run`, `php artisan serve`, `hugo serve`, `jekyll
+    serve`, `node|deno --watch`, `bun --watch`, `docker compose up` (not with `-d`, `--wait`,
+    `--abort-on-container-exit`, `--exit-code-from`, ...), `docker|kubectl logs -f` (not `job/`),
+    `kubectl port-forward|get -w`, `tail -f` (not `--pid`), `journalctl -f`, `watch`, and watchers by
+    their own flag (`tsc|webpack|rollup|swc|mocha -w`, `jest --watch|--watchAll`, `sass|esbuild
+    --watch`, `tailwindcss -w`, `cargo watch`, `tsx watch`, `watchexec`). `-w` is never global
+    (`make -w`, `curl -w`, `docker exec -w`, `jest -w` are not services).
   - **A prompt you typed is answered**: every `Stop` records the ids of the running tasks; when a
     person typed the prompt of the turn and only tasks that ran before it are left, the turn is a
     report (`done` with the note). Turns started by a task's report or a schedule still wait. The

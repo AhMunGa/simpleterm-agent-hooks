@@ -1521,14 +1521,16 @@ function Test-AskText([string]$raw) {
 # A shell task whose command is a service (a dev server, a watcher, a
 # follower) is not something the agent waits for: it never ends and never
 # wakes the agent. A wrong "service" ends the turn early and sends a second
-# done later; a missed one only delays the done to bg_done_after: so only what
-# is known is matched, and only at the command position (the same table as
-# SVC_AWK in agent-hook.sh). The command is split at ; & | (and line breaks);
-# in each part leading VAR=val words, shell keywords and a few launchers are
-# skipped, and the command word with its subcommand is looked up in the table.
-# Between the two only options are allowed, and the values of the options in
-# $SvcValueFlags. Words after a lone -- belong to another command.
+# done later; a missed one only delays the done to bg_done_after: so when in
+# doubt it is not one, and only what is known is matched, at the command
+# position (the same table as SVC_AWK in agent-hook.sh; read its comment). The
+# command is unescaped, backslash-newline joined, heredoc bodies dropped and
+# the inside of quotes emptied, then cut at ; && || & and line breaks into list
+# elements: only the last one counts, and any command of its pipeline may be
+# the service.
 $SvcValueFlags = ' --filter -F -C --cwd --prefix --dir -p --project --workspace -w --app -A --namespace -n --context --kubeconfig -f --file --env-file --project-name --profile --port --host --config -c --mode -m --base --logLevel -l --outDir '
+$SvcBoolFlags = ' -r --recursive -s --silent -q --quiet --if-present --workspaces -ws --include-workspace-root --stream --parallel --no-bail --open --force --strictPort --debug --verbose -v --no-color --offline --prefer-offline --ignore-scripts '
+$SvcDoneWords = ' setup migrate migration db seed build init prepare install reset clean test lint check generate gen codegen '
 $SvcWords = @()
 $SvcN = 0
 
@@ -1539,12 +1541,15 @@ function Get-SvcWord([int]$j) {
     return ''
 }
 
-# The index of the first word from j on that is not an option (or an option value).
+# The index of the first word from j on that is not an option (or an option
+# value); N for a lone --, N + 1 when an option is not known.
 function Skip-SvcOpts([int]$j) {
     while ($j -lt $Script:SvcN -and (Get-SvcWord $j).StartsWith('-')) {
         $x = Get-SvcWord $j
-        if ($x -ceq '--') { return ($Script:SvcN + 1) }
-        if ($x.IndexOf('=') -lt 0 -and $SvcValueFlags.Contains(' ' + $x + ' ')) { $j += 2 } else { $j++ }
+        if ($x -ceq '--') { return $Script:SvcN }
+        if ($x.IndexOf('=') -ge 0 -or $SvcBoolFlags.Contains(' ' + $x + ' ')) { $j++ }
+        elseif ($SvcValueFlags.Contains(' ' + $x + ' ')) { $j += 2 }
+        else { return ($Script:SvcN + 1) }
     }
     return $j
 }
@@ -1555,6 +1560,29 @@ function Test-SvcAnyOpt([int]$j, [string]$re) {
         $x = Get-SvcWord $k
         if ($x -ceq '--') { return $false }
         if ($x -cmatch $re) { return $true }
+    }
+    return $false
+}
+
+# Leading options only (tools that run a script: the script ends them); `run` may come between.
+function Test-SvcLeadOpt([int]$j, [string]$re) {
+    while ($j -lt $Script:SvcN) {
+        $x = Get-SvcWord $j
+        if ($x -ceq '--') { return $false }
+        if ($x -ceq 'run') { $j++; continue }
+        if (-not $x.StartsWith('-')) { return $false }
+        if ($x -cmatch $re) { return $true }
+        if ($x.IndexOf('=') -lt 0 -and $SvcValueFlags.Contains(' ' + $x + ' ')) { $j += 2 } else { $j++ }
+    }
+    return $false
+}
+
+# A script name `dev:setup` is a job, not a server, when a part of its suffix is a finite task.
+function Test-SvcJobName([string]$t) {
+    $p = $t.IndexOf(':')
+    if ($p -lt 0) { return $false }
+    foreach ($part in [regex]::Split($t.Substring($p + 1), '[:_-]')) {
+        if ($SvcDoneWords.Contains(' ' + $part + ' ')) { return $true }
     }
     return $false
 }
@@ -1591,40 +1619,51 @@ function Test-ServiceSegment([string]$seg) {
     $c = Get-SvcBase (Get-SvcWord $i)
     $j = $i + 1
     if ($c -cmatch '^(npm|pnpm|yarn|bun)$') {
+        if ($c -ceq 'bun' -and (Test-SvcLeadOpt $j '^--(watch|hot)$')) { return $true }
         $j = Skip-SvcOpts $j
         if ($c -ceq 'yarn' -and (Get-SvcWord $j) -ceq 'workspace') { $j = Skip-SvcOpts ($j + 2) }
         if ((Get-SvcWord $j) -ceq 'run' -or (Get-SvcWord $j) -ceq 'run-script') { $j = Skip-SvcOpts ($j + 1) }
-        return ($j -lt $n -and (Get-SvcWord $j).ToLowerInvariant() -cmatch '^(dev|start|serve|preview|watch)(:[a-z0-9_-]+)?$')
+        $t = (Get-SvcWord $j).ToLowerInvariant()
+        return ($j -lt $n -and $t -cmatch '^(dev|start|serve|preview|watch)(:[a-z0-9_-]+)?$' -and -not (Test-SvcJobName $t))
     }
     if ($c -ceq 'next') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(dev|start)$') }
     if ($c -ceq 'vite') {
+        if (Test-SvcAnyOpt $j '^(-v|-h|--version|--help)$') { return $false }
         $j = Skip-SvcOpts $j
-        if (Test-SvcAnyOpt ($i + 1) '^(-v|-h|--version|--help)$') { return $false }
+        if ($j -gt $n) { return $false }
         $x = Get-SvcWord $j
-        return ($j -ge $n -or $x -cmatch '^(dev|serve|preview)$' -or $x -cmatch '^[0-9]*[<>]' -or $x -cmatch '[/.]')
+        return ($j -ge $n -or $x -cmatch '^(dev|serve|preview)$' -or $x -cmatch '^[0-9]*[<>]' -or $x.Contains('/') -or $x.Contains('.'))
     }
     if ($c -ceq 'vitest') {
         return ((Test-SvcAnyOpt $j '^(-w|--watch|--watch=true|--watch=1)$') -or (Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(dev|watch)$')
     }
-    if ($c -cmatch '^(nodemon|uvicorn|gunicorn|watchexec|watch|serve|http-server)$') { return $true }
+    if ($c -ceq 'watch') { return (-not (Test-SvcAnyOpt $j '^(-[a-zA-Z]*[ge][a-zA-Z]*|--chgexit|--errexit)$')) }
+    if ($c -cmatch '^(nodemon|uvicorn|gunicorn|watchexec|serve|http-server|live-server|webpack-dev-server)$') { return $true }
+    if ($c -ceq 'node') { return (Test-SvcLeadOpt $j '^--watch(-path(=.*)?)?$') }
+    if ($c -ceq 'deno') { return (Test-SvcLeadOpt $j '^--watch(=.*)?$') }
     if ($c -cmatch '^python[0-9.]*$') {
         for ($k = $j; $k -lt $n; $k++) {
             $x = Get-SvcWord $k
             $y = Get-SvcWord ($k + 1)
-            if ($x -ceq '-m' -and $y -cmatch '^(http[.]server|uvicorn|gunicorn|hypercorn)$') { return $true }
-            if ($x -ceq '-m' -and $y -ceq 'flask') { return ((Get-SvcWord (Skip-SvcOpts ($k + 2))) -ceq 'run') }
-            if ($x -cmatch 'manage[.]py$' -and $y -ceq 'runserver') { return $true }
+            if ($x -ceq '-m') {
+                if ($y -cmatch '^(http[.]server|uvicorn|gunicorn|hypercorn)$') { return $true }
+                if ($y -ceq 'flask') { return ((Get-SvcWord (Skip-SvcOpts ($k + 2))) -ceq 'run') }
+                return $false
+            }
+            if (-not $x.StartsWith('-')) { return ($x -cmatch 'manage[.]py$' -and $y -ceq 'runserver') }
         }
         return $false
     }
     if ($c -cmatch 'manage[.]py$') { return ((Get-SvcWord (Skip-SvcOpts $j)) -ceq 'runserver') }
-    if ($c -ceq 'rails') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(s|server)$') }
+    if ($c -ceq 'rails') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(s|server)$' -and -not (Test-SvcAnyOpt $j '^(-d|--daemon)$')) }
     if ($c -ceq 'flask') { return ((Get-SvcWord (Skip-SvcOpts $j)) -ceq 'run') }
     if ($c -ceq 'docker' -or $c -ceq 'docker-compose') {
         $j = Skip-SvcOpts $j
         if ($c -ceq 'docker' -and (Get-SvcWord $j) -ceq 'compose') { $j = Skip-SvcOpts ($j + 1) }
         elseif ($c -ceq 'docker') { if ((Get-SvcWord $j) -cne 'logs') { return $false } }
-        if ((Get-SvcWord $j) -ceq 'up') { return (-not (Test-SvcAnyOpt ($j + 1) '^(-d|--detach)$')) }
+        if ((Get-SvcWord $j) -ceq 'up') {
+            return (-not (Test-SvcAnyOpt ($j + 1) '^(-d|--detach|--wait|--abort-on-container-exit|--abort-on-container-failure|--exit-code-from(=.*)?|--no-start|--dry-run)$'))
+        }
         if ((Get-SvcWord $j) -ceq 'logs') { return (Test-SvcAnyOpt ($j + 1) '^(-[a-zA-Z]*f[a-zA-Z]*|--follow)$') }
         return $false
     }
@@ -1632,16 +1671,20 @@ function Test-ServiceSegment([string]$seg) {
         $j = Skip-SvcOpts $j
         $sub = Get-SvcWord $j
         if ($sub -ceq 'port-forward') { return $true }
-        if ($sub -ceq 'logs') { return (Test-SvcAnyOpt ($j + 1) '^(-[a-zA-Z]*f[a-zA-Z]*|--follow)$') }
+        if ($sub -ceq 'logs') {
+            for ($k = $j + 1; $k -lt $n; $k++) { if ((Get-SvcWord $k) -cmatch '^jobs?(/|$)') { return $false } }
+            return (Test-SvcAnyOpt ($j + 1) '^(-[a-zA-Z]*f[a-zA-Z]*|--follow)$')
+        }
         if ($sub -ceq 'get') { return (Test-SvcAnyOpt ($j + 1) '^(-w|--watch|--watch-only)$') }
         return $false
     }
-    if ($c -ceq 'tail') { return (Test-SvcAnyOpt $j '^(-[a-zA-Z]*[fF][a-zA-Z]*|--follow(=.*)?)$') }
+    if ($c -ceq 'tail') { return ((Test-SvcAnyOpt $j '^(-[a-zA-Z]*[fF][a-zA-Z]*|--follow(=.*)?)$') -and -not (Test-SvcAnyOpt $j '^--pid(=.*)?$')) }
     if ($c -ceq 'journalctl') { return (Test-SvcAnyOpt $j '^(-[a-zA-Z]*f[a-zA-Z]*|--follow)$') }
     if ($c -ceq 'turbo') {
         $j = Skip-SvcOpts $j
         if ((Get-SvcWord $j) -ceq 'run') { $j = Skip-SvcOpts ($j + 1) }
-        return ((Get-SvcWord $j) -cmatch '^(dev|watch|serve|start)(:[a-z0-9_-]+)?$')
+        $t = (Get-SvcWord $j).ToLowerInvariant()
+        return ($t -cmatch '^(dev|watch|serve|start)(:[a-z0-9_-]+)?$' -and -not (Test-SvcJobName $t))
     }
     if ($c -ceq 'nx') {
         $j = Skip-SvcOpts $j
@@ -1650,27 +1693,86 @@ function Test-ServiceSegment([string]$seg) {
         return $false
     }
     if ($c -ceq 'ng') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(serve|s)$') }
-    if ($c -ceq 'astro' -or $c -ceq 'nuxt' -or $c -ceq 'nuxi') { return ((Get-SvcWord (Skip-SvcOpts $j)) -ceq 'dev') }
+    if ($c -ceq 'astro' -or $c -ceq 'nuxt' -or $c -ceq 'nuxi') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(dev|preview)$') }
     if ($c -ceq 'expo') { return ((Get-SvcWord (Skip-SvcOpts $j)) -ceq 'start') }
-    if ($c -ceq 'storybook' -or $c -ceq 'sb') { return ((Get-SvcWord (Skip-SvcOpts $j)) -ceq 'dev') }
+    if ($c -ceq 'storybook' -or $c -ceq 'sb') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(dev|start)$') }
+    if ($c -ceq 'browser-sync') { return ((Get-SvcWord (Skip-SvcOpts $j)) -ceq 'start') }
     if ($c -ceq 'php') {
         for ($k = $j; $k -lt ($n - 1); $k++) { if ((Get-SvcWord $k) -ceq 'artisan') { return ((Get-SvcWord ($k + 1)) -ceq 'serve') } }
         return $false
     }
-    if ($c -ceq 'hugo') { return ((Get-SvcWord (Skip-SvcOpts $j)) -ceq 'server') }
+    if ($c -ceq 'hugo') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(server|serve)$') }
     if ($c -ceq 'jekyll') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(serve|s)$') }
     if ($c -ceq 'cargo') { return ((Get-SvcWord (Skip-SvcOpts $j)) -ceq 'watch') }
-    if ($c -ceq 'tsx' -and (Get-SvcWord (Skip-SvcOpts $j)) -ceq 'watch') { return $true }
-    if ($c -cmatch '^(tsc|webpack|sass|esbuild|rollup|swc|tailwindcss|jest|mocha|tsx|parcel)$') {
-        return (Test-SvcAnyOpt $j '^(-w|--watch|--watchAll|--watch=true|--watch=1)$')
-    }
+    if ($c -ceq 'tsx') { return ((Get-SvcWord (Skip-SvcOpts $j)) -ceq 'watch') }
+    if ($c -ceq 'tsc' -or $c -ceq 'rollup' -or $c -ceq 'swc' -or $c -ceq 'mocha') { return (Test-SvcAnyOpt $j '^(-w|--watch)$') }
+    if ($c -ceq 'webpack') { return ((Get-SvcWord (Skip-SvcOpts $j)) -cmatch '^(serve|watch)$' -or (Test-SvcAnyOpt $j '^(-w|--watch)$')) }
+    if ($c -ceq 'tailwindcss') { return (Test-SvcAnyOpt $j '^(-w|--watch(=always)?)$') }
+    if ($c -ceq 'sass') { return (Test-SvcAnyOpt $j '^--watch$') }
+    if ($c -ceq 'esbuild') { return (Test-SvcAnyOpt $j '^--watch(=forever)?$') }
+    if ($c -ceq 'jest') { return (Test-SvcAnyOpt $j '^--(watch|watchAll)$') }
     return $false
 }
 
+# The JSON string body as the text of the command, heredoc bodies and the inside of
+# quotes dropped, every list separator a ; and a pipe kept as |.
+function Get-SvcClean([string]$raw) {
+    $sb = New-Object System.Text.StringBuilder
+    for ($i = 0; $i -lt $raw.Length; $i++) {
+        $c = $raw[$i]
+        if ($c -ne '\') { [void]$sb.Append($c); continue }
+        if ($i + 1 -ge $raw.Length) { break }
+        $e = $raw[$i + 1]
+        $i++
+        if ($e -eq 'n') { [void]$sb.Append("`n") }
+        elseif ($e -eq 'r' -or $e -eq 't') { [void]$sb.Append(' ') }
+        elseif ($e -eq 'u') { [void]$sb.Append(' '); $i += 4 }
+        else { [void]$sb.Append($e) }
+    }
+    $s = $sb.ToString().Replace("\`n", ' ')
+    $out = New-Object System.Text.StringBuilder
+    $hd = ''
+    foreach ($line in ($s -split "`n")) {
+        if ($hd -ne '') {
+            if ($line.TrimStart(' ', "`t") -ceq $hd) { $hd = '' }
+            continue
+        }
+        $m = [regex]::Match($line, "<<-?[ `t]*['`"]?[A-Za-z_][A-Za-z0-9_]*")
+        if ($m.Success -and -not ($m.Index -gt 0 -and $line[$m.Index - 1] -eq '<')) {
+            $t = [regex]::Replace($m.Value, "^<<-?[ `t]*", '')
+            $hd = [regex]::Replace($t, "^['`"]", '')
+        }
+        [void]$out.Append($line + "`n")
+    }
+    $s = $out.ToString()
+    $out = New-Object System.Text.StringBuilder
+    $q = ''
+    for ($i = 0; $i -lt $s.Length; $i++) {
+        $ch = [string]$s[$i]
+        if ($q -eq '') {
+            if ($ch -eq "'" -or $ch -eq '"') { $q = $ch; [void]$out.Append('_') }
+            elseif ($ch -eq '\') { [void]$out.Append('_'); $i++ }
+            else { [void]$out.Append($ch) }
+        }
+        elseif ($q -eq "'") { if ($ch -eq "'") { $q = '' } }
+        else {
+            if ($ch -eq '\') { $i++ }
+            elseif ($ch -eq '"') { $q = '' }
+        }
+    }
+    $s = $out.ToString()
+    $s = [regex]::Replace($s, '[0-9]*[<>]&[0-9-]*', ' ')
+    $s = [regex]::Replace($s, '&>>?', ' > ')
+    $s = $s.Replace('||', ';').Replace('&&', ';').Replace('&', ';').Replace("`n", ';')
+    return $s
+}
+
 function Test-ServiceCmd([string]$cmd) {
-    $cmd = [regex]::Replace($cmd, '\\n', ';')
-    $cmd = [regex]::Replace($cmd, '\\[rt"]', ' ')
-    foreach ($part in [regex]::Split($cmd, '[;&|]+')) {
+    $last = ''
+    foreach ($el in ((Get-SvcClean $cmd) -split ';')) {
+        if (($el -replace '[ \t]', '') -ne '') { $last = $el }
+    }
+    foreach ($part in ($last -split '\|')) {
         if (Test-ServiceSegment $part) { return $true }
     }
     return $false

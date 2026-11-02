@@ -1318,31 +1318,61 @@ CRON_N=0 CRON_SCHED='' CRON_SUMS=''
 # follower) is not something the agent waits for: it never ends and never
 # wakes the agent. exit 0 when the command (one JSON-escaped line on stdin) is
 # one. A wrong "service" ends the turn early and sends a second done later; a
-# missed one only delays the done to bg_done_after: so only what is known is
-# matched, and only at the command position. The command is split at ; & | (and
-# line breaks); in each part leading VAR=val words, shell keywords and a few
-# launchers (npx, bunx, pnpm exec|dlx, yarn dlx, uv|poetry run, bundle exec,
-# env, nohup, exec, sudo; an option we cannot read gives up) are skipped, and
-# the command word with its subcommand is looked up in the table below
-# (svcseg). Between the two only options are allowed, and the values of the
-# options in VF. Words after a lone -- belong to another command.
+# missed one only delays the done to bg_done_after: so when in doubt it is not
+# one, and only what is known is matched, at the command position:
+#  - the command is unescaped, backslash-newline joined, heredoc bodies
+#    dropped and the text of "..." and '...' emptied (a word is left), then
+#    cut at ; && || & and line breaks into list elements; only the LAST
+#    element counts (`cd web && npm run dev`, `npm run dev &`), and of its
+#    pipeline (|) any command may be the service;
+#  - in each command leading VAR=val words, shell keywords and a few
+#    launchers (npx, bunx, pnpm exec|dlx, yarn dlx, uv|poetry run, bundle
+#    exec, env, nohup, exec, sudo; an option we cannot read gives up) are
+#    skipped, and the command word with its subcommand is looked up in
+#    svcseg. Between the two only options are allowed: VF takes a value, BOOL
+#    does not, any other one gives up. Words after a lone -- belong to
+#    another command, and tools that run a script (node, python, tsx) stop
+#    at the script.
 SVC_AWK='
 BEGIN {
   VF = " --filter -F -C --cwd --prefix --dir -p --project --workspace -w --app -A --namespace -n --context --kubeconfig -f --file --env-file --project-name --profile --port --host --config -c --mode -m --base --logLevel -l --outDir "
+  BOOL = " -r --recursive -s --silent -q --quiet --if-present --workspaces -ws --include-workspace-root --stream --parallel --no-bail --open --force --strictPort --debug --verbose -v --no-color --offline --prefer-offline --ignore-scripts "
+  DONE = " setup migrate migration db seed build init prepare install reset clean test lint check generate gen codegen "
 }
 function base(w) { sub(/^.*\//, "", w); return tolower(w) }
 function isopt(w) { return substr(w, 1, 1) == "-" }
-# The first word from j on that is not an option (or an option value).
+# The first word from j on that is not an option (or an option value); n + 2 when an option is not known.
 function nxt(j) {
   while (j <= n && isopt(W[j])) {
     if (W[j] == "--") return n + 1
-    if (index(W[j], "=") == 0 && index(VF, " " W[j] " ") > 0) j += 2; else j++
+    if (index(W[j], "=") > 0 || index(BOOL, " " W[j] " ") > 0) j++
+    else if (index(VF, " " W[j] " ") > 0) j += 2
+    else return n + 2
   }
   return j
 }
 # Does an option word matching the regex string re come from j on (before a lone --)?
 function anyopt(j, re,   k) {
   for (k = j; k <= n; k++) { if (W[k] == "--") return 0; if (W[k] ~ re) return 1 }
+  return 0
+}
+# Leading options only (tools that run a script: the script ends them); `run` may come between.
+function leadopt(j, re) {
+  while (j <= n) {
+    if (W[j] == "--") return 0
+    if (W[j] == "run") { j++; continue }
+    if (!isopt(W[j])) return 0
+    if (W[j] ~ re) return 1
+    if (index(W[j], "=") == 0 && index(VF, " " W[j] " ") > 0) j += 2; else j++
+  }
+  return 0
+}
+# A script name `dev:setup` is a job, not a server, when a part of its suffix is a finite task.
+function jobname(t,   p, m, SP, k) {
+  p = index(t, ":")
+  if (p == 0) return 0
+  m = split(substr(t, p + 1), SP, /[:_-]/)
+  for (k = 1; k <= m; k++) if (index(DONE, " " SP[k] " ") > 0) return 1
   return 0
 }
 function svcseg(seg,   i, w, lw, c, j, k, t) {
@@ -1370,49 +1400,65 @@ function svcseg(seg,   i, w, lw, c, j, k, t) {
   if (i > n) return 0
   c = base(W[i]); j = i + 1
   if (c ~ /^(npm|pnpm|yarn|bun)$/) {
+    if (c == "bun" && leadopt(j, "^--(watch|hot)$")) return 1
     j = nxt(j)
     if (c == "yarn" && W[j] == "workspace") j = nxt(j + 2)
     if (W[j] == "run" || W[j] == "run-script") j = nxt(j + 1)
     t = tolower(W[j])
-    return (j <= n && t ~ /^(dev|start|serve|preview|watch)(:[a-z0-9_-]+)?$/)
+    return (j <= n && t ~ /^(dev|start|serve|preview|watch)(:[a-z0-9_-]+)?$/ && !jobname(t))
   }
   if (c == "next") { j = nxt(j); return (W[j] ~ /^(dev|start)$/) }
   if (c == "vite") {
+    if (anyopt(j, "^(-v|-h|--version|--help)$")) return 0
     j = nxt(j)
-    if (anyopt(i + 1, "^(-v|-h|--version|--help)$")) return 0
-    return (j > n || W[j] ~ /^(dev|serve|preview)$/ || W[j] ~ /^[0-9]*[<>]/ || W[j] ~ /[\/.]/)
+    if (j > n + 1) return 0
+    return (j > n || W[j] ~ /^(dev|serve|preview)$/ || W[j] ~ /^[0-9]*[<>]/ || index(W[j], "/") > 0 || index(W[j], ".") > 0)
   }
   if (c == "vitest") return (anyopt(j, "^(-w|--watch|--watch=true|--watch=1)$") || W[nxt(j)] ~ /^(dev|watch)$/)
-  if (c ~ /^(nodemon|uvicorn|gunicorn|watchexec|watch|serve|http-server)$/) return 1
+  if (c == "watch") return !anyopt(j, "^(-[a-zA-Z]*[ge][a-zA-Z]*|--chgexit|--errexit)$")
+  if (c ~ /^(nodemon|uvicorn|gunicorn|watchexec|serve|http-server|live-server|webpack-dev-server)$/) return 1
+  if (c == "node") return leadopt(j, "^--watch(-path(=.*)?)?$")
+  if (c == "deno") return leadopt(j, "^--watch(=.*)?$")
   if (c ~ /^python[0-9.]*$/) {
     for (k = j; k <= n; k++) {
-      if (W[k] == "-m" && W[k + 1] ~ /^(http[.]server|uvicorn|gunicorn|hypercorn)$/) return 1
-      if (W[k] == "-m" && W[k + 1] == "flask") return (W[nxt(k + 2)] == "run")
-      if (W[k] ~ /manage[.]py$/ && W[k + 1] == "runserver") return 1
+      if (W[k] == "-m") {
+        if (W[k + 1] ~ /^(http[.]server|uvicorn|gunicorn|hypercorn)$/) return 1
+        if (W[k + 1] == "flask") return (W[nxt(k + 2)] == "run")
+        return 0
+      }
+      if (!isopt(W[k])) return (W[k] ~ /manage[.]py$/ && W[k + 1] == "runserver")
     }
     return 0
   }
   if (c ~ /manage[.]py$/) return (W[nxt(j)] == "runserver")
-  if (c == "rails") return (W[nxt(j)] ~ /^(s|server)$/)
+  if (c == "rails") return (W[nxt(j)] ~ /^(s|server)$/ && !anyopt(j, "^(-d|--daemon)$"))
   if (c == "flask") return (W[nxt(j)] == "run")
   if (c == "docker" || c == "docker-compose") {
     j = nxt(j)
     if (c == "docker" && W[j] == "compose") j = nxt(j + 1)
     else if (c == "docker") { if (W[j] != "logs") return 0 }
-    if (W[j] == "up") return !anyopt(j + 1, "^(-d|--detach)$")
+    if (W[j] == "up") return !anyopt(j + 1, "^(-d|--detach|--wait|--abort-on-container-exit|--abort-on-container-failure|--exit-code-from(=.*)?|--no-start|--dry-run)$")
     if (W[j] == "logs") return anyopt(j + 1, "^(-[a-zA-Z]*f[a-zA-Z]*|--follow)$")
     return 0
   }
   if (c == "kubectl") {
     j = nxt(j)
     if (W[j] == "port-forward") return 1
-    if (W[j] == "logs") return anyopt(j + 1, "^(-[a-zA-Z]*f[a-zA-Z]*|--follow)$")
+    if (W[j] == "logs") {
+      for (k = j + 1; k <= n; k++) if (W[k] ~ /^jobs?(\/|$)/) return 0
+      return anyopt(j + 1, "^(-[a-zA-Z]*f[a-zA-Z]*|--follow)$")
+    }
     if (W[j] == "get") return anyopt(j + 1, "^(-w|--watch|--watch-only)$")
     return 0
   }
-  if (c == "tail") return anyopt(j, "^(-[a-zA-Z]*[fF][a-zA-Z]*|--follow(=.*)?)$")
+  if (c == "tail") return (anyopt(j, "^(-[a-zA-Z]*[fF][a-zA-Z]*|--follow(=.*)?)$") && !anyopt(j, "^--pid(=.*)?$"))
   if (c == "journalctl") return anyopt(j, "^(-[a-zA-Z]*f[a-zA-Z]*|--follow)$")
-  if (c == "turbo") { j = nxt(j); if (W[j] == "run") j = nxt(j + 1); return (W[j] ~ /^(dev|watch|serve|start)(:[a-z0-9_-]+)?$/) }
+  if (c == "turbo") {
+    j = nxt(j)
+    if (W[j] == "run") j = nxt(j + 1)
+    t = tolower(W[j])
+    return (t ~ /^(dev|watch|serve|start)(:[a-z0-9_-]+)?$/ && !jobname(t))
+  }
   if (c == "nx") {
     j = nxt(j)
     if (W[j] ~ /^(serve|dev|start)$/) return 1
@@ -1420,22 +1466,78 @@ function svcseg(seg,   i, w, lw, c, j, k, t) {
     return 0
   }
   if (c == "ng") return (W[nxt(j)] ~ /^(serve|s)$/)
-  if (c == "astro" || c == "nuxt" || c == "nuxi") return (W[nxt(j)] == "dev")
+  if (c == "astro" || c == "nuxt" || c == "nuxi") return (W[nxt(j)] ~ /^(dev|preview)$/)
   if (c == "expo") return (W[nxt(j)] == "start")
-  if (c == "storybook" || c == "sb") return (W[nxt(j)] == "dev")
+  if (c == "storybook" || c == "sb") return (W[nxt(j)] ~ /^(dev|start)$/)
+  if (c == "browser-sync") return (W[nxt(j)] == "start")
   if (c == "php") { for (k = j; k < n; k++) if (W[k] == "artisan") return (W[k + 1] == "serve"); return 0 }
-  if (c == "hugo") return (W[nxt(j)] == "server")
+  if (c == "hugo") return (W[nxt(j)] ~ /^(server|serve)$/)
   if (c == "jekyll") return (W[nxt(j)] ~ /^(serve|s)$/)
   if (c == "cargo") return (W[nxt(j)] == "watch")
-  if (c == "tsx" && W[nxt(j)] == "watch") return 1
-  if (c ~ /^(tsc|webpack|sass|esbuild|rollup|swc|tailwindcss|jest|mocha|tsx|parcel)$/) return anyopt(j, "^(-w|--watch|--watchAll|--watch=true|--watch=1)$")
+  if (c == "tsx") return (W[nxt(j)] == "watch")
+  if (c == "tsc" || c == "rollup" || c == "swc" || c == "mocha") return anyopt(j, "^(-w|--watch)$")
+  if (c == "webpack") return (W[nxt(j)] ~ /^(serve|watch)$/ || anyopt(j, "^(-w|--watch)$"))
+  if (c == "tailwindcss") return anyopt(j, "^(-w|--watch(=always)?)$")
+  if (c == "sass") return anyopt(j, "^--watch$")
+  if (c == "esbuild") return anyopt(j, "^--watch(=forever)?$")
+  if (c == "jest") return anyopt(j, "^--(watch|watchAll)$")
   return 0
 }
+# JSON string body to the text of the command: real characters, line breaks kept.
+function unesc(s,   out, p, c) {
+  out = ""
+  while ((p = index(s, "\\")) > 0) {
+    out = out substr(s, 1, p - 1)
+    c = substr(s, p + 1, 1)
+    if (c == "n") { out = out "\n"; s = substr(s, p + 2) }
+    else if (c == "r" || c == "t") { out = out " "; s = substr(s, p + 2) }
+    else if (c == "u") { out = out " "; s = substr(s, p + 6) }
+    else { out = out c; s = substr(s, p + 2) }
+  }
+  return out s
+}
+# Heredoc bodies dropped, the inside of quotes emptied (one word is left), redirections
+# with & removed, then every list separator is a ; and a pipe stays a |.
+function clean(s,   m, L, i, line, t, hd, out, re, ch, q, len, sq, dq) {
+  sq = "\047"; dq = "\""
+  gsub(/\\\n/, " ", s)
+  m = split(s, L, "\n")
+  hd = ""; out = ""
+  re = "<<-?[ \t]*[" sq dq "]?[A-Za-z_][A-Za-z0-9_]*"
+  for (i = 1; i <= m; i++) {
+    line = L[i]
+    if (hd != "") { t = line; sub(/^[ \t]+/, "", t); if (t == hd) hd = ""; continue }
+    if (match(line, re) && substr(line, RSTART - 1, 1) != "<") {
+      t = substr(line, RSTART, RLENGTH)
+      sub(/^<<-?[ \t]*/, "", t); sub("^[" sq dq "]", "", t)
+      hd = t
+    }
+    out = out line "\n"
+  }
+  s = out; out = ""; q = ""; len = length(s)
+  for (i = 1; i <= len; i++) {
+    ch = substr(s, i, 1)
+    if (q == "") {
+      if (ch == sq || ch == dq) { q = ch; out = out "_" }
+      else if (ch == "\\") { out = out "_"; i++ }
+      else out = out ch
+    } else if (q == sq) { if (ch == sq) q = "" }
+    else { if (ch == "\\") i++; else if (ch == dq) q = "" }
+  }
+  gsub(/[0-9]*[<>]&[0-9-]*/, " ", out)
+  gsub(/&>>?/, " > ", out)
+  gsub(/\|\|/, ";", out)
+  gsub(/&&/, ";", out)
+  gsub(/&/, ";", out)
+  gsub(/\n/, ";", out)
+  return out
+}
 {
-  s = $0
-  gsub(/\\n/, ";", s)
-  gsub(/\\[rt"]/, " ", s)
-  np = split(s, part, /[;&|]+/)
+  s = clean(unesc($0))
+  ne = split(s, E, ";")
+  last = ""
+  for (q = ne; q >= 1; q--) { t = E[q]; gsub(/[ \t]/, "", t); if (t != "") { last = E[q]; break } }
+  np = split(last, part, "|")
   for (q = 1; q <= np; q++) if (svcseg(part[q])) found = 1
 }
 END { exit !found }'
