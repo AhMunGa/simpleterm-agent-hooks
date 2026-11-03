@@ -1838,11 +1838,26 @@ state_json() { # running|waiting|done -> ,"terminalSequence":... or nothing
 
 # --- permission flow -------------------------------------------------------
 
+# The value of key $1 in agent-hook.conf (section 9.2 D21, its first 4 KiB):
+# the first line `key=value` of that key decides, blanks allowed around the
+# line and the `=`. From the value a CR, a comment (from the first `#`), the
+# blanks around it and one pair of quotes around all of it are taken away
+# (`usage_ask = "off"  # never`). Empty: the default.
+conf_val() { # key
+  [ -f "$ST_DIR/agent-hook.conf" ] || return 0
+  head -c 4096 "$ST_DIR/agent-hook.conf" 2>/dev/null | awk -v k="$1" -v q="'" '{
+    i = index($0, "="); if (!i) next
+    kk = substr($0, 1, i - 1); gsub(/^[ \t]+|[ \t]+$/, "", kk)
+    if (kk != k) next
+    vv = substr($0, i + 1); gsub(/\r/, "", vv); sub(/#.*/, "", vv); gsub(/^[ \t]+|[ \t]+$/, "", vv)
+    f = substr(vv, 1, 1)
+    if (length(vv) >= 2 && (f == "\"" || f == q) && substr(vv, length(vv)) == f) vv = substr(vv, 2, length(vv) - 2)
+    print vv; exit
+  }' 2>/dev/null
+}
+
 conf_int() { # key default
-  v=''
-  if [ -f "$ST_DIR/agent-hook.conf" ]; then
-    v=$(head -c 4096 "$ST_DIR/agent-hook.conf" 2>/dev/null | sed -n "s/^$1=\\([0-9]*\\)\$/\\1/p" | head -n 1)
-  fi
+  v=$(conf_val "$1")
   is_uint "$v" || v=$2
   printf '%s' "$v"
 }
@@ -3041,11 +3056,10 @@ ASK_CODEX_MIN=0.165.0 ASK_CODEX_BELOW=0.166.0
 # (Measured 0 model requests: Claude Code 2.1.316 and 2.1.317 in 22 asks,
 # Codex 0.165.0 in 11; the same harness caught 6 and 31 in real turns.)
 
-# A word value of agent-hook.conf, or $2.
+# A value of agent-hook.conf (conf_val), or $2 if empty. The caller compares
+# it in any case.
 conf_word() { # key default
-  v=''
-  [ -f "$ST_DIR/agent-hook.conf" ] &&
-    v=$(head -c 4096 "$ST_DIR/agent-hook.conf" 2>/dev/null | sed -n "s/^$1=\\([A-Za-z0-9]*\\)\$/\\1/p" | head -n 1)
+  v=$(conf_val "$1")
   printf '%s' "${v:-$2}"
 }
 

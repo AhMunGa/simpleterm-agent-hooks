@@ -689,21 +689,35 @@ function Get-LinkFiles {
     return $files
 }
 
-# conf_int: key=digits from ~/.simpleterm/agent-hook.conf (the first line that
-# names the key decides), or the default.
-function Get-ConfInt([string]$key, [int64]$default) {
+# conf_val: the value of $key in ~/.simpleterm/agent-hook.conf (section 9.2
+# D21, its first 4 KiB): the first line `key=value` of that key decides,
+# blanks allowed around the line and the `=`. From the value a CR, a comment
+# (from the first `#`), the blanks around it and one pair of quotes around all
+# of it are taken away. Empty: the default.
+function Get-ConfVal([string]$key) {
     $path = Join-Path $StDir 'agent-hook.conf'
+    $blank = [char[]]@([char]32, [char]9)
     try {
         if ([IO.File]::Exists($path)) {
             foreach ($line in (Read-HeadB $path 4096).Split([char]10)) {
-                if ($line.StartsWith($key + '=', $Ord) -and $line.Substring($key.Length + 1) -cmatch '\A[0-9]*\z') {
-                    $v = $line.Substring($key.Length + 1)
-                    if (Test-UInt $v) { return [int64]$v }
-                    return $default
-                }
+                $e = $line.IndexOf('=')
+                if ($e -lt 0 -or $line.Substring(0, $e).Trim($blank) -cne $key) { continue }
+                $v = $line.Substring($e + 1).Replace([string][char]13, '')
+                $h = $v.IndexOf('#')
+                if ($h -ge 0) { $v = $v.Substring(0, $h) }
+                $v = $v.Trim($blank)
+                if ($v.Length -ge 2 -and ($v[0] -eq [char]34 -or $v[0] -eq [char]39) -and $v[$v.Length - 1] -eq $v[0]) { $v = $v.Substring(1, $v.Length - 2) }
+                return $v
             }
         }
     } catch { }
+    return ''
+}
+
+# conf_int: key=digits from ~/.simpleterm/agent-hook.conf, or the default.
+function Get-ConfInt([string]$key, [int64]$default) {
+    $v = Get-ConfVal $key
+    if (Test-UInt $v) { return [int64]$v }
     return $default
 }
 
@@ -2990,19 +3004,10 @@ $AskCodexBelow = '0.166.0'
 # (Measured 0 model requests: Claude Code 2.1.316 and 2.1.317 in 22 asks,
 # Codex 0.165.0 in 11; the same harness caught 6 and 31 in real turns.)
 
-# A word value of agent-hook.conf (the first line key=<letters and digits>),
-# or $default (conf_word).
+# A value of agent-hook.conf (Get-ConfVal), or $default if empty (conf_word).
+# The caller compares it in any case.
 function Get-ConfWord([string]$key, [string]$default) {
-    $path = Join-Path $StDir 'agent-hook.conf'
-    $v = ''
-    try {
-        if ([IO.File]::Exists($path)) {
-            foreach ($line in (Read-HeadB $path 4096).Split([char]10)) {
-                $m = [regex]::Match($line, '\A' + [regex]::Escape($key) + '=([A-Za-z0-9]*)\z')
-                if ($m.Success) { $v = $m.Groups[1].Value; break }
-            }
-        }
-    } catch { }
+    $v = Get-ConfVal $key
     if (-not $v) { return $default }
     return $v
 }
