@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.5.0 - 2026-11-03
+
+Usage v2 (SimpleTerm `docs/tech_specs/TDS_AGENT_EVENTS_V2.md` section 9, issue
+AhMunGa/simple-term#418): limits asked from the agent, where each value came from and when it
+was checked, tokens and cost where there are no limits. The plaintext `v` stays 1; the screen's
+OSC 9 is as before.
+
+- **The usage event is a v2 event**: the common fields (`fmt`, `pv`, `av`, `sid`, ...) after the
+  v1 fields, `uq` and `cost` before `ts`. Every window has `src` (`ask`, `file`, `statusline`) and,
+  but for the status line, `at` (Codex: the rollout record's time).
+- **Asking the agent** at a turn's end, only while the app is connected (a tunnel's last event an
+  HTTP 200 within 10 minutes), every 5 minutes per agent and settings folder, in the background
+  with `SIMPLETERM_PROBE=1` in `~/.simpleterm/probe`, 20 s at most, the answer to the tunnel only
+  with `uq`: Claude Code `get_usage` (5-hour, 7-day, per-model 7-day, plan) and Codex `app-server`
+  `account/rateLimits/read` (every limit id, as the rollout names it). Every version and OS is
+  asked; measured (macOS, a local mock API): 0 model requests in 22 asks of Claude Code 2.1.316 and
+  2.1.317 and 11 of Codex 0.165.0. The ask runs the executable on `PATH` with its links followed (a
+  native Claude Code install names its version there), else by its `--version`, kept until the
+  executable changes (no ask that turn). That version stops for good after a Claude Code answer
+  that shows any spend or a hook run in the ask, or after 3 failed or timed-out asks in a row of
+  that version, Claude Code or Codex (`run/ask.<agent>.off`, one version a line, `unknown` if
+  `--version` gives none; the count in `run/ask.<agent>.fail`, cleared by an answer). After a
+  failed sign-in or an answer of no plan limits (`not-subscriber`, sent once) no ask until the
+  credentials file changes; these do not count. One ask per 5 minutes even when several sessions
+  end a turn at once (the slot is claimed at once). An agent still there 3 seconds after its
+  answer is ended with its process group, TERM then KILL (the sh hook starts it in one with `perl`
+  or `setsid`; without either, and in the PowerShell hook, its process tree, which misses a
+  process that left it). `usage_ask=off` turns asking off, `usage_ask_codex=off` only
+  Codex's (its app-server writes its own files in `~/.codex`, syncs its plugins and may refresh an
+  expired sign-in). Claude Code writes its usage cache to its own `~/.claude.json` (README).
+- **agent-hook.conf** values may have blanks around the `=`, a `#` comment, quotes, Windows line
+  ends and a UTF-8 BOM at the start of the file, in any case (`usage_ask = "OFF"  # never`); the
+  first line of a key decides. This holds for every key (`claude_wait` and the rest); before, such
+  a line was ignored. Numbers are read as decimal in the sh hook too (`claude_wait=0090` is 90, not
+  an error; `usage=00` is off), as the PowerShell hook and the app read them (SimpleTerm
+  `TDS_AGENT_ALERTS.md` section 6.7).
+- **The session's version** (`av`) from a Claude Code transcript is a line's own `version`, not one
+  inside a tool result.
+- **GitHub Copilot CLI**: premium requests, chat and completions quota from its session events.
+- **Grok Build** and **OpenCode**: the session's tokens and cost (`cost`); the OpenCode plugins
+  pass the session's cost and tokens on `Stop`.
+- A hook run with `SIMPLETERM_PROBE=1` does nothing.
+
 ## 0.4.0 - 2026-11-03
 
 Event format v2 (SimpleTerm `docs/tech_specs/TDS_AGENT_EVENTS_V2.md`, issue AhMunGa/simple-term#381):
