@@ -39,6 +39,8 @@ HOOK_SH = ROOT / "plugins" / "simpleterm" / "scripts" / "agent-hook.sh"
 SCRIPTS = HOOK_SH.parent
 HOOK_PS1 = ROOT / "plugins" / "simpleterm" / "scripts" / "agent-hook.ps1"
 MOCK = HERE / "mock_relay.py"
+# Every process group a suite started (Suite.popen), for the check that a run leaves nothing.
+ALL_GROUPS = set()
 
 # Relay protocol v1 test vectors (envelope: AES-256-CBC + HMAC-SHA256).
 V_ENC = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
@@ -69,7 +71,8 @@ LINK_T = {"id": "e7" * 16, "secret": "f8" * 32, "enc": "a9" * 32, "mac": "ba" * 
 # as on any real system; the hook must still use the shell's builtin.
 SH_UTILS = [
     "awk", "head", "date", "tr", "sed", "cut", "cksum", "wc", "tail", "mv", "rm",
-    "mkdir", "chmod", "find", "sleep", "cat", "dd", "ls", "ps", "printf", "touch",
+    "mkdir", "chmod", "find", "sleep", "cat", "dd", "ls", "ps", "printf", "touch", "readlink",
+    "perl", "setsid",
 ]
 
 
@@ -112,6 +115,7 @@ class Suite:
             os.symlink(argv[0], self.bin / "sh")
             os.symlink(argv[0], self.bare / "sh")
         self.relay = None
+        self.groups = set()  # process groups of the hooks this suite started (reaped after each case)
         self.start_relay()
 
     def start_relay(self):
@@ -128,6 +132,7 @@ class Suite:
         self.url = "http://127.0.0.1:%d" % self.port
 
     def close(self):
+        self.reap()
         self.relay.terminate()
         self.relay.wait(5)
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -204,15 +209,59 @@ class Suite:
         if self.kind == "ps1":
             # pwsh is run by its path; the hook needs nothing from PATH, and no agent the user has
             # installed (grok, opencode, agy: the version cache runs `--version`) may be found.
-            env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+            # The suite's bin first: stand-in agents for usage asks are there (and nothing else the
+            # user has installed).
+            env["PATH"] = str(self.bin) + ":/usr/bin:/bin:/usr/sbin:/sbin"
             env["POWERSHELL_TELEMETRY_OPTOUT"] = "1"
             env["POWERSHELL_UPDATECHECK"] = "Off"
         env.update(extra or {})
         return env
 
+    def popen(self, argv, **kw):
+        """subprocess.Popen in a session (and process group) of its own, kept for reap(): what a
+        hook leaves running in the background (a send, a done that waits up to 600 s, an ask) is
+        in that group."""
+        p = subprocess.Popen(argv, start_new_session=True, **kw)
+        self.groups.add(p.pid)
+        ALL_GROUPS.add(p.pid)
+        return p
+
+    def proc_run(self, argv, input=None, timeout=60, **kw):
+        """subprocess.run with capture_output, by popen()."""
+        kw.pop("capture_output", None)
+        kw.pop("start_new_session", None)
+        p = self.popen(argv, stdin=subprocess.PIPE if input is not None else kw.pop("stdin", None),
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
+        try:
+            out, err = p.communicate(input, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            out, err = p.communicate()
+            raise
+        return subprocess.CompletedProcess(argv, p.returncode, out, err)
+
+    def reap(self):
+        """Ends what is left of the process groups this case started (TERM, then KILL a second
+        later): nothing a case leaves in the background outlives it. Only processes of this run
+        are touched, by id: a group id is reused once its processes are gone, so a group may
+        belong to someone else by now."""
+        groups, self.groups = self.groups, set()
+        if not groups:
+            return
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            pids = ours(groups, (str(ROOT), str(self.tmp)))
+            for pid in pids:
+                try:
+                    os.kill(pid, sig)
+                except OSError:
+                    pass
+            if not pids or sig == signal.SIGKILL:
+                break
+            time.sleep(1)
+
     def start(self, agent, stdin="", extra=None, bare=False, args=()):
         cmd = list(self.argv) + [agent] + list(args)
-        p = subprocess.Popen(
+        p = self.popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=self.env(extra, bare), cwd=str(self.tmp),
         )
@@ -1441,7 +1490,7 @@ def t_agent_gone(s):
     """The agent process exits while the hook waits: stop polling, print nothing."""
     s.setup([(LINK_A, {})], conf={"claude_wait": 60})
     cmd = [sys.executable, "-I", "-c", AGENT_PY, perm_input(session="gone")] + list(s.argv) + ["claude"]
-    agent = subprocess.Popen(cmd, stdout=subprocess.PIPE, env=s.env(), cwd=str(s.tmp))
+    agent = s.popen(cmd, stdout=subprocess.PIPE, env=s.env(), cwd=str(s.tmp))
     hook_pid = int(agent.stdout.readline())
     wait_for(lambda: s.records("/v1/decision"), 15)
     agent.kill()
@@ -1630,7 +1679,7 @@ COMPACT_LINE = json.dumps({"parentUuid": None, "isSidechain": False, "type": "sy
                                                                                      "postTokens": 42000}}, separators=(",", ":"))
 
 
-def codex_token_line(total=15159, window=258400, rl=True, reached=None):
+def codex_token_line(total=15159, window=258400, rl=True, reached=None, ts="2026-11-03T01:02:03.456Z"):
     rate = None
     if rl:
         rate = {"limit_id": "codex", "limit_name": None,
@@ -1641,7 +1690,7 @@ def codex_token_line(total=15159, window=258400, rl=True, reached=None):
                                        "last_token_usage": {"input_tokens": total - 159, "cached_input_tokens": 0,
                                                             "output_tokens": 159, "total_tokens": total},
                                        "model_context_window": window}
-    return json.dumps({"timestamp": "t", "ordinal": 1, "type": "event_msg",
+    return json.dumps({"timestamp": ts, "ordinal": 1, "type": "event_msg",
                        "payload": {"type": "token_count", "info": info, "rate_limits": rate}}, separators=(",", ":"))
 
 
@@ -1887,19 +1936,19 @@ def t_usage_statusline(s):
     """The optional status line tap adds the window size and the 5-hour/7-day limits."""
     s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})])
     tap = SCRIPTS / "statusline-tap.sh"
-    p = subprocess.run([s.argv[0], str(tap), "cat"], input=json.dumps(STATUSLINE).encode(), capture_output=True,
+    p = s.proc_run([s.argv[0], str(tap), "cat"], input=json.dumps(STATUSLINE).encode(), capture_output=True,
                        env=s.env(), timeout=20)
     s.check("statusline: passes the input to the user's command", p.stdout.decode() == json.dumps(STATUSLINE), p.stdout[:200])
     saved = s.home / ".simpleterm" / "run" / "usage.u-claude.json"
     s.check("statusline: saved for the hooks", saved.exists() and saved.read_text().split("\n", 1)[1].strip() == json.dumps(STATUSLINE))
     # Claude Code runs a status line command with /bin/sh -c (spawn shell: true), not $SHELL or
     # the first sh on PATH: the user's command must see the same interpreter behind the tap.
-    p = subprocess.run([s.argv[0], str(tap), 'echo "$0"'], input=b"{}", capture_output=True,
+    p = s.proc_run([s.argv[0], str(tap), 'echo "$0"'], input=b"{}", capture_output=True,
                        env=s.env({"SHELL": "/bin/zsh"}), timeout=20)
     s.check("statusline: the user's command runs with /bin/sh, as in Claude Code", p.stdout == b"/bin/sh\n", p.stdout)
-    p = subprocess.run([s.argv[0], str(tap)], input=b"{}", capture_output=True, env=s.env(), timeout=20)
+    p = s.proc_run([s.argv[0], str(tap)], input=b"{}", capture_output=True, env=s.env(), timeout=20)
     s.check("statusline: no command and no data prints nothing", p.stdout == b"" and p.returncode == 0, p.stdout)
-    p = subprocess.run([s.argv[0], str(tap)], input=json.dumps(STATUSLINE).encode(), capture_output=True, env=s.env(), timeout=20)
+    p = s.proc_run([s.argv[0], str(tap)], input=json.dumps(STATUSLINE).encode(), capture_output=True, env=s.env(), timeout=20)
     s.check("statusline: no command prints a short line of its own",
             p.stdout.decode() == "Opus · context 8% · 5h 23% · 7d 41%\n", p.stdout)
     tr = write(s.tmp / "claude" / "sl.jsonl", claude_line() + "\n")
@@ -1910,8 +1959,8 @@ def t_usage_statusline(s):
                                " lim=five_hour:23.5:300:4102444800 lim=seven_day:41.2:10080:4102444800\x07"), repr(out))
     rec = wait_for(lambda: ingests(s, "usage"), 20)
     s.check("statusline: limits in the event", rec and rec[0]["plain_json"].get("lims") == [
-        {"id": "five_hour", "pct": 23.5, "win_min": 300, "resets_at": 4102444800},
-        {"id": "seven_day", "pct": 41.2, "win_min": 10080, "resets_at": 4102444800}], str(rec[0].get("plain_json") if rec else None))
+        {"id": "five_hour", "pct": 23.5, "win_min": 300, "resets_at": 4102444800, "src": "statusline"},
+        {"id": "seven_day", "pct": 41.2, "win_min": 10080, "resets_at": 4102444800, "src": "statusline"}], str(rec[0].get("plain_json") if rec else None))
     old = "1000\n" + json.dumps(STATUSLINE) + "\n"
     saved.write_text(old)
     rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-claude", "transcript_path": str(tr), "hook_event_name": "PostCompact"}),
@@ -2007,9 +2056,11 @@ def t_usage_codex(s):
     p = rec[0].get("plain_json", {}) if rec else {}
     s.check("usage codex: rollout context, window, baseline",
             p.get("ctx") == {"used": 15159, "win": 258400, "baseline": 12000, "src": "rollout"} and p.get("app") == "codex", str(p))
+    # Section 9.1: the rollout is a file source; at is the token_count record's time.
     s.check("usage codex: limits and plan", p.get("lims") == [
-        {"id": "codex.primary", "pct": 4.0, "win_min": 300, "resets_at": 1795746291},
-        {"id": "codex.secondary", "pct": 12.5, "win_min": 10080, "resets_at": 1796000000}] and p.get("plan") == "plus", str(p))
+        {"id": "codex.primary", "pct": 4.0, "win_min": 300, "resets_at": 1795746291, "src": "file", "at": 1793667723},
+        {"id": "codex.secondary", "pct": 12.5, "win_min": 10080, "resets_at": 1796000000, "src": "file", "at": 1793667723}]
+            and p.get("plan") == "plus", str(p))
     s.check("usage codex: done still sent", wait_for(lambda: ingests(s, "done"), 20))
     tun, tctl = s.spawn_mock()
     try:
@@ -2049,7 +2100,7 @@ def t_codex_hooks(s):
     write(noisy / "scripts" / "agent-hook.sh", "echo noise\n")
     for ev in ("SessionStart", "PostCompact", "Stop"):
         cmd = hooks[ev][0]["hooks"][0]["command"].replace("${PLUGIN_ROOT}", str(noisy))
-        p = subprocess.run([s.argv[0], "-c", cmd], input=b"{}", capture_output=True, env=s.env(), timeout=20)
+        p = s.proc_run([s.argv[0], "-c", cmd], input=b"{}", capture_output=True, env=s.env(), timeout=20)
         s.check("codex hooks: %s command prints nothing, whatever the script writes" % ev,
                 p.returncode == 0 and p.stdout == b"", p.stdout)
     s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})])
@@ -2057,7 +2108,7 @@ def t_codex_hooks(s):
     cmd = hooks["SessionStart"][0]["hooks"][0]["command"].replace("${PLUGIN_ROOT}", str(SCRIPTS.parent))
     inp = json.dumps({"session_id": "cx-ss", "transcript_path": str(ro), "cwd": "/w/repo", "hook_event_name": "SessionStart",
                       "source": "resume", "model": "gpt-5.5"})
-    p = subprocess.run([s.argv[0], "-c", cmd], input=inp.encode(), capture_output=True, env=s.env({"SIMPLETERM": "1"}), timeout=30)
+    p = s.proc_run([s.argv[0], "-c", cmd], input=inp.encode(), capture_output=True, env=s.env({"SIMPLETERM": "1"}), timeout=30)
     rec = wait_for(lambda: ingests(s, "usage"), 20)
     s.check("codex hooks: SessionStart through its command still reports usage",
             p.stdout == b"" and rec and rec[0]["plain_json"]["ctx"].get("used") == 15159, "%r %s" % (p.stdout, str(rec)[:200]))
@@ -2123,6 +2174,10 @@ def notify_pty(s, args, extra=None):
     """Runs `simpleterm-notify.sh` on a terminal; returns (exit code, terminal output)."""
     env = s.env(extra)
     pid, fd = pty.fork()
+    if pid > 0:
+        # (Its own session: reaped with the case.)
+        s.groups.add(pid)
+        ALL_GROUPS.add(pid)
     if pid == 0:
         try:
             os.chdir(str(s.tmp))
@@ -2157,7 +2212,7 @@ def t_notify_no_tty(s):
     """`simpleterm notify` with SIMPLETERM=1 and no controlling terminal still sends its event (the probe of
     /dev/tty used a special builtin: dash ended the whole script when it could not open it)."""
     s.setup([(LINK_A, {"push": "disabled"})])
-    p = subprocess.run([s.argv[0], str(SCRIPTS / "simpleterm-notify.sh"), "notify", "no tty title", "body"], capture_output=True,
+    p = s.proc_run([s.argv[0], str(SCRIPTS / "simpleterm-notify.sh"), "notify", "no tty title", "body"], capture_output=True,
                        env=s.env({"SIMPLETERM": "1"}), cwd=str(s.tmp), timeout=30, start_new_session=True, stdin=subprocess.DEVNULL)
     rec = wait_for(lambda: ingests(s, "notify"), 20)
     s.check("notify without a terminal: exit 0 and the event is sent", p.returncode == 0 and rec and rec[0]["plain_json"].get("title") == "no tty title",
@@ -2236,10 +2291,10 @@ def t_cli_wrapper(s):
     text = w.read_text() if w.exists() else ""
     s.check("cli: written on Stop", "s='%s'" % (SCRIPTS / "simpleterm-notify.sh") in text and os.access(w, os.X_OK), text)
     s.ctl("/_ctl/reset", {})
-    p = subprocess.run([str(w), "notify", "via wrapper"], capture_output=True, env=s.env(), timeout=20)
+    p = s.proc_run([str(w), "notify", "via wrapper"], capture_output=True, env=s.env(), timeout=20)
     s.check("cli: wrapper runs notify", p.returncode == 0 and wait_for(lambda: ingests(s, "notify"), 20), p.stderr)
     w.write_text(text.replace(str(SCRIPTS), "/nonexistent/old-version"))
-    p = subprocess.run([str(w), "notify", "x"], capture_output=True, env=s.env(), timeout=20)
+    p = s.proc_run([str(w), "notify", "x"], capture_output=True, env=s.env(), timeout=20)
     s.check("cli: a moved plugin is reported", p.returncode == 1 and b"is gone" in p.stderr, p.stderr)
     s.run("claude", json.dumps({"session_id": "w", "hook_event_name": "SessionStart", "source": "startup"}))
     s.check("cli: rewritten when its script is gone", str(SCRIPTS) in w.read_text())
@@ -2325,7 +2380,7 @@ def t_copilot_hooks(s):
 
     def run(event, env):
         cmd = h["hooks"][event][0]["bash"]
-        p = subprocess.run(["/bin/bash", "-c", cmd], input=b"{}", capture_output=True, cwd=str(proj), env=s.env(dict({"COPILOT_HOME": str(cop)}, **env)), timeout=60)
+        p = s.proc_run(["/bin/bash", "-c", cmd], input=b"{}", capture_output=True, cwd=str(proj), env=s.env(dict({"COPILOT_HOME": str(cop)}, **env)), timeout=60)
         return p.returncode, p.stdout.decode()
     rc, out = run("notification", {"PLUGIN_ROOT": str(root)})
     s.check("copilot paths: PLUGIN_ROOT", rc == 0 and out.strip() == "root copilot notification", "%d %r" % (rc, out))
@@ -2462,7 +2517,7 @@ def t_agy_paths(s):
         cmd = agy_command(event)
         if substitute:  # agy replacing ${PLUGIN_ROOT} itself
             cmd = cmd.replace("${PLUGIN_ROOT}", str(root))
-        p = subprocess.run([s.argv[0], "-c", cmd], input=stdin, capture_output=True, cwd=str(where),
+        p = s.proc_run([s.argv[0], "-c", cmd], input=stdin, capture_output=True, cwd=str(where),
                            env=s.env(env), timeout=60)
         return p.returncode, p.stdout.decode()
 
@@ -2639,8 +2694,10 @@ NODE = shutil.which("node")
 
 def node_plugin(s, kind, scenario, timeout=90):
     plugin = {"v1": ROOT / "plugins" / "opencode-v1" / "simpleterm.js", "v2": ROOT / "plugins" / "opencode" / "index.js"}[kind]
-    p = subprocess.run([NODE, str(HERE / "opencode_harness.mjs"), kind, str(plugin), json.dumps(scenario)],
-                       capture_output=True, text=True, env=s.env(), timeout=timeout, cwd=str(s.tmp))
+    p = s.proc_run([NODE, str(HERE / "opencode_harness.mjs"), kind, str(plugin), json.dumps(scenario)],
+                   env=s.env(), timeout=timeout, cwd=str(s.tmp))
+    p.stdout = p.stdout.decode("utf-8", "replace")
+    p.stderr = p.stderr.decode("utf-8", "replace")
     try:
         return json.loads(p.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
@@ -2655,7 +2712,8 @@ def replies(calls):
 
 V2_DIR = HERE / "fixtures" / "v2"
 V2_RID = "0123456789abcdef"
-V2_PIN = {"SIMPLETERM_HOOK_TEST": "1", "SIMPLETERM_HOOK_TEST_RID": V2_RID, "SIMPLETERM_HOOK_TEST_NONCE": V_NONCE,
+V2_URID = "a1b2c3d4e5f60718"
+V2_PIN = {"SIMPLETERM_HOOK_TEST": "1", "SIMPLETERM_HOOK_TEST_RID": V2_RID, "SIMPLETERM_HOOK_TEST_URID": V2_URID, "SIMPLETERM_HOOK_TEST_NONCE": V_NONCE,
           "SIMPLETERM_HOOK_TEST_TS": V_TS, "SIMPLETERM_HOOK_TEST_TMS": V_TS + "123", "SIMPLETERM_HOOK_TEST_IV": V_IV}
 V2_LINK_NAMES = {LINK_A["id"][:8]: "relay1", LINK_B["id"][:8]: "relay2", LINK_T["id"][:8]: "tunnel"}
 # The agents each runtime serves (the PowerShell hook: Claude Code, Grok Build, Codex).
@@ -2690,7 +2748,16 @@ def v2_run_case(s, case, conf=None, want_n=0):
             tctl("/_ctl/reset", {})
             tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, push="suppressed", unknown_error="unknown", max_body=65536)}})
         for name, text in case.get("files", {}).items():
-            (s.home / name).write_text(text)
+            # NOWEPOCH: the time of the run (a tunnel's last answer that must be recent).
+            write(s.home / name, text.replace("HOMEP", str(s.home)).replace("NOWEPOCH", str(int(time.time()))))
+        for name, text in case.get("bins", {}).items():
+            # Stand-in agents for usage asks, in the hook's PATH.
+            b = s.bin / name
+            b.write_text(text)
+            b.chmod(0o755)
+        for name, ver in case.get("vercache", {}).items():
+            # Their measured --version (run/ver.<agent>: the file and its version), not older than the file.
+            write(s.home / ".simpleterm" / "run" / ("ver." + name), "%s\n%s\n" % (s.bin / name, ver))
         dump = s.tmp / "plain"
         shutil.rmtree(dump, ignore_errors=True)
         dump.mkdir()
@@ -2706,8 +2773,8 @@ def v2_run_case(s, case, conf=None, want_n=0):
             env.update(st.get("env", {}))
             rc, out, err, el = s.run(st["args"][0], inp, env, args=st["args"][1:])
             outs.append(out)
-        quiet = 4 if s.kind == "ps1" else 1.5
-        wait_for(lambda: len([f for f in dump.iterdir() if f.name.split(".")[2:3] == [V2_RID]]) >= want_n, 30, 0.2)
+        quiet = max(case.get("quiet", 0), 4 if s.kind == "ps1" else 1.5)
+        wait_for(lambda: len([f for f in dump.iterdir() if f.name.split(".")[2] in (V2_RID, V2_URID)]) >= want_n, 30, 0.2)
         last = [-1, time.time()]
 
         def settled():
@@ -2723,7 +2790,7 @@ def v2_run_case(s, case, conf=None, want_n=0):
         pv = '"pv":"%s"' % re.search(r"^HOOK_VERSION=([0-9.]+)$", HOOK_SH.read_text(), re.M).group(1)
         for f in dump.iterdir():
             link, ev, rid = f.name.split(".")[:3]
-            if rid == V2_RID:
+            if rid in (V2_RID, V2_URID):
                 text = f.read_bytes().decode("utf-8", "replace").replace(pv, '"pv":"@PV@"')
                 got.append("%s %s %s" % (V2_LINK_NAMES.get(link, link), ev, text))
         return sorted(got), outs
@@ -2883,7 +2950,7 @@ def t_v2_input_drain(s):
     big = json.dumps({"session_id": "s1", "turn_id": "t1", "cwd": "/w", "hook_event_name": "PostToolUse", "tool_name": "Bash",
                       "tool_input": {"command": "cat big"}, "tool_response": "x" * (1 << 20)}).encode()
     for agent in ("codex", "claude"):
-        p = subprocess.Popen(list(s.argv) + [agent], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        p = s.popen(list(s.argv) + [agent], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              env=s.env(), cwd=str(s.tmp))
         broken = False
         try:
@@ -2894,6 +2961,600 @@ def t_v2_input_drain(s):
         p.stdin = None
         out, err = p.communicate(timeout=90)
         s.check("input drain %s: 1 MiB written to the end, exit 0" % agent, not broken and p.returncode == 0, "broken=%s rc=%s" % (broken, p.returncode))
+
+
+COPILOT_QUOTA_LINE = json.dumps({"type": "model.model_call_success", "id": "e9", "timestamp": "2026-11-03T01:02:03.456Z", "parentId": None, "data": {
+    "model": "gpt-x", "quotaSnapshots": {
+        "chat": {"isUnlimitedEntitlement": False, "entitlementRequests": 200, "usedRequests": 4, "remainingPercentage": 97.9, "resetDate": "2026-12-01T00:00:00Z"},
+        "completions": {"isUnlimitedEntitlement": False, "entitlementRequests": 2000, "usedRequests": 0, "remainingPercentage": 100, "resetDate": "2026-12-01T00:00:00Z"},
+        "premium_interactions": {"isUnlimitedEntitlement": False, "entitlementRequests": 0, "usedRequests": 0, "remainingPercentage": 0, "resetDate": "2026-12-01T00:00:00Z"},
+        "unlimited_thing": {"isUnlimitedEntitlement": True, "entitlementRequests": 50, "remainingPercentage": 10, "resetDate": "2026-12-01T00:00:00Z"}}}},
+    separators=(",", ":"))
+
+
+def t_v2_usage(s):
+    """Section 9.1 and 9.3: the usage event's v2 fields from the file sources (Codex rollout src/at, Copilot
+    events.jsonl quotaSnapshots, Grok usage.json and OpenCode cost), to the tunnel only."""
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2}), (LINK_A, {"fmt": 2, "push": "disabled"})])
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown")}})
+
+        def usage():
+            tctl("/_ctl/reset", {})
+            return lambda: [r.get("plain") for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and r["body"]["ev"] == "usage"]
+        if s.kind == "sh":
+            # Copilot (sh only): the newest model call's quota; items unlimited or without requests are left out.
+            ev = write(s.tmp / "cop" / "events.jsonl", COPILOT_QUOTA_LINE + "\n")
+            got = usage()
+            s.run("copilot", json.dumps({"hookName": "agentStop", "sessionId": "cp1", "cwd": "/w/c", "transcriptPath": str(ev)}))
+            u = wait_for(got, 20)
+            p = json.loads(u[0]) if u else {}
+            s.check("usage copilot: chat and completions, pct 100 less remaining, a month's window, file, at",
+                    p.get("lims") == [{"id": "copilot.chat", "pct": 2.1, "win_min": 43200, "resets_at": 1796083200, "src": "file", "at": 1793667723},
+                                      {"id": "copilot.completions", "pct": 0, "win_min": 43200, "resets_at": 1796083200, "src": "file", "at": 1793667723}]
+                    and "ctx" not in p and p.get("fmt") == 2, str(p)[:400])
+            # OpenCode (sh only): the session's tokens and cost from the bridge.
+            got = usage()
+            s.run("opencode", json.dumps({"hook_event_name": "Stop", "session_id": "ses_c", "cwd": "/w/o", "oc": "2", "last_assistant_message": "t",
+                                          "cost": 0.0123456789, "tokens_in": 12800, "tokens_out": 3400}))
+            u = wait_for(got, 20)
+            s.check("usage opencode: cost (micro-USD, cut), tokens, session", u and u[0].endswith(
+                ',"cost":{"usd":0.012345,"tok_in":12800,"tok_out":3400,"scope":"session"},"ts":%s}' % json.loads(u[0])["ts"]), str(u)[:400])
+        # Codex rollout with a null limit_id (Codex's own limit) and reached false: the ids the ask makes too.
+        line = json.loads(codex_token_line())
+        line["payload"]["rate_limits"]["limit_id"] = None
+        line["payload"]["rate_limits"]["rate_limit_reached_type"] = False
+        ro = write(s.tmp / "cx" / "ro.jsonl", json.dumps(line, separators=(",", ":")) + "\n")
+        got = usage()
+        s.run("codex", json.dumps({"session_id": "cxn", "turn_id": "t", "transcript_path": str(ro), "cwd": "/w/repo", "hook_event_name": "Stop",
+                                   "stop_hook_active": False, "last_assistant_message": "Done."}), {"SIMPLETERM": "1"})
+        u = wait_for(got, 20)
+        p = json.loads(u[0]) if u else {}
+        s.check("usage codex: a null limit_id is codex, reached false is not reached",
+                [x["id"] for x in p.get("lims", [])] == ["codex.primary", "codex.secondary"], str(p)[:300])
+        # Grok: usage.json of its session (costUsdTicks 10^-10 USD each).
+        sd = s.home / ".grok" / "sessions" / "%2Fw%2Fgrokproj" / "gk-1"
+        write(sd / "usage.json", json.dumps({"sessionId": "gk-1", "session": {"inputTokens": 34380, "outputTokens": 93, "costUsdTicks": 303420000}}))
+        got = usage()
+        inp, env = grok_input("Stop", reason="end_turn", promptId="p1", stopHookActive=False, lastAssistantMessage="Grok done.")
+        s.run("claude", inp, env)
+        u = wait_for(got, 20)
+        p = json.loads(u[0]) if u else {}
+        s.check("usage grok: cost from usage.json, no limits", p.get("cost") == {"usd": 0.030342, "tok_in": 34380, "tok_out": 93, "scope": "session"}
+                and "lims" not in p and "ctx" not in p, str(p)[:300])
+        s.check("usage: not to the relay", not [r for r in s.records("/v1/ingest") if r["body"]["ev"] == "usage"])
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+
+# A stand-in Claude Code (or Codex) for the usage ask: answers --version with the file version (else a measured
+# version), get_usage with the file reply (or none), counts its runs and --version runs, notes its environment and
+# folder, and waits for its input to end, as the real one does; with the file linger it then stays, with a child.
+FAKE_ASKER = """#!/bin/sh
+d=$HOME/..
+if [ "$1" = --version ]; then
+  echo x >>"$d/vcalls"
+  if [ -f "$d/version" ]; then cat "$d/version"; elif [ "${0##*/}" = codex ]; then echo "codex-cli 0.165.0"; else echo "2.1.316 (Claude Code)"; fi
+  exit 0
+fi
+n=$(cat "$d/asks" 2>/dev/null || echo 0)
+echo $((n + 1)) >"$d/asks"
+echo "exe=$0 probe=${SIMPLETERM_PROBE:-} simpleterm=${SIMPLETERM:-} pwd=$(pwd)" >"$d/ask.env"
+read -r l
+[ -f "$d/reply" ] && cat "$d/reply"
+[ -f "$d/reply2" ] && { read -r l2; read -r l3; cat "$d/reply2"; }
+cat >/dev/null
+if [ -f "$d/linger" ]; then sleep 600 & echo $! >"$d/child"; wait; fi
+if [ -f "$d/stubborn" ]; then
+  echo $$ >"$d/agentpid"
+  sleep 600 & echo $! >"$d/child"
+  ( sleep 601 & echo $! >"$d/grand" ) &
+  trap '' TERM
+  while :; do sleep 1; done
+fi
+"""
+
+
+def t_conf_vectors(s):
+    """TDS_AGENT_ALERTS section 6.7 read vectors R1-R46 (tests/fixtures/conf/read-vectors.json): what the hook does
+    with each key of agent-hook.conf as the app reads it (caps 540 and 110, poll_wait 1-25, usage, the word keys,
+    done_delay per agent). The PowerShell hook has no agy_wait nor opencode_wait (no Antigravity, no OpenCode)."""
+    vec = json.loads((HERE / "fixtures" / "conf" / "read-vectors.json").read_text(encoding="utf-8"))["vectors"]
+    s.setup([])
+    conf = s.home / ".simpleterm" / "agent-hook.conf"
+    for v in vec:
+        if s.kind == "ps1" and v["key"] in ("agy_wait", "opencode_wait"):
+            continue
+        conf.write_bytes(bytes.fromhex(v["file_hex"]))
+        wants = v["want"] if isinstance(v["want"], dict) else {"claude": v["want"]}
+        for agent, want in sorted(wants.items()):
+            rc, out, err, el = s.run(agent, "", {"SIMPLETERM_HOOK_TEST": "1"}, args=("__conf", v["key"]))
+            s.check("conf %s %s (%s, %s): %s" % (v["id"], v["key"], agent, v["what"], want), out.strip() == want,
+                    "got %r rc=%s %s" % (out, rc, err[-200:]))
+
+
+def t_v2_usage_ask_gate(s):
+    """Section 9.2 D21/D22: every version is asked, by the version of the executable that the ask runs (a native
+    install links it to versions/<v> and the ask runs that file; else the file's --version, cached, `unknown` if it
+    gives none, measured again in the background when the file is newer or another, no ask that turn); that version
+    stops for good after an answer showing spend or a hook, or 3 failed asks in a row (an answer resets the count;
+    sign-in results do not count); the session's av is a transcript line's top-level "version"; an agent that stays
+    ends with its children; agent-hook.conf values with comments, blanks, quotes or a CR."""
+    tun, tctl = s.spawn_mock()
+    try:
+        trl = lambda v, extra=None: json.dumps(dict({"type": "user", "version": v, "message": {"role": "user", "content": "x"}}, **(extra or {}))) + "\n"
+        tr = write(s.tmp / "trg.jsonl", trl("2.1.316"))
+        stop = lambda sid="sg1": cc_event(sid, "Stop", stop_hook_active=False, last_assistant_message="Done.", background_tasks=[], session_crons=[],
+                                          transcript_path=str(tr))
+        run = s.home / ".simpleterm" / "run"
+        fake = s.bin / "claude"
+        vd = s.tmp / "share" / "claude" / "versions"
+        sess = {"total_cost_usd": 0, "total_api_duration_ms": 0, "total_duration_ms": 0, "total_lines_added": 0, "total_lines_removed": 0, "model_usage": {}}
+        ok = {"type": "control_response", "response": {"subtype": "success", "request_id": "1", "response": {"session": sess,
+            "subscription_type": "max", "rate_limits_available": True, "rate_limits": {"seven_day": {"utilization": 12.5, "resets_at": "2026-11-10T00:00:00Z"}}}}}
+        spent = json.loads(json.dumps(ok))
+        spent["response"]["response"]["session"].update(total_cost_usd=0.0031, total_api_duration_ms=900, model_usage={"claude-x": {"inputTokens": 10}})
+        unknown = json.loads(json.dumps(ok))
+        unknown["response"]["response"]["rate_limits"] = None
+        nosub = {"type": "control_response", "response": {"subtype": "success", "request_id": "1", "response": {"session": sess, "rate_limits_available": False}}}
+        line = lambda o: json.dumps(o, separators=(",", ":")) + "\n"
+        cache = run / "ver.claude"
+
+        def setup(reply=ok, conf_text=None, link=None, seed="2.1.316"):
+            s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})])
+            tctl("/_ctl/reset", {})
+            tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown")}})
+            for f in ("asks", "ask.env", "reply", "vcalls", "version", "linger", "child", "stubborn", "agentpid", "grand"):
+                (s.tmp / f).unlink() if (s.tmp / f).exists() else None
+            if conf_text is not None:
+                (s.home / ".simpleterm" / "agent-hook.conf").write_bytes(conf_text)
+            answer(reply)
+            run.mkdir(parents=True, exist_ok=True)
+            fresh()
+            if fake.is_symlink() or fake.exists():
+                fake.unlink()
+            if link:
+                point(link)
+            else:
+                fake.write_text(FAKE_ASKER)
+                fake.chmod(0o755)
+                if seed:
+                    write(cache, "%s\n%s\n" % (fake, seed))
+
+        def answer(reply):
+            (s.tmp / "reply").write_text(reply if isinstance(reply, str) else line(reply))
+
+        def point(v):
+            # A native install: the link on PATH names versions/<v>.
+            if not (vd / v).exists():
+                write(vd / v, FAKE_ASKER).chmod(0o755)
+            if fake.is_symlink():
+                fake.unlink()
+            fake.symlink_to(vd / v)
+
+        def fresh():
+            # The app connected now, the last ask 5 minutes past.
+            (run / ("tun.%s.last" % LINK_T["id"][:8])).write_text("%d 200\n" % int(time.time()))
+            for f in run.glob("ask.claude.*"):
+                if not f.name.endswith((".auth", ".off", ".fail")):
+                    f.write_text("%d\n" % (int(time.time()) - 400))
+
+        def asks():
+            return int((s.tmp / "asks").read_text()) if (s.tmp / "asks").exists() else 0
+
+        def vcalls():
+            return len((s.tmp / "vcalls").read_text().splitlines()) if (s.tmp / "vcalls").exists() else 0
+
+        def events():
+            return [json.loads(r["plain"]) for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and r["body"]["ev"] == "usage"]
+
+        def off():
+            f = run / "ask.claude.off"
+            return f.read_text().splitlines() if f.exists() else []
+
+        def fails():
+            f = run / "ask.claude.fail"
+            return f.read_text().strip() if f.exists() else None
+
+        def turn(sid="sg1", wait=2.5):
+            s.run("claude", stop(sid), {"SIMPLETERM": "1"})
+            time.sleep(wait)
+
+        def asked(sid="sg1", within=20):
+            # One more ask, its event sent.
+            n, e = asks(), len(events())
+            s.run("claude", stop(sid), {"SIMPLETERM": "1"})
+            return bool(wait_for(lambda: asks() > n and len(events()) > e, within))
+        # Any version is asked (D22): executables and a session outside the measured ones.
+        for v in ("2.2.0", "2.1.315"):
+            setup(seed=v)
+            tr.write_text(trl("2.3.0"))
+            s.check("ask: executable %s, session 2.3.0 -> asked" % v, asked() and asks() == 1 and ("usage-ask claude " + v) in s.log_text(), s.log_text()[-300:])
+        tr.write_text(trl("2.1.316"))
+        # No --version measured yet: the first turn measures it (no ask then), the next one asks.
+        setup(seed=None)
+        turn()
+        wait_for(lambda: vcalls() >= 1, 15)
+        s.check("ask gate: no --version cache -> not asked this turn, measured", asks() == 0 and vcalls() == 1, "%d asks, %d --version" % (asks(), vcalls()))
+        wait_for(lambda: cache.exists(), 20)
+        fresh()
+        s.check("ask gate: then asked by the cached version", asked() and asks() == 1 and vcalls() == 1, "%d asks, %d --version" % (asks(), vcalls()))
+        # The executable replaced (newer than the cache): not asked with the old version; measured again.
+        past = fake.stat().st_mtime - 10
+        os.utime(cache, (past, past))
+        (s.tmp / "version").write_text("2.2.1 (Claude Code)\n")
+        fresh()
+        turn()
+        wait_for(lambda: vcalls() >= 2, 15)
+        s.check("ask gate: executable newer than the cache -> not asked this turn, measured again", asks() == 1 and vcalls() == 2, "%d asks, %d --version" % (asks(), vcalls()))
+        wait_for(lambda: not (run / "ver.claude.lock").exists() and "2.2.1" in cache.read_text(), 10)
+        fresh()
+        s.check("ask gate: then asked as 2.2.1", asked() and "usage-ask claude 2.2.1" in s.log_text(), s.log_text()[-300:])
+        # An executable whose --version says nothing: asked as `unknown`, which stops as any version does.
+        setup(spent, seed=None)
+        (s.tmp / "version").write_text("")
+        turn()
+        wait_for(lambda: cache.exists(), 20)
+        fresh()
+        s.check("ask gate: no version from --version -> asked as unknown; spend stops unknown",
+                asked() and "usage-ask claude unknown" in s.log_text() and wait_for(lambda: off() == ["unknown"], 5), "off %s; %s" % (off(), s.log_text()[-300:]))
+        fresh()
+        turn()
+        s.check("ask gate: unknown stopped -> not asked", asks() == 1, str(asks()))
+        # A native install: the link names the version (no --version), and the ask runs the file it names.
+        setup(link="2.2.0")
+        ran = asked()
+        env = (s.tmp / "ask.env").read_text() if (s.tmp / "ask.env").exists() else ""
+        s.check("ask gate: native link to versions/2.2.0 -> asked, running versions/2.2.0, no --version",
+                ran and vcalls() == 0 and ("exe=%s " % (vd / "2.2.0")) in env, "%d --version, %s" % (vcalls(), env.strip()))
+        # Spend stops that executable version only, and each stopped version stays stopped: a native install
+        # moving between two versions, sessions of both.
+        setup(spent, link="2.1.316")
+        for i in range(6):
+            v = ("2.1.316", "2.1.317")[i % 2]
+            tr.write_text(trl(v))
+            point(v)
+            fresh()
+            before = asks()
+            s.run("claude", stop("sg-" + v), {"SIMPLETERM": "1"})
+            if i < 2:
+                wait_for(lambda: asks() > before and len(off()) > i, 15)
+            else:
+                time.sleep(2.5)
+        s.check("ask gate: spend by 2.1.316 and by 2.1.317 -> each asked once, both stopped", asks() == 2 and sorted(off()) == ["2.1.316", "2.1.317"],
+                "%d asks, off %s" % (asks(), off()))
+        tr.write_text(trl("2.1.316"))
+        # Three failed asks in a row (failed, timeout) stop the version: the fourth turn does not ask.
+        setup(unknown)
+        for reply in (unknown, unknown, ""):
+            answer(reply)
+            fresh()
+            asked(within=40)
+        fresh()
+        turn()
+        u = events()
+        s.check("ask gate: failed, failed, timeout -> that version stopped, the 4th turn not asked",
+                asks() == 3 and off() == ["2.1.316"] and fails() == "2.1.316 3" and [x.get("uq", {}).get("err") for x in u] == ["failed", "failed", "timeout"],
+                "%d asks, off %s, fail %r, %s" % (asks(), off(), fails(), [x.get("uq") for x in u]))
+        # An answer clears the count; sign-in results (not-subscriber, auth) leave it as it is.
+        setup(unknown)
+        for reply in (unknown, unknown, ok):
+            answer(reply)
+            fresh()
+            asked()
+        s.check("ask gate: an answer clears the count", fails() is None and not off(), "fail %r, off %s" % (fails(), off()))
+        for reply in (unknown, unknown, nosub):
+            answer(reply)
+            fresh()
+            asked()
+        s.check("ask gate: failed, failed, not-subscriber -> still 2, not stopped", fails() == "2.1.316 2" and not off(), "fail %r, off %s" % (fails(), off()))
+        for f in run.glob("ask.claude.*.auth"):
+            f.unlink()
+        answer({"type": "control_response", "response": {"subtype": "error", "request_id": "1", "error": "Not logged in · Please run /login"}})
+        fresh()
+        asked()
+        s.check("ask gate: then auth -> still 2", fails() == "2.1.316 2" and not off() and events()[-1].get("uq", {}).get("err") == "auth",
+                "fail %r, off %s, %s" % (fails(), off(), events()[-1].get("uq") if events() else None))
+        # Another version counts from 1; a count of 3 alone (the stop not yet written) stops it too.
+        setup(unknown, link="2.1.316")
+        for v in ("2.1.316", "2.1.316", "2.1.317"):
+            point(v)
+            fresh()
+            asked()
+        s.check("ask gate: two failed with 2.1.316, then one with 2.1.317 -> 2.1.317 1", fails() == "2.1.317 1" and not off(), "fail %r, off %s" % (fails(), off()))
+        write(run / "ask.claude.fail", "2.1.317 3\n")
+        fresh()
+        turn()
+        s.check("ask gate: a count of 3 for the version, nothing in the stop set -> not asked", asks() == 3, str(asks()))
+        # The turn-end cleanup keeps the count however old, and takes an old temporary file.
+        old = time.time() - 2 * 86400
+        tmpf = write(run / "ask.claude.fail.99999", "2.1.317 1\n")
+        for f in (run / "ask.claude.fail", tmpf):
+            os.utime(f, (old, old))
+        turn()
+        s.check("ask gate: the turn-end cleanup keeps ask.claude.fail, takes ask.claude.fail.<pid>",
+                (run / "ask.claude.fail").exists() and not tmpf.exists(), "%s %s" % ((run / "ask.claude.fail").exists(), tmpf.exists()))
+        # The session's av: a line's top-level "version", not one inside a tool result.
+        setup()
+        tr.write_text(trl("2.2.5", {"toolUseResult": {"structuredContent": {"name": "some-pkg", "version": "2.1.316"}}}) + json.dumps({"type": "summary", "summary": "x"}) + "\n")
+        asked()
+        u = events()
+        s.check("ask: av is the line's top-level version (2.2.5), not a tool result's", u and u[0].get("av") == "2.2.5", str(u)[:300])
+        tr.write_text(trl("2.1.316"))
+        # A hook ran in the ask (--include-hook-events): as with spend.
+        for sub in ("hook_started", "hook_response"):
+            hook = line({"type": "system", "subtype": sub, "hook_id": "h1", "hook_name": "SessionStart:startup", "hook_event": "SessionStart"})
+            setup(hook + line(ok))
+            asked()
+            u = events()
+            s.check("ask gate: a %s event in the ask -> uq failed, no windows, version stopped" % sub,
+                    u and u[0].get("uq", {}).get("err") == "failed" and "lims" not in u[0] and off() == ["2.1.316"], "%s off %s" % (str(u)[:200], off()))
+        fresh()
+        answer(ok)
+        turn()
+        s.check("ask gate: after a hook event, that version is not asked again", asks() == 1, str(asks()))
+        # The agent stays after its answer, with a child of its own: both end.
+        setup()
+        (s.tmp / "linger").write_text("1")
+        asked()
+        child = wait_for(lambda: (s.tmp / "child").read_text().strip() if (s.tmp / "child").exists() else "", 10)
+
+        def alive(pid):
+            try:
+                os.kill(int(pid), 0)
+                return True
+            except (OSError, ValueError):
+                return False
+        gone = wait_for(lambda: child and not alive(child), 15)
+        s.check("ask gate: an agent that stays, and its child, end after the answer", bool(child) and bool(gone), "child %s alive %s" % (child, child and alive(child)))
+        if child and alive(child):
+            os.kill(int(child), 9)
+
+        def pid_of(name):
+            f = s.tmp / name
+            return f.read_text().strip() if f.exists() else ""
+
+        def stubborn(env_extra=None):
+            # An agent that ignores TERM after its answer, with a child and a grandchild that left its tree.
+            setup()
+            (s.tmp / "stubborn").write_text("1")
+            n = len(events())
+            s.run("claude", stop(), dict({"SIMPLETERM": "1"}, **(env_extra or {})))
+            wait_for(lambda: len(events()) > n, 25)
+            wait_for(lambda: pid_of("agentpid") and pid_of("child") and pid_of("grand"), 10)
+            agent, kid, grand = pid_of("agentpid"), pid_of("child"), pid_of("grand")
+            wait_for(lambda: not alive(agent) and not alive(kid) and not alive(grand), 15)
+            state = (alive(agent), alive(kid), alive(grand))
+            for pid in (agent, kid, grand):
+                if pid and alive(pid):
+                    os.kill(int(pid), 9)
+            return bool(agent and kid and grand), state
+        if s.kind == "sh":
+            # Its own process group (perl setpgrp, else setsid): all of it ends, TERM ignored or not.
+            seen, state = stubborn()
+            s.check("ask gate: in its own process group, an agent that ignores TERM, its child and a grandchild out of its tree all end",
+                    seen and state == (False, False, False), "pids seen %s, alive (agent, child, grandchild) %s" % (seen, state))
+            # Without perl and setsid: its tree, KILL after TERM; a grandchild out of the tree is not reached (README).
+            nogrp = s.tmp / "bin-nogroup"
+            if not nogrp.exists():
+                nogrp.mkdir()
+                for e in s.bin.iterdir():
+                    if e.name not in ("perl", "setsid"):
+                        os.symlink(e, nogrp / e.name)
+            seen, state = stubborn({"PATH": str(nogrp)})
+            s.check("ask gate: without perl and setsid, an agent that ignores TERM and its child end (its tree)",
+                    seen and state[:2] == (False, False), "pids seen %s, alive (agent, child, grandchild) %s" % (seen, state))
+        else:
+            # The process tree (Kill(true)): an agent that ignores TERM and its child end.
+            seen, state = stubborn()
+            s.check("ask gate: an agent that ignores TERM and its child end (process tree)", seen and state[:2] == (False, False),
+                    "pids seen %s, alive (agent, child, grandchild) %s" % (seen, state))
+        # Sessions of one agent and settings folder end a turn at once: one ask (the 5-minute slot is claimed at
+        # once), in every round (sh 20 sessions x 5 rounds, ps1 10 x 4: its hooks start slower).
+        n, rounds = (20, 5) if s.kind == "sh" else (10, 4)
+        counts = []
+        for rnd in range(rounds):
+            setup()
+            ps = [s.start("claude", stop("race%d" % i), {"SIMPLETERM": "1"}) for i in range(n)]
+            for pr in ps:
+                s.finish(pr, 60)
+            wait_for(lambda: asks() >= 1, 25)
+            time.sleep(3 if s.kind == "sh" else 10)
+            counts.append(asks())
+        s.check("ask gate: %d sessions end a turn at once -> one ask, each of %d rounds" % (n, rounds), counts == [1] * rounds, str(counts))
+        # agent-hook.conf as people write it: comments, blanks, CRLF, quotes; the key's first line decides.
+        for name, text in (("comment", b"usage_ask=off      # off: never ask an agent for its limits\n"), ("blanks around =", b"usage_ask = off\n"),
+                           ("CRLF", b"usage_ask=off\r\n"), ("trailing blank", b"usage_ask=off \n"), ("double quotes", b'usage_ask="off"\n'),
+                           ("single quotes, tabs", b"  usage_ask\t=\t'OFF'  # x\r\n")):
+            setup(conf_text=b"poll_wait=2\ndone_delay=0\n" + text)
+            turn()
+            s.check("ask conf: usage_ask=off with %s -> not asked" % name, asks() == 0, str(asks()))
+        setup(conf_text=b"poll_wait=2\ndone_delay=0\nusage = 0   # no context or limits\r\n")
+        turn()
+        s.check("ask conf: usage = 0 with a comment and CRLF -> not asked, no usage", asks() == 0 and not events(), "%d asks, %d events" % (asks(), len(events())))
+        setup(conf_text=b"poll_wait=2\ndone_delay=0\nusage_ask=yes please   # ask\nusage_ask=off\n")
+        s.check("ask conf: the key's first line decides (\"yes please\", then off) -> asked", asked(), "%d asks; log %s" % (asks(), s.log_text()[-300:]))
+    finally:
+        if fake.is_symlink():
+            fake.unlink()
+        tun.terminate()
+        tun.wait(5)
+
+
+def t_v2_usage_ask(s):
+    """Section 9.2: the usage ask — only while the app is connected (a tunnel's last event an HTTP 200 within 10
+    minutes), after a turn, every 5 minutes at most, SIMPLETERM_PROBE=1 and ~/.simpleterm/probe, the answer to the
+    tunnel as src ask with uq, no ask again after a failed sign-in until the credentials change, usage_ask=off, any
+    session version (D22), Codex on by default and usage_ask_codex=off."""
+    tun, tctl = s.spawn_mock()
+    try:
+        tr = write(s.tmp / "tr.jsonl", json.dumps({"type": "user", "version": "2.1.316", "message": {"role": "user", "content": "x"}}) + "\n")
+        stop = cc_event("sk1", "Stop", stop_hook_active=False, last_assistant_message="Done.", background_tasks=[], session_crons=[], transcript_path=str(tr))
+        run = s.home / ".simpleterm" / "run"
+        fake = s.bin / "claude"
+        # The session of every measured ask: no model spend (section 9.2 gate).
+        sess = {"total_cost_usd": 0, "total_api_duration_ms": 0, "total_duration_ms": 0, "total_lines_added": 0, "total_lines_removed": 0, "model_usage": {}}
+        ok = {"type": "control_response", "response": {"subtype": "success", "request_id": "1", "response": {"session": sess,
+            "subscription_type": "max", "rate_limits_available": True, "rate_limits": {
+                "five_hour": None, "seven_day": {"utilization": 12.5, "resets_at": "2026-11-10T00:00:00.000Z"},
+                "model_scoped": [{"display_name": "Opus 5", "utilization": 40, "resets_at": "2026-11-10T00:00:00Z"}]}}}}
+
+        def setup(reply=None, live=True, code=200, age=0, conf=None):
+            s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2}), (LINK_A, {"fmt": 2, "push": "disabled"})], conf=conf)
+            tctl("/_ctl/reset", {})
+            tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown")}})
+            for f in ("asks", "ask.env", "reply", "vcalls", "version", "linger", "child"):
+                (s.tmp / f).unlink() if (s.tmp / f).exists() else None
+            for f in run.glob("ask.*"):
+                f.unlink()
+            if reply is not None:
+                (s.tmp / "reply").write_text(json.dumps(reply, separators=(",", ":")) + "\n")
+            run.mkdir(parents=True, exist_ok=True)
+            last = run / ("tun.%s.last" % LINK_T["id"][:8])
+            if live:
+                last.write_text("%d %d\n" % (int(time.time()) - age, code))
+            elif last.exists():
+                last.unlink()
+            fake.write_text(FAKE_ASKER)
+            fake.chmod(0o755)
+            vercache("claude", "2.1.316")
+
+        def vercache(name, ver):
+            # The executable's measured --version (run/ver.<agent>), as an earlier turn leaves it.
+            write(run / ("ver." + name), "%s\n%s\n" % (s.bin / name, ver))
+
+        def asks():
+            return int((s.tmp / "asks").read_text()) if (s.tmp / "asks").exists() else 0
+
+        def ask_events():
+            return [json.loads(r["plain"]) for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and r["body"]["ev"] == "usage"]
+        setup(ok)
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        u = wait_for(ask_events, 25)
+        p = u[0] if u else {}
+        s.check("ask claude: src ask with its time, the model window, plan, uq ok",
+                [(x["id"], x.get("src"), x.get("at") == p.get("ts")) for x in p.get("lims", [])] == [("seven_day", "ask", True), ("seven_day.Opus-5", "ask", True)]
+                and p.get("plan") == "max" and p.get("uq") == {"src": "ask", "at": p.get("ts"), "ok": True}, str(p)[:500])
+        s.check("ask: not to the relay", not [r for r in s.records("/v1/ingest") if r["body"]["ev"] == "usage"])
+        env = (s.tmp / "ask.env").read_text() if (s.tmp / "ask.env").exists() else ""
+        probe = s.home / ".simpleterm" / "probe"
+        s.check("ask: SIMPLETERM_PROBE=1, not a SimpleTerm session, in ~/.simpleterm/probe (700)",
+                "probe=1 simpleterm= " in env and env.strip().endswith("/.simpleterm/probe")
+                and (s.kind != "sh" or oct(probe.stat().st_mode & 0o777) == "0o700"), env)
+        # Five minutes at most per agent and settings folder.
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        time.sleep(3)
+        s.check("ask: not again within 5 minutes", asks() == 1, str(asks()))
+        # The hook run by an ask does nothing.
+        rc, out, err, el = s.run("claude", stop, {"SIMPLETERM": "1", "SIMPLETERM_PROBE": "1"})
+        s.check("ask: a hook with SIMPLETERM_PROBE=1 does nothing", rc == 0 and out == "" and "probe" not in s.log_text()[-200:], out)
+        # Only while the app is connected.
+        for name, kw in (("no tunnel event", {"live": False}), ("the last one 11 minutes ago", {"age": 660}), ("the last one failed", {"code": 0})):
+            setup(ok, **kw)
+            s.run("claude", stop, {"SIMPLETERM": "1"})
+            time.sleep(2.5)
+            s.check("ask: not asked, app not connected (%s)" % name, asks() == 0, str(asks()))
+        # The off switch in any case.
+        for v in ("off", "OFF", "No", "FALSE", "0"):
+            setup(ok, conf={"usage_ask": v})
+            s.run("claude", stop, {"SIMPLETERM": "1"})
+            time.sleep(2.5)
+            s.check("ask: usage_ask=%s" % v, asks() == 0, str(asks()))
+        # Any session version is asked (D22).
+        for v in ("2.2.0", "1.0.0"):
+            tr.write_text(json.dumps({"type": "user", "version": v, "message": {"role": "user", "content": "x"}}) + "\n")
+            setup(ok)
+            s.run("claude", stop, {"SIMPLETERM": "1"})
+            wait_for(lambda: asks() >= 1 and ask_events(), 25)
+            s.check("ask: session version %s is asked" % v, asks() == 1 and len(ask_events()) == 1, "%d asks, %d events" % (asks(), len(ask_events())))
+        tr.write_text(json.dumps({"type": "user", "version": "2.1.316", "message": {"role": "user", "content": "x"}}) + "\n")
+        # No subscriber limits (API key): uq not-subscriber, no windows.
+        setup({"type": "control_response", "response": {"subtype": "success", "request_id": "1", "response": {"session": sess, "rate_limits_available": False}}})
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        u = wait_for(ask_events, 25)
+        p = u[0] if u else {}
+        s.check("ask: rate_limits_available false -> uq not-subscriber, no lims",
+                p.get("uq", {}).get("err") == "not-subscriber" and p["uq"].get("ok") is False and "lims" not in p, str(p)[:300])
+        # Reported once: not asked again (5 minutes past) until the credentials change.
+        for f in [f for f in run.glob("ask.claude.*") if not f.name.endswith((".auth", ".off"))]:
+            f.write_text("%d\n" % (int(time.time()) - 400))
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        time.sleep(2.5)
+        s.check("ask: after not-subscriber, not again until the credentials change", asks() == 1 and len(ask_events()) == 1,
+                "%d asks, %d events" % (asks(), len(ask_events())))
+        # An answer showing model spend: uq failed, and that version is not asked again.
+        spent = json.loads(json.dumps(ok))
+        spent["response"]["response"]["session"]["total_cost_usd"] = 0.0012
+        setup(spent)
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        u = wait_for(ask_events, 25)
+        s.check("ask: an answer with model spend -> uq failed, no windows", u and u[0].get("uq", {}).get("err") == "failed" and "lims" not in u[0], str(u)[:300])
+        for f in [f for f in run.glob("ask.claude.*") if not f.name.endswith((".auth", ".off"))]:
+            f.write_text("%d\n" % (int(time.time()) - 400))
+        (s.tmp / "reply").write_text(json.dumps(ok, separators=(",", ":")) + "\n")
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        time.sleep(2.5)
+        s.check("ask: after model spend, this version is not asked again", asks() == 1, str(asks()))
+        (run / "ask.claude.off").unlink() if (run / "ask.claude.off").exists() else None
+        # A failed sign-in: no ask again until the credentials file changes.
+        setup({"type": "control_response", "response": {"subtype": "error", "request_id": "1", "error": "Not logged in · Please run /login"}})
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        u = wait_for(ask_events, 25)
+        s.check("ask: a failed sign-in -> uq auth", u and u[0].get("uq", {}).get("err") == "auth", str(u)[:300])
+        af = [f for f in run.glob("ask.claude.*") if not f.name.endswith(".auth")]
+        for f in af:
+            f.write_text("%d\n" % (int(time.time()) - 400))
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        time.sleep(2.5)
+        s.check("ask: after a failed sign-in, not again (5 minutes past)", asks() == 1, str(asks()))
+        cred = s.home / ".claude" / ".credentials.json"
+        write(cred, "{}")
+        future = time.time() + 5
+        os.utime(cred, (future, future))
+        for f in af:
+            f.write_text("%d\n" % (int(time.time()) - 400))
+        (s.tmp / "reply").write_text(json.dumps(ok, separators=(",", ":")) + "\n")
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        wait_for(lambda: asks() >= 2, 15)
+        s.check("ask: asked again once the credentials changed", asks() == 2, str(asks()))
+        wait_for(lambda: len(ask_events()) >= 2, 25)
+        # Codex app-server: initialize, initialized, account/rateLimits/read; every limit id, as the rollout makes them.
+        ro = write(s.tmp / "codex" / "ro.jsonl", json.dumps({"type": "session_meta", "payload": {"cli_version": "0.165.0"}}) + "\n")
+        cfake = s.bin / "codex"
+        cfake.write_text(FAKE_ASKER)
+        cfake.chmod(0o755)
+        cseed = lambda: vercache("codex", "0.165.0")
+        snap = lambda lid, p1: {"limitId": lid, "primary": {"usedPercent": p1, "windowDurationMins": 300, "resetsAt": 1795746291},
+                                "secondary": {"usedPercent": 3, "windowDurationMins": 10080, "resetsAt": 1796000000}, "planType": "plus",
+                                "rateLimitReachedType": None}
+        reply2 = json.dumps({"id": 2, "result": {"rateLimits": snap("codex", 4), "rateLimitsByLimitId": {
+            "codex": snap("codex", 4), "codex_bengalfox": snap("codex_bengalfox", 17)}}}, separators=(",", ":")) + "\n"
+        cstop = json.dumps({"session_id": "cx9", "turn_id": "t", "transcript_path": str(ro), "cwd": "/w/repo", "hook_event_name": "Stop",
+                            "model": "gpt-5.5", "stop_hook_active": False, "last_assistant_message": "Done."})
+        # On by default (D22); usage_ask_codex=off turns off Codex's asks only.
+        for v in ("off", "No", "OFF   # not Codex", '"false"', "0"):
+            setup({"id": 1, "result": {"userAgent": "x"}}, conf={"usage_ask_codex": v})
+            cseed()
+            (s.tmp / "reply2").write_text(reply2)
+            s.run("codex", cstop, {"SIMPLETERM": "1"})
+            time.sleep(2.5)
+            s.check("ask codex: usage_ask_codex=%s -> not asked" % v, asks() == 0, str(asks()))
+        setup({"id": 1, "result": {"userAgent": "x"}})
+        cseed()
+        (s.tmp / "reply2").write_text(reply2)
+        s.run("codex", cstop, {"SIMPLETERM": "1"})
+        u = wait_for(lambda: [x for x in ask_events() if x.get("app") == "codex"], 25)
+        p = u[0] if u else {}
+        s.check("ask codex: each limit id's primary and secondary, src ask, plan",
+                [(x["id"], x["pct"], x.get("src")) for x in p.get("lims", [])] == [
+                    ("codex.primary", 4, "ask"), ("codex.secondary", 3, "ask"), ("codex_bengalfox.primary", 17, "ask"), ("codex_bengalfox.secondary", 3, "ask")]
+                and p.get("plan") == "plus" and p.get("uq", {}).get("ok") is True, str(p)[:500])
+        (s.tmp / "reply2").unlink()
+    finally:
+        tun.terminate()
+        tun.wait(5)
 
 
 def t_v2_param_keys(s):
@@ -3434,6 +4095,16 @@ def t_opencode_js(s):
     time.sleep(1)
     s.check("opencode 1.x: session.idle -> done with the session title, subagents skipped",
             len(ingests(s, "done")) == 1 and rec[0]["plain_json"].get("msg") == "Fix the tests", str(ingests(s))[:300])
+    # The session's tokens and cost (session info) reach the usage event (TDS_AGENT_EVENTS_V2 section 9.3).
+    info = {"title": "Fix the tests", "cost": 0.25, "tokens": {"input": 100, "output": 20, "reasoning": 5, "cache": {"read": 50, "write": 10}}}
+    want = {"usd": 0.25, "tok_in": 160, "tok_out": 25, "scope": "session"}
+    for kind, steps in (("v1", [{"event": {"type": "session.idle", "properties": {"sessionID": "ses_1"}}}]),
+                        ("v2", [{"event": {"id": "evt_c", "type": "session.execution.succeeded", "location": {"directory": d}, "data": {"sessionID": "ses_1"}}}])):
+        s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})])
+        node_plugin(s, kind, {"directory": d, "sessions": {"ses_1": info}, "steps": steps, "wait": 3000})
+        u = wait_for(lambda: ingests(s, "usage"), 20)
+        s.check("opencode %s: the session's tokens and cost in the usage event" % kind,
+                u and u[0]["plain_json"].get("cost") == want, str(u[0].get("plain_json") if u else None)[:300])
     # 1.19.5 with OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS (measured with a
     # local model stub): the parent goes idle while its background child is
     # busy; the child's report wakes the parent, which goes idle again.
@@ -3720,7 +4391,7 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js,
-         t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_not_sent,
+         t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_usage_ask_gate, t_conf_vectors, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_not_sent,
          t_v2_state, t_v2_sessions, t_v2_opencode_js, t_copilot_hooks, t_copilot,
          t_v2_versions, t_v2_claude_question_once]
 
@@ -3772,6 +4443,38 @@ def ps_parse_check(pwsh):
 HEAVY = {"t_service_shells": threading.Semaphore(2)}
 
 
+def ours(groups, marks):
+    """Processes (not zombies) of the process groups `groups` that are this run's: their command
+    names one of `marks` (this checkout: the hooks, mock relay, node harness; a suite's folder: the
+    stand-in agents), or they were started by one that is (a hook's sleep, curl). Group ids are
+    reused, so the group alone does not say whose a process is."""
+    out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid=,stat=,command="], capture_output=True).stdout.decode("utf-8", "replace")
+    rows = []
+    for line in out.splitlines():
+        f = line.split(None, 4)
+        if len(f) == 5 and f[0].isdigit() and f[1].isdigit() and f[2].isdigit() and not f[3].startswith("Z"):
+            rows.append((int(f[0]), int(f[1]), int(f[2]), f[4]))
+    me = os.getpid()
+    inside = {pid: (ppid, cmd) for pid, ppid, pgid, cmd in rows if pgid in groups and pid != me}
+    mine = {pid for pid, (ppid, cmd) in inside.items() if any(m in cmd for m in marks) and not cmd.startswith("ps -A")}
+    grew = True
+    while grew:
+        grew = False
+        for pid, (ppid, cmd) in inside.items():
+            if pid not in mine and ppid in mine:
+                mine.add(pid)
+                grew = True
+    return sorted(mine)
+
+
+def leftovers():
+    """What the run left running: this run's processes (ours()) in a process group a suite
+    started, or in this run's own group but for this process."""
+    pids = ours(ALL_GROUPS | {os.getpgrp()}, (str(ROOT), "st-hooktest-"))
+    out = subprocess.run(["ps", "-o", "pid=,command=", "-p", ",".join(map(str, pids))], capture_output=True).stdout.decode("utf-8", "replace") if pids else ""
+    return [l.strip()[:140] for l in out.splitlines() if l.strip()]
+
+
 def run_suite(suite, only):
     for t in TESTS:
         if only and t.__name__ not in only:
@@ -3786,6 +4489,7 @@ def run_suite(suite, only):
         except Exception as e:  # report and continue with the next case
             suite.check("%s raised" % t.__name__, False, repr(e))
         finally:
+            suite.reap()
             if sem:
                 sem.release()
 
@@ -3831,6 +4535,9 @@ def run_in_own_group(run):
         old = signal.signal(signal.SIGTERM, signal.SIG_IGN)
         try:
             os.killpg(pid, signal.SIGTERM)
+            # (A hook's background wait ignores TERM: then KILL.)
+            time.sleep(1)
+            os.killpg(pid, signal.SIGKILL)
         except OSError:
             pass
         finally:
@@ -3909,6 +4616,12 @@ def main():
             print("   FAIL %s :: %s" % (name, detail[:400]))
         failed += len(bad)
         s.close()
+    # Nothing the cases started may outlive the run (each case's groups are reaped after it).
+    left = leftovers()
+    print("== leftover processes: %d" % len(left))
+    for p in left[:20]:
+        print("   FAIL left running: " + p)
+    failed += len(left)
     print("TOTAL FAILURES:", failed)
     sys.exit(1 if failed else 0)
 

@@ -543,5 +543,70 @@
   "stdout": [
    ""
   ]
+ },
+ "usage_codex_rollout": {
+  "plain": [
+   "relay1 done {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"done\",\"app\":\"codex\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"Done.\",\"fmt\":2,\"pv\":\"@PV@\",\"av\":\"0.165.0\",\"sid\":\"019a\",\"turn\":{\"end\":\"done\",\"by\":\"unknown\",\"asks\":false},\"ts\":1793232000}",
+   "tunnel done {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"done\",\"app\":\"codex\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"Done.\",\"fmt\":2,\"pv\":\"@PV@\",\"av\":\"0.165.0\",\"avs\":\"rollout\",\"sid\":\"019a\",\"tid\":\"t1\",\"dir\":\"/home/me/work/api\",\"tms\":1793232000123,\"turn\":{\"end\":\"done\",\"by\":\"unknown\",\"asks\":false,\"last\":\"Done.\"},\"ts\":1793232000}",
+   "tunnel usage {\"v\":1,\"rid\":\"a1b2c3d4e5f60718\",\"ev\":\"usage\",\"app\":\"codex\",\"host\":\"dev-box\",\"cwd\":\"api\",\"ctx\":{\"used\":15159,\"win\":258400,\"baseline\":12000,\"src\":\"rollout\"},\"lims\":[{\"id\":\"codex.primary\",\"pct\":4.0,\"win_min\":300,\"resets_at\":1795746291,\"src\":\"file\",\"at\":1793667723},{\"id\":\"codex.secondary\",\"pct\":12.5,\"win_min\":10080,\"resets_at\":1796000000,\"src\":\"file\",\"at\":1793667723}],\"plan\":\"plus\",\"fmt\":2,\"pv\":\"@PV@\",\"av\":\"0.165.0\",\"avs\":\"rollout\",\"sid\":\"019a\",\"tid\":\"t1\",\"dir\":\"/home/me/work/api\",\"tms\":1793232000123,\"ts\":1793232000}"
+  ],
+  "stdout": [
+   ""
+  ]
+ },
+ "usage_grok_cost": {
+  "plain": [
+   "tunnel done {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"done\",\"app\":\"grok-build\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"Grok done.\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"01a19b5d-19dc-7e22-ae1b-692475399cbb\",\"tid\":\"p1\",\"dir\":\"/home/me/work/api\",\"tms\":1793232000123,\"turn\":{\"end\":\"done\",\"by\":\"unknown\",\"asks\":false,\"last\":\"Grok done.\"},\"ts\":1793232000}",
+   "tunnel usage {\"v\":1,\"rid\":\"a1b2c3d4e5f60718\",\"ev\":\"usage\",\"app\":\"grok-build\",\"host\":\"dev-box\",\"cwd\":\"api\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"01a19b5d-19dc-7e22-ae1b-692475399cbb\",\"tid\":\"p1\",\"dir\":\"/home/me/work/api\",\"tms\":1793232000123,\"cost\":{\"usd\":0.030342,\"tok_in\":34380,\"tok_out\":93,\"scope\":\"session\"},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   ""
+  ]
+ },
+ "usage_claude_ask": {
+  "plain": [
+   "relay1 done {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"done\",\"app\":\"claude-code\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"Done.\",\"fmt\":2,\"pv\":\"@PV@\",\"av\":\"2.1.316\",\"sid\":\"872e63d5-f55f-46fa-93db-a0062d1259fb\",\"turn\":{\"end\":\"done\",\"by\":\"unknown\",\"asks\":false},\"ts\":1793232000}",
+   "tunnel done {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"done\",\"app\":\"claude-code\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"Done.\",\"fmt\":2,\"pv\":\"@PV@\",\"av\":\"2.1.316\",\"avs\":\"transcript\",\"sid\":\"872e63d5-f55f-46fa-93db-a0062d1259fb\",\"dir\":\"/home/me/work/api\",\"tms\":1793232000123,\"turn\":{\"end\":\"done\",\"by\":\"unknown\",\"asks\":false,\"last\":\"Done.\"},\"ts\":1793232000}",
+   "tunnel usage {\"v\":1,\"rid\":\"a1b2c3d4e5f60718\",\"ev\":\"usage\",\"app\":\"claude-code\",\"host\":\"dev-box\",\"cwd\":\"api\",\"lims\":[{\"id\":\"five_hour\",\"pct\":37,\"win_min\":300,\"resets_at\":1793685600,\"src\":\"ask\",\"at\":1793232000},{\"id\":\"seven_day\",\"pct\":12.5,\"win_min\":10080,\"resets_at\":1794268800,\"src\":\"ask\",\"at\":1793232000},{\"id\":\"seven_day.Opus-5--1M-\",\"pct\":40.25,\"win_min\":10080,\"resets_at\":1794268800,\"src\":\"ask\",\"at\":1793232000}],\"plan\":\"max\",\"fmt\":2,\"pv\":\"@PV@\",\"av\":\"2.1.316\",\"avs\":\"transcript\",\"sid\":\"872e63d5-f55f-46fa-93db-a0062d1259fb\",\"dir\":\"/home/me/work/api\",\"tms\":1793232000123,\"uq\":{\"src\":\"ask\",\"at\":1793232000,\"ok\":true},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   "{\"terminalSequence\":\"\\u001b]9;simpleterm:state=done\\u0007\"}"
+  ]
+ },
+ "usage_codex_ask": {
+  "plain": [
+   "tunnel done {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"done\",\"app\":\"codex\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"Done.\",\"fmt\":2,\"pv\":\"@PV@\",\"av\":\"0.165.0\",\"avs\":\"rollout\",\"sid\":\"019a\",\"tid\":\"t1\",\"dir\":\"/home/me/work/api\",\"tms\":1793232000123,\"turn\":{\"end\":\"done\",\"by\":\"unknown\",\"asks\":false,\"last\":\"Done.\"},\"ts\":1793232000}",
+   "tunnel usage {\"v\":1,\"rid\":\"a1b2c3d4e5f60718\",\"ev\":\"usage\",\"app\":\"codex\",\"host\":\"dev-box\",\"cwd\":\"api\",\"lims\":[{\"id\":\"codex.primary\",\"pct\":4,\"win_min\":300,\"resets_at\":1795746291,\"src\":\"ask\",\"at\":1793232000},{\"id\":\"codex.secondary\",\"pct\":3,\"win_min\":10080,\"resets_at\":1796000000,\"src\":\"ask\",\"at\":1793232000},{\"id\":\"codex_bengalfox.primary\",\"pct\":17,\"win_min\":300,\"resets_at\":1795746291,\"src\":\"ask\",\"at\":1793232000},{\"id\":\"codex_bengalfox.secondary\",\"pct\":3,\"win_min\":10080,\"resets_at\":1796000000,\"src\":\"ask\",\"at\":1793232000}],\"plan\":\"plus\",\"fmt\":2,\"pv\":\"@PV@\",\"av\":\"0.165.0\",\"avs\":\"rollout\",\"sid\":\"019a\",\"tid\":\"t1\",\"dir\":\"/home/me/work/api\",\"tms\":1793232000123,\"uq\":{\"src\":\"ask\",\"at\":1793232000,\"ok\":true},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   ""
+  ]
+ },
+ "usage_claude_ask_unknown": {
+  "plain": [
+   "tunnel done {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"done\",\"app\":\"claude-code\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"Done.\",\"fmt\":2,\"pv\":\"@PV@\",\"av\":\"2.1.316\",\"avs\":\"transcript\",\"sid\":\"872e63d5-f55f-46fa-93db-a0062d1259fb\",\"dir\":\"/home/me/work/api\",\"tms\":1793232000123,\"turn\":{\"end\":\"done\",\"by\":\"unknown\",\"asks\":false,\"last\":\"Done.\"},\"ts\":1793232000}",
+   "tunnel usage {\"v\":1,\"rid\":\"a1b2c3d4e5f60718\",\"ev\":\"usage\",\"app\":\"claude-code\",\"host\":\"dev-box\",\"cwd\":\"api\",\"fmt\":2,\"pv\":\"@PV@\",\"av\":\"2.1.316\",\"avs\":\"transcript\",\"sid\":\"872e63d5-f55f-46fa-93db-a0062d1259fb\",\"dir\":\"/home/me/work/api\",\"tms\":1793232000123,\"uq\":{\"src\":\"ask\",\"at\":1793232000,\"ok\":false,\"err\":\"failed\"},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   "{\"terminalSequence\":\"\\u001b]9;simpleterm:state=done\\u0007\"}"
+  ]
+ },
+ "usage_copilot_quota": {
+  "plain": [
+   "tunnel done {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"done\",\"app\":\"copilot-cli\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"6a716213-e0da-4025-b68e-b871d583f802\",\"dir\":\"/home/me/work/api\",\"tms\":1793232000123,\"turn\":{\"end\":\"done\",\"by\":\"unknown\",\"asks\":false},\"ts\":1793232000}",
+   "tunnel usage {\"v\":1,\"rid\":\"a1b2c3d4e5f60718\",\"ev\":\"usage\",\"app\":\"copilot-cli\",\"host\":\"dev-box\",\"cwd\":\"api\",\"lims\":[{\"id\":\"copilot.chat\",\"pct\":2.1,\"win_min\":43200,\"resets_at\":1796083200,\"src\":\"file\",\"at\":1793667723},{\"id\":\"copilot.completions\",\"pct\":0,\"win_min\":43200,\"resets_at\":1796083200,\"src\":\"file\",\"at\":1793667723}],\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"6a716213-e0da-4025-b68e-b871d583f802\",\"dir\":\"/home/me/work/api\",\"tms\":1793232000123,\"ts\":1793232000}"
+  ],
+  "stdout": [
+   ""
+  ]
+ },
+ "usage_opencode_cost": {
+  "plain": [
+   "tunnel done {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"done\",\"app\":\"opencode\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"Stub title\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"ses_9\",\"dir\":\"/home/me/work/api\",\"mux\":\"unknown\",\"tms\":1793232000123,\"turn\":{\"end\":\"done\",\"by\":\"unknown\"},\"ts\":1793232000}",
+   "tunnel usage {\"v\":1,\"rid\":\"a1b2c3d4e5f60718\",\"ev\":\"usage\",\"app\":\"opencode\",\"host\":\"dev-box\",\"cwd\":\"api\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"ses_9\",\"dir\":\"/home/me/work/api\",\"mux\":\"unknown\",\"tms\":1793232000123,\"cost\":{\"usd\":0.012345,\"tok_in\":12800,\"tok_out\":3400,\"scope\":\"session\"},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   ""
+  ]
  }
 }

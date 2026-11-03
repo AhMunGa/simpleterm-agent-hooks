@@ -22,13 +22,13 @@ Grok Build, OpenCode 2.x and 1.x, and Gemini CLI.
 
 | Agent | Alerts | Answer from the device | Badge | Context / limits |
 |---|---|---|---|---|
-| Claude Code | permission, question, plan, done, error, sign-in | allow, allow for a suggested scope, deny, deny with a reason, answer a question, approve a plan (default or accept edits) or ask for changes; the terminal prompt stays open, first answer wins (waits up to 540 s) | yes | context; 5-hour/7-day limits with the [status line tap](#context-and-rate-limits) |
-| Codex | permission, plan, done | allow, deny, deny with a reason: in the connected app, or from another device when no app is connected (Codex hides its prompt while a hook waits, up to 60 s) | Codex sends OSC 7501 itself | context, limits, plan |
-| GitHub Copilot CLI | permission and question (alerts), plan, done, error | not yet: its permission hook also runs for calls that never prompt, so it is not used until those can be told apart | no | no |
+| Claude Code | permission, question, plan, done, error, sign-in | allow, allow for a suggested scope, deny, deny with a reason, answer a question, approve a plan (default or accept edits) or ask for changes; the terminal prompt stays open, first answer wins (waits up to 540 s) | yes | context; 5-hour, 7-day and per-model limits by [asking Claude Code](#asking-the-agent-for-its-limits) or the [status line tap](#context-and-rate-limits) |
+| Codex | permission, plan, done | allow, deny, deny with a reason: in the connected app, or from another device when no app is connected (Codex hides its prompt while a hook waits, up to 60 s) | Codex sends OSC 7501 itself | context, limits (the rollout and [asking Codex](#asking-the-agent-for-its-limits)), plan |
+| GitHub Copilot CLI | permission and question (alerts), plan, done, error | not yet: its permission hook also runs for calls that never prompt, so it is not used until those can be told apart | no | premium requests, chat and completions quota (from its session events) |
 | Antigravity CLI (`agy`) | question, plan, done, error; commands, file writes and edits, reads outside the workspace, MCP calls with `agy_wait` | opt-in (`agy_wait`, only while the app is not connected): allow, deny, deny with a reason, approve a plan | agy sends OSC 7501 itself | no |
-| Grok Build | permission, question and plan (alerts), idle question, done, error | no: a Grok hook can block but not approve | no | no |
-| OpenCode 2.x | permission, question (input form, alert), done, error | allow, always (the pattern), deny, deny with a reason; device or terminal, first answer wins | the TUI sends OSC 7501 itself | no |
-| OpenCode 1.x | permission, question, done, error | allow, always, deny (1.19: with a reason), answer a question (1.19); device or terminal, first answer wins | no | no |
+| Grok Build | permission, question and plan (alerts), idle question, done, error | no: a Grok hook can block but not approve | no | session tokens and cost |
+| OpenCode 2.x | permission, question (input form, alert), done, error | allow, always (the pattern), deny, deny with a reason; device or terminal, first answer wins | the TUI sends OSC 7501 itself | session tokens and cost |
+| OpenCode 1.x | permission, question, done, error | allow, always, deny (1.19: with a reason), answer a question (1.19); device or terminal, first answer wins | no | session tokens and cost |
 | Gemini CLI | permission (alert only), done | no: Gemini takes no answer from a hook | no | context |
 
 "Alert only" means the device shows that the agent is waiting; you answer in the terminal.
@@ -482,8 +482,16 @@ notification.
 | Agent | Context | Window | Limits | From |
 |---|---|---|---|---|
 | Claude Code | last response's input + cache tokens, or the compaction's result | `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `CLAUDE_CODE_DISABLE_1M_CONTEXT`, the status line tap, the `[1m]` model at session start (kept for the session until a model switch), else guessed from the model (marked `est`; a guess below the context in use becomes 1M) | 5-hour and 7-day, only with the status line tap below; `reached` when a turn fails on a rate limit | the session transcript (only its last 2 MiB, only the `usage` keys) |
-| Codex | the last request's tokens (`baseline` 12000, as the Codex TUI counts) | from Codex | primary/secondary windows, plan | the session rollout file |
+| Codex | the last request's tokens (`baseline` 12000, as the Codex TUI counts) | from Codex | primary/secondary windows of each limit id, plan | the session rollout file (with its record's time) and [asking Codex](#asking-the-agent-for-its-limits) |
+| GitHub Copilot CLI | none | none | premium requests, chat and completions (items with a quota; 100 less the remaining percentage, monthly) | the session's `events.jsonl` (the newest model call) |
+| Grok Build | none | none | none; the session's tokens and cost | the session's `usage.json` |
+| OpenCode | none | none | none; the session's tokens and cost | the session info, passed on by the plugin |
 | Gemini CLI | the last request's prompt tokens | 1,048,576 (Gemma 4: 256,000) | none | the chat record |
+| Antigravity CLI | none | none | none (not asked until it is known where agy keeps a signed-in token on a server) | |
+
+Every window carries where it came from (`src`: `ask`, `file`, `statusline`) and, except the
+status line's, when it was checked (`at`), so the app shows "checked 3 minutes ago" and a late,
+older value does not replace a newer one.
 
 Claude Code gives its rate limits only to the status line, not to hooks, and a plugin cannot set
 the status line. If you want them in SimpleTerm, put the tap in front of your own status line
@@ -507,6 +515,90 @@ is fresh (10 minutes) for the exact window size and the limits.
 
 To send no context or limits at all, set `usage=0` in `~/.simpleterm/agent-hook.conf`.
 
+### Asking the agent for its limits
+
+Claude Code gives its limits to no hook, so at the end of a turn the hook asks Claude Code
+itself. Codex writes its limits to its rollout file, which the hook reads after every turn, and
+the hook asks Codex as well (all its limit ids, also between requests). Asks happen only:
+
+- while the SimpleTerm app is connected (an SSH tunnel took the last event within 10 minutes);
+- once per 5 minutes per agent and settings folder (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`);
+- while asks of that agent version are not stopped (below). Every version and OS is asked.
+
+The ask runs in the background (the turn's hook does not wait), with its input and output
+closed, at most 20 seconds, in the empty folder `~/.simpleterm/probe`, with
+`SIMPLETERM_PROBE=1` (a hook that the ask runs does nothing). It runs the agent's executable on
+`PATH`, links followed to the end (a native Claude Code install links `~/.local/bin/claude` to
+`~/.local/share/claude/versions/<version>`, which gives the version); otherwise the version is the
+executable's `--version`, kept in `~/.simpleterm/run/ver.<agent>` and measured again (no ask that
+turn) when the executable changes, `unknown` if it gives none. The answer goes to the SSH tunnel
+only. Only one ask starts per 5 minutes even when several sessions end a turn at once.
+
+The sh hook starts the ask in a process group of its own (with `perl`, else `setsid`): when the
+agent has not ended 3 seconds after its answer (or the 20 seconds), every process of that group
+gets TERM, and what is left 2 seconds later KILL, those that left the agent's tree too. On a
+server with neither `perl` nor `setsid` (a minimal container) the hook ends the agent's process
+tree instead, the same way, and a process that left the tree (its parent gone) is not reached. The
+PowerShell hook ends the agent's process tree (KILL), which does not reach such a process either.
+
+| Agent | What it runs | What comes back |
+|---|---|---|
+| Claude Code | `claude -p --input-format stream-json --output-format stream-json --verbose --safe-mode --strict-mcp-config --no-session-persistence --include-hook-events` with one `get_usage` control request | 5-hour, 7-day and per-model 7-day windows, plan |
+| Codex | `codex app-server`: `initialize`, `account/rateLimits/read` | each limit id's primary and secondary window, plan |
+
+**Tokens.** Against a local mock API (2026-11-03), the versions measured made no model request
+at all (`/v1/messages`, `count_tokens`, `/responses`, `/chat/completions`: 0): 22 asks of Claude
+Code 2.1.316 and 2.1.317 and 11 asks of Codex 0.165.0 on macOS, with no sign-in, an API key, or a
+subscriber sign-in; the same harness counted 6 and 31 model requests in real turns. Other
+versions and other systems (Linux, Windows) are asked as well, taken to work the same way but not
+measured. What stops a version (an `unknown` one too):
+
+- Claude Code says in its answer what the ask's own session spent. If an answer shows any spend
+  (cost, API time, a model's tokens), or the ask ran a hook (`--include-hook-events` shows it),
+  that version of the executable is not asked again (it is added to
+  `~/.simpleterm/run/ask.<agent>.off`, one version a line). Codex's answer has no such numbers.
+- For Claude Code and Codex alike: after 3 failed asks in a row of the same version (no answer,
+  an unknown one, or none in 20 seconds) that version stops the same way. An answer clears the
+  count (`~/.simpleterm/run/ask.<agent>.fail`); a sign-in result (below) does not change it.
+
+What the asks do request: Claude Code its usage (`GET /api/oauth/usage`, about 10 small account
+requests with a subscriber sign-in); Codex its usage (`/wham/usage`) and its plugin list.
+
+**What the agents themselves write.** Claude Code keeps the usage it fetched in its own state
+file `~/.claude.json` (`cachedUsageUtilization`) and may make a backup of that file next to it;
+SimpleTerm and the plugin do not write that file nor change your settings (status line and the
+rest).
+
+Asking Codex starts `codex app-server`, which on its own does more (measured 2026-11-03 with
+Codex 0.165.0 in an empty `CODEX_HOME`):
+
+- it creates or updates its own files in `~/.codex` (`CODEX_HOME`): `state_5`, `logs_2`,
+  `goals_1`, `memories_1` and `queue_1` databases, `installation_id`, its built-in skills
+  (`skills/.system`) and a temporary file; `config.toml` and `auth.json` were left as they were;
+- it syncs its plugin list over the network (`git` to `github.com/openai/plugins`, and the ChatGPT
+  plugin endpoints when signed in);
+- with an expired ChatGPT sign-in it refreshes the token (8 token requests were seen).
+
+Not checked: whether a successful refresh rewrites `auth.json`, and what happens when another
+Codex on the server refreshes at the same moment; whether the ChatGPT backend accepts the client
+name `simpleterm` it sees. To keep Codex out of it, set `usage_ask_codex=off`; its limits still
+come from its rollout.
+
+The ask stops not only after a failed sign-in (`auth`) but also when the account has no plan
+limits to give (`not-subscriber`: no sign-in, an API key, `CLAUDE_CODE_OAUTH_TOKEN`, a gateway):
+the app gets that answer once, and the agent is not asked again until its credentials file is
+newer than that answer (`$CLAUDE_CONFIG_DIR/.credentials.json`, else `~/.claude/.credentials.json`;
+`$CODEX_HOME/auth.json`, else `~/.codex/auth.json`), as after `/login` or `codex login`. Its file
+values still go meanwhile. A Claude Code that keeps its sign-in in the macOS keychain has no such
+file: delete `~/.simpleterm/run/ask.claude.*.auth` to have it asked again. These answers do not
+count as failed asks.
+
+To turn asking off, set `usage_ask=off` (or `0`, `no`, `false`) in `~/.simpleterm/agent-hook.conf`;
+to turn off only Codex's, set `usage_ask_codex=off` there. The values may be in any case (`OFF`,
+`No` ...); any other value leaves the default (both asked). To have a stopped version asked again,
+delete its line from `~/.simpleterm/run/ask.<agent>.off` (and `ask.<agent>.fail` if it names that
+version).
+
 ## Configuration
 
 `~/.simpleterm/agent-hook.conf`, all optional:
@@ -518,11 +610,19 @@ opencode_wait=540 # the same for OpenCode
 agy_wait=0        # the same for Antigravity (commands, file writes and edits, reads outside the workspace, MCP calls); 0 (off) by default, at most 110
 poll_wait=25      # one long-poll, 1-25
 usage=1           # 0: send no context or rate limits
+usage_ask=on      # off: never ask an agent for its limits
+usage_ask_codex=on # off: do not ask Codex (its app-server; see "Asking the agent for its limits")
 bg_done_after=600 # a pause with only shells/monitors left: done after this many seconds; 0: never
 codex_goal_check=5 # seconds to wait for a Codex /goal's next turn before sending done
 done_delay=3      # seconds a done waits for a newer event of the session (another Stop hook); 0: at once (default 3 on Claude Code and Grok Build, 0 on the others)
 ask_delay=2       # seconds a Claude Code question from PreToolUse waits for its PermissionRequest (the answerable one)
 ```
+
+The first line of a key decides. Blanks around the line and the `=`, Windows line ends, a comment
+from `#`, quotes around a value (`usage_ask = "off"  # never`) and a UTF-8 BOM at the start of the
+file are allowed; numbers are read as decimal (`0090` is 90). The same keys can also be changed in the SimpleTerm app, in a server's
+agent alert settings: the app reads this file and writes the line of the key you change (removing
+it to go back to the default).
 
 ## Privacy
 
@@ -543,6 +643,8 @@ ask_delay=2       # seconds a Claude Code question from PreToolUse waits for its
   a short summary, still encrypted end to end, and no file contents, diffs, MCP arguments or last
   message. The working folder's full path, the permission mode and the settings folder go only to
   the tunnel.
+- Usage asks send nothing anywhere but their answer to the SSH tunnel: limits, plan and when
+  they were checked (never an account id, an error text or a token).
 - Session records stay on the server, in `~/.simpleterm/sessions` (folder 700, files 600); the app
   reads them over SFTP when you open its resume list.
 - A permission answer is signed by the device; the hook ignores an answer whose signature does not match.

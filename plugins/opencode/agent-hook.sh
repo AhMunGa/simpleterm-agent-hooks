@@ -34,6 +34,11 @@ umask 077
 LC_ALL=C
 export LC_ALL
 
+# A usage ask runs the agent with SIMPLETERM_PROBE=1 (TDS_AGENT_EVENTS_V2
+# section 9.2): hooks it runs do nothing, or the ask would make sessions and
+# alerts of its own.
+[ "${SIMPLETERM_PROBE:-}" = 1 ] && exit 0
+
 AGENT=${1:-}
 MODE=${2:-}
 [ -n "${HOME:-}" ] || exit 0
@@ -46,7 +51,7 @@ LOGGED=0
 MAX_INPUT=262144
 MAX_LINKS=16
 # The plugin release of this script (the manifests carry the same).
-HOOK_VERSION=0.4.0
+HOOK_VERSION=0.5.0
 # Bumped when the ~/.simpleterm/bin/simpleterm wrapper must be rewritten.
 CLI_REV=2
 CR=$(printf '\r')
@@ -460,7 +465,7 @@ resp_get() { # file wanted-paths
 # of a message; `notify` adds a title.
 plaintext() { # rid ev nonce
   case $2 in
-    notify | usage | test) ;;
+    notify | test) ;;
     *) if [ "$V2" = 1 ]; then v2_plain "$@"; return; fi ;;
   esac
   host=$(json_text "$L_LABEL" 64 256)
@@ -509,6 +514,9 @@ ingest_raw() { # rid ev nonce outfile
     400) err=$(resp_get "$4" error | sed -n 's/^error=//p' | tr -cd 'a-zA-Z-') ;;
   esac
   rm -f "$4"
+  # The last event to a tunnel and its answer: a usage ask needs the app
+  # connected (an HTTP 200 within 10 minutes, section 9.2).
+  [ "$L_KIND" = tunnel ] && printf '%s %s\n' "$(date +%s)" "$code" >"$RUN_DIR/tun.$(printf %.8s "$L_LINK").last" 2>/dev/null
   log "ingest ev=$2 link=$(printf %.8s "$L_LINK") http=$code push=${push:--}"
   printf '%s %s %s' "${push:-http$code}" "$code" "${err:--}"
   [ "$code" = 200 ]
@@ -1202,13 +1210,13 @@ function plain(   s, k, c) {
   s = "{\"v\":1,\"rid\":\"" V1["rid"] "\",\"ev\":\"" V1["ev"] "\",\"app\":\"" V1["app"] "\",\"host\":\"" HOST "\",\"cwd\":\"" CWD "\""
   if ("title" in V1) s = s ",\"title\":\"" TITLE "\""
   if ("msg" in V1) s = s ",\"msg\":\"" MSG "\""
-  s = s V1["xflags"]
+  s = s V1["uv1"] V1["xflags"]
   if (dec && V1["nonce"] != "") s = s ",\"nonce\":\"" V1["nonce"] "\""
   for (k = 1; k <= NC[0]; k++) {
     c = CH[0, k]
     if (!ND[c]) s = s ",\"" NK[c] "\":" ser(c)
   }
-  return s cutjson() ",\"ts\":" V1["ts"] "}"
+  return s cutjson() V1["uv2"] ",\"ts\":" V1["ts"] "}"
 }
 function size() { return length(plain()) }
 # Removes decision id d from req.can.
@@ -1413,6 +1421,9 @@ v2_plain() { # rid ev nonce
   vo=$( {
     printf '=rid\t%s\n=ev\t%s\n=app\t%s\n=host\t%s\n=cwd\t%s\n' "$1" "$2" "$APP" "$(json_text "$L_LABEL" 100000 100000)" "$CWD_BASEF"
     [ -n "$NOMSG" ] || printf '=msg\t%s\n' "$MSGF"
+    # A usage event's own fields: v1 ones (ctx, lims, plan) after cwd, uq and
+    # cost before ts (section 9.1).
+    [ "$2" = usage ] && printf '=uv1\t%s\n=uv2\t%s\n' "$USAGE_JSON" "$USAGE_V2"
     printf '=xflags\t%s\n=nonce\t%s\n=ts\t%s\n' "$vx" "$3" "$TS"
     printf '%s\n' "$SPEC"
   } | awk -v kind="${L_KIND:-relay}" -v fmt2="$vf" -v dec="$vd" -v waitov="$WAITOV" "$NORM_FN$V2_BUILD" 2>/dev/null)
@@ -1444,15 +1455,59 @@ ver_cache() { # executable-name
   ) </dev/null >/dev/null 2>&1 &
 }
 
+# JSON lines -> the string value of the top-level key "version" of the last
+# line that has one (cut=1: the first line is a partial one, skipped).
+TOP_VERSION='
+function topver(s,   n, i, c, d, ins, esc, st, key, ks) {
+  # Scanned up to just past the last "version" (no key there after it).
+  n = length(s); i = 0
+  while ((c = index(substr(s, i + 1), "\"version\"")) > 0) i += c
+  if (!i) return ""
+  if (n > i + 79) n = i + 79
+  d = 0; ins = 0; esc = 0; st = ""; key = ""
+  for (i = 1; i <= n; i++) {
+    c = substr(s, i, 1)
+    if (ins) {
+      if (esc) esc = 0
+      else if (c == "\\") esc = 1
+      else if (c == "\"") {
+        ins = 0
+        if (d == 1 && st == "k") key = substr(s, ks, i - ks)
+        else if (d == 1 && st == "v" && key == "version") return substr(s, ks, i - ks)
+      }
+      continue
+    }
+    if (c == "\"") { ins = 1; ks = i + 1 }
+    else if (c == "{" || c == "[") { d++; if (d == 1) st = (c == "{") ? "k" : "" }
+    else if (c == "}" || c == "]") { d--; if (d < 1) return "" }
+    else if (d == 1 && c == ":") st = "v"
+    else if (d == 1 && c == ",") { st = "k"; key = "" }
+  }
+  return ""
+}
+{ L[NR] = $0 }
+END {
+  for (j = NR; j > cut; j--) {
+    if (!index(L[j], "\"version\"")) continue
+    v = topver(L[j])
+    if (v != "") { print v; exit }
+  }
+}'
+
 # AV and AVS: the agent's version and where it came from (section 10.1).
 v2_version() {
   AV='' AVS=''
   case $AGENT in
     claude)
+      # The top-level "version" of the last transcript line that has one, in
+      # the last 256 KiB (the first line there cut unless the file is
+      # shorter): not a "version" inside a tool result or message.
       vf=$(input_file "$TPATH")
-      [ -n "$vf" ] && AV=$(tail -c 65536 "$vf" 2>/dev/null | awk '
-        { s = $0; while (match(s, /"version"[ ]*:[ ]*"[0-9][0-9A-Za-z.+_-]*"/)) { v = substr(s, RSTART, RLENGTH - 1); s = substr(s, RSTART + RLENGTH); sub(/.*"/, "", v) } }
-        END { print v }')
+      if [ -n "$vf" ]; then
+        vz=$(wc -c 2>/dev/null <"$vf" | tr -d ' ')
+        is_uint "$vz" || vz=0
+        AV=$(tail -c 262144 "$vf" 2>/dev/null | awk -v cut=$((vz > 262144)) "$TOP_VERSION" 2>/dev/null)
+      fi
       AVS=transcript
       ;;
     codex)
@@ -1783,13 +1838,79 @@ state_json() { # running|waiting|done -> ,"terminalSequence":... or nothing
 
 # --- permission flow -------------------------------------------------------
 
+# The value of key $1 in agent-hook.conf (section 9.2 D21, its first 4 KiB;
+# a UTF-8 BOM at the start of the file is dropped, TDS_AGENT_ALERTS section
+# 6.7): the first line `key=value` of that key decides, blanks allowed
+# around the line and the `=`. From the value a CR, a comment (from the first `#`), the
+# blanks around it and one pair of quotes around all of it are taken away
+# (`usage_ask = "off"  # never`). Empty: the default.
+conf_val() { # key
+  [ -f "$ST_DIR/agent-hook.conf" ] || return 0
+  head -c 4096 "$ST_DIR/agent-hook.conf" 2>/dev/null | awk -v k="$1" -v q="'" '
+  NR == 1 && substr($0, 1, 3) == "\357\273\277" { $0 = substr($0, 4) }
+  {
+    i = index($0, "="); if (!i) next
+    kk = substr($0, 1, i - 1); gsub(/^[ \t]+|[ \t]+$/, "", kk)
+    if (kk != k) next
+    vv = substr($0, i + 1); gsub(/\r/, "", vv); sub(/#.*/, "", vv); gsub(/^[ \t]+|[ \t]+$/, "", vv)
+    f = substr(vv, 1, 1)
+    if (length(vv) >= 2 && (f == "\"" || f == q) && substr(vv, length(vv)) == f) vv = substr(vv, 2, length(vv) - 2)
+    print vv; exit
+  }' 2>/dev/null
+}
+
 conf_int() { # key default
-  v=''
-  if [ -f "$ST_DIR/agent-hook.conf" ]; then
-    v=$(head -c 4096 "$ST_DIR/agent-hook.conf" 2>/dev/null | sed -n "s/^$1=\\([0-9]*\\)\$/\\1/p" | head -n 1)
-  fi
+  v=$(conf_val "$1")
   is_uint "$v" || v=$2
+  # Decimal, as the app and the PowerShell hook read it: no leading zeros
+  # ($(( )) reads 060 as octal 48 and fails on 0090; TDS_AGENT_ALERTS
+  # section 6.7 R13).
+  while :; do
+    case $v in 0[0-9]*) v=${v#0} ;; *) break ;; esac
+  done
   printf '%s' "$v"
+}
+
+# What the hook does with each key (TDS_AGENT_ALERTS section 6.7):
+# the device-wait cap of agent $1 (<agent>_wait, at most 540; agy at most
+# 110: its hook's timeout is 120 seconds).
+conf_wait_cap() { # agent
+  case $1 in
+    codex) c=$(conf_int codex_wait 60) ;;
+    agy) c=$(conf_int agy_wait 0) ;;
+    opencode) c=$(conf_int opencode_wait 540) ;;
+    *) c=$(conf_int claude_wait 540) ;;
+  esac
+  [ "$c" -le 540 ] || c=540
+  [ "$1" = agy ] && [ "$c" -gt 110 ] && c=110
+  printf '%s' "$c"
+}
+
+# One long-poll's seconds: poll_wait 1 to 25, else 25.
+conf_poll_wait() {
+  c=$(conf_int poll_wait 25)
+  [ "$c" -ge 1 ] && [ "$c" -le 25 ] || c=25
+  printf '%s' "$c"
+}
+
+# The seconds a done of agent $1 waits (done_delay; 3 where a newer event of
+# the session may come within moments, else 0).
+conf_done_delay() { # agent
+  case $1 in codex | gemini | opencode | copilot | agy) c=0 ;; *) c=3 ;; esac
+  conf_int done_delay $c
+}
+
+# True unless usage (the v1 key) is 0 as a number (00 too, R27): context
+# and limits are reported.
+conf_usage_on() {
+  [ "$(conf_int usage 1)" -ne 0 ]
+}
+
+# True unless word key $1 (usage_ask, usage_ask_codex) is off, 0, no or
+# false, in any case.
+conf_on() { # key
+  case $(conf_word "$1" on | tr 'A-Z' 'a-z') in off | 0 | no | false) return 1 ;; esac
+  return 0
 }
 
 # The decision response $1: DST DDEC DMAC and the decision extension's
@@ -2334,17 +2455,9 @@ EOF
 #            others an alert, only when no tunnel answered and agy_wait > 0
 request_flow() { # ev mode
   RQ_EV=$1 RQ_MODE=$2
-  case $AGENT in
-    codex) cap=$(conf_int codex_wait 60) ;;
-    agy) cap=$(conf_int agy_wait 0) ;;
-    opencode) cap=$(conf_int opencode_wait 540) ;;
-    *) cap=$(conf_int claude_wait 540) ;;
-  esac
-  [ "$cap" -le 540 ] || cap=540
-  # The Antigravity hook's timeout is 120 seconds (hooks.json).
-  [ "$AGENT" = agy ] && [ "$cap" -gt 110 ] && cap=110
-  POLL_WAIT=$(conf_int poll_wait 25)
-  [ "$POLL_WAIT" -ge 1 ] && [ "$POLL_WAIT" -le 25 ] || POLL_WAIT=25
+  # (The Antigravity hook's timeout is 120 seconds, hooks.json.)
+  cap=$(conf_wait_cap "$AGENT")
+  POLL_WAIT=$(conf_poll_wait)
   # The cap counts from the hook's start (the tunnel's 5 seconds and the
   # relay's ingest included, section 4.6).
   start=$T0
@@ -2464,6 +2577,56 @@ EOF
 
 # --- usage (#342) ------------------------------------------------------------
 
+# ISO 8601 date-time (YYYY-MM-DDTHH:MM:SS, a fraction, Z or +-HH:MM) to
+# epoch seconds; -1 if it is not one (section 9.1 `at`, the windows' resets).
+ISO_FN='
+function isoepoch(t,   y, mo, d, h, mi, se, r, off, yy, era, yoe, doy, doe) {
+  if (t !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][Tt ][0-9][0-9]:[0-9][0-9]:[0-9][0-9]/) return -1
+  y = substr(t, 1, 4) + 0; mo = substr(t, 6, 2) + 0; d = substr(t, 9, 2) + 0
+  h = substr(t, 12, 2) + 0; mi = substr(t, 15, 2) + 0; se = substr(t, 18, 2) + 0
+  r = substr(t, 20)
+  sub(/^[.][0-9]+/, "", r)
+  if (r == "Z" || r == "z") off = 0
+  else if (r ~ /^[+-][0-9][0-9]:?[0-9][0-9]$/) {
+    off = (substr(r, 2, 2) * 60 + substr(r, length(r) - 1, 2)) * 60
+    if (substr(r, 1, 1) == "+") off = -off
+  } else return -1
+  if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || se > 59) return -1
+  yy = y - (mo <= 2 ? 1 : 0); era = int(yy / 400); yoe = yy - era * 400
+  doy = int((153 * (mo > 2 ? mo - 3 : mo + 9) + 2) / 5) + d - 1
+  doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+  return (era * 146097 + doe - 719468) * 86400 + h * 3600 + mi * 60 + se + off
+}
+# Minutes from a month before date-time t to t (a monthly window: Copilot).
+function monthmin(t,   e, y, mo, d, md) {
+  e = isoepoch(t)
+  if (e < 0) return -1
+  y = substr(t, 1, 4) + 0; mo = substr(t, 6, 2) + 0 - 1; d = substr(t, 9, 2) + 0
+  if (mo < 1) { mo = 12; y-- }
+  md = (mo == 2) ? ((y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)) ? 29 : 28) : ((mo == 4 || mo == 6 || mo == 9 || mo == 11) ? 30 : 31)
+  if (d > md) d = md
+  return int((e - isoepoch(sprintf("%04d-%02d-%02d", y, mo, d) substr(t, 11))) / 60)
+}
+# A non-negative decimal (digits, a fraction) as micro-units, exactly
+# (strings, no floats); -1 if it is not one. And back, without trailing
+# zeros. 100 - pct of Copilot, USD of Grok and OpenCode.
+function micro(v,   i, f) {
+  if (v !~ /^[0-9]+([.][0-9]+)?$/) return -1
+  i = v; f = ""
+  if (index(v, ".")) { i = substr(v, 1, index(v, ".") - 1); f = substr(v, index(v, ".") + 1) }
+  f = substr(f "000000", 1, 6)
+  return (i f) + 0
+}
+function unmicro(m,   i, f) {
+  sub(/^0+/, "", m)
+  m = substr("0000000", 1, 7 - length(m) > 0 ? 7 - length(m) : 0) m
+  i = substr(m, 1, length(m) - 6); f = substr(m, length(m) - 5)
+  sub(/^0+/, "", i); if (i == "") i = "0"
+  sub(/0+$/, "", f)
+  return i (f == "" ? "" : "." f)
+}'
+
+
 # How much of a transcript to read: its end only, where the newest record
 # is. The last 256 KiB nearly always hold it; 2 MiB is the most we read.
 USAGE_TAIL=2097152
@@ -2546,13 +2709,13 @@ END {
 
 # Codex rollout (JSONL) -> a usage line (see usage_report): the newest
 # token_count event with info (context) and the newest with rate limits.
-USAGE_CODEX=$JSON_FN'
+USAGE_CODEX=$JSON_FN$ISO_FN'
 function lim(id, p, w, r) {
   if (!isdec(p) || !isnum(w) || !isnum(r)) return
-  lims = lims " " id ":" p ":" w ":" r
+  lims = lims " " id ":" p ":" w ":" r ":file" (at >= 0 ? ":" at : "")
 }
 BEGIN {
-  jwant("payload.type,payload.info.last_token_usage.total_tokens,payload.info.model_context_window,payload.rate_limits.limit_id,payload.rate_limits.primary.used_percent,payload.rate_limits.primary.window_minutes,payload.rate_limits.primary.resets_at,payload.rate_limits.secondary.used_percent,payload.rate_limits.secondary.window_minutes,payload.rate_limits.secondary.resets_at,payload.rate_limits.plan_type,payload.rate_limits.rate_limit_reached_type")
+  jwant("timestamp,payload.type,payload.info.last_token_usage.total_tokens,payload.info.model_context_window,payload.rate_limits.limit_id,payload.rate_limits.primary.used_percent,payload.rate_limits.primary.window_minutes,payload.rate_limits.primary.resets_at,payload.rate_limits.secondary.used_percent,payload.rate_limits.secondary.window_minutes,payload.rate_limits.secondary.resets_at,payload.rate_limits.plan_type,payload.rate_limits.rate_limit_reached_type")
   n = 0
 }
 NR == 1 && skip { next }
@@ -2568,15 +2731,18 @@ END {
     }
     if (!rl && (("payload.rate_limits.primary.used_percent" in GOT) || ("payload.rate_limits.plan_type" in GOT))) {
       rl = 1
+      # The record time is when Codex learned these values (section 9.1).
+      at = isoepoch(GOT["timestamp"])
       id = GOT["payload.rate_limits.limit_id"]
       gsub(/[^A-Za-z0-9_.-]/, "", id)
-      if (id == "") id = "codex"
+      # (A null limit_id: the ask names that limit codex too.)
+      if (id == "" || id == "null") id = "codex"
       lim(id ".primary", GOT["payload.rate_limits.primary.used_percent"], GOT["payload.rate_limits.primary.window_minutes"], GOT["payload.rate_limits.primary.resets_at"])
       lim(id ".secondary", GOT["payload.rate_limits.secondary.used_percent"], GOT["payload.rate_limits.secondary.window_minutes"], GOT["payload.rate_limits.secondary.resets_at"])
       p = GOT["payload.rate_limits.plan_type"]
       if (p ~ /^[A-Za-z0-9_-]+$/ && p != "null") plan = p
       r = GOT["payload.rate_limits.rate_limit_reached_type"]
-      if (r != "" && r != "null") reached = 1
+      if (r != "" && r != "null" && r != "false") reached = 1
     }
     if (ctx != "" && rl) break
   }
@@ -2610,7 +2776,7 @@ END { if (inp != "") print inp, (mdl == "" ? "-" : mdl) }'
 STATUSLINE_LIMS=$JSON_FN'
 function lim(id, p, w, r) {
   if (!isdec(p) || !isnum(w) || !isnum(r) || r + 0 <= now + 0) return
-  printf " %s:%s:%s:%s", id, p, w, r
+  printf " %s:%s:%s:%s:statusline", id, p, w, r
 }
 BEGIN {
   jwant("context_window.context_window_size,rate_limits.five_hour.used_percentage,rate_limits.five_hour.resets_at,rate_limits.seven_day.used_percentage,rate_limits.seven_day.resets_at,rate_limits.spend_limit.used_percentage,rate_limits.spend_limit.resets_at,rate_limits.spend_limit.period")
@@ -2628,33 +2794,96 @@ END {
   printf "\n"
 }'
 
-# A usage line "<ctx> <win|-> <src> <est 0|1> <baseline|-> <plan|-> <reached
-# 0|1> [<id>:<pct>:<win min>:<reset epoch>]..." -> two lines: the OSC 9
-# body and the plaintext fields of the `usage` event.
+# A usage line "<ctx|-> <win|-> <src|-> <est 0|1> <baseline|-> <plan|->
+# <reached 0|1> [<id>:<pct>:<win min>:<reset epoch>[:<src>[:<at epoch>]]]..."
+# -> two lines: the OSC 9 body (v1; none without a context) and the v1
+# fields of the `usage` event, with each window's `src` and `at` (section
+# 9.1).
 USAGE_FMT='
 function num(v) { return v ~ /^[0-9]+$/ }
 function dec(v) { return v ~ /^[0-9]+([.][0-9]+)?$/ }
 NR == 1 {
-  if (!num($1) || !($3 ~ /^[a-z]+$/)) exit
-  osc = "simpleterm:usage v=1 agent=" app " ctx=" $1
-  js = ",\"ctx\":{\"used\":" $1
-  if (num($2)) { osc = osc " win=" $2; js = js ",\"win\":" $2 }
-  if (num($5)) js = js ",\"baseline\":" $5
-  osc = osc " src=" $3; js = js ",\"src\":\"" $3 "\""
-  if ($4 == 1) { osc = osc " est=1"; js = js ",\"est\":true" }
-  js = js "}"
-  la = ""
-  for (i = 8; i <= NF; i++) {
-    if (split($i, P, ":") != 4) continue
-    if (!(P[1] ~ /^[A-Za-z0-9_.-]+$/) || !dec(P[2]) || !num(P[3]) || !num(P[4])) continue
-    osc = osc " lim=" $i
-    la = la (la == "" ? "" : ",") "{\"id\":\"" P[1] "\",\"pct\":" P[2] ",\"win_min\":" P[3] ",\"resets_at\":" P[4] "}"
+  hc = num($1)
+  if (!hc && $1 != "-") exit
+  if (hc && !($3 ~ /^[a-z]+$/)) exit
+  osc = ""; js = ""
+  if (hc) {
+    osc = "simpleterm:usage v=1 agent=" app " ctx=" $1
+    js = ",\"ctx\":{\"used\":" $1
+    if (num($2)) { osc = osc " win=" $2; js = js ",\"win\":" $2 }
+    if (num($5)) js = js ",\"baseline\":" $5
+    osc = osc " src=" $3; js = js ",\"src\":\"" $3 "\""
+    if ($4 == 1) { osc = osc " est=1"; js = js ",\"est\":true" }
+    js = js "}"
   }
-  if ($7 == 1) { osc = osc " lim=reached"; la = la (la == "" ? "" : ",") "{\"id\":\"reached\"}" }
-  js = js ",\"lims\":[" la "]"
+  la = ""; nl = 0
+  for (i = 8; i <= NF; i++) {
+    n = split($i, P, ":")
+    if (n < 4 || n > 6) continue
+    if (!(P[1] ~ /^[A-Za-z0-9_.-]+$/) || !dec(P[2]) || !num(P[3]) || !num(P[4])) continue
+    if (n >= 5 && P[5] !~ /^(ask|file|statusline|hook)$/) continue
+    if (n == 6 && !num(P[6])) continue
+    if (hc) osc = osc " lim=" P[1] ":" P[2] ":" P[3] ":" P[4]
+    e = "{\"id\":\"" P[1] "\",\"pct\":" P[2] ",\"win_min\":" P[3] ",\"resets_at\":" P[4]
+    if (n >= 5) e = e ",\"src\":\"" P[5] "\""
+    if (n == 6) e = e ",\"at\":" P[6]
+    la = la (la == "" ? "" : ",") e "}"; nl++
+  }
+  if ($7 == 1) { if (hc) osc = osc " lim=reached"; la = la (la == "" ? "" : ",") "{\"id\":\"reached\"}"; nl++ }
+  # (As in v1, a report with a context always names its windows, [] too.)
+  if (hc || nl) js = js ",\"lims\":[" la "]"
   if ($6 ~ /^[A-Za-z0-9_-]+$/ && $6 != "-") js = js ",\"plan\":\"" $6 "\""
   print osc
   print js
+}'
+
+# Copilot session events (events.jsonl), the facts of its newest
+# model.model_call_success line that has quotaSnapshots -> usage line windows
+# "copilot.<item>:<pct>:<win>:<reset>:file:<at>" (section 9.3): an item
+# counts when it is not unlimited and has requests; pct is 100 less the
+# remaining percentage, the window the month before its reset.
+COPILOT_QUOTA=$ISO_FN'
+BEGIN { FS = "\t" }
+$1 == "timestamp" && $2 == "s" { ts = $3; next }
+index($1, "data.quotaSnapshots.") == 1 {
+  k = substr($1, 21); f = k; sub(/\..*/, "", k); sub(/^[^.]*\./, "", f)
+  if (!(k in SEEN)) { SEEN[k] = 1; K[++nk] = k }
+  if (!((k SUBSEP f) in Q)) Q[k, f] = $3
+}
+END {
+  at = isoepoch(ts); out = ""
+  for (i = 1; i <= nk; i++) {
+    k = K[i]; id = k; gsub(/[^A-Za-z0-9_.-]/, "", id)
+    if (id == "" || Q[k, "isUnlimitedEntitlement"] != "false") continue
+    if (Q[k, "entitlementRequests"] !~ /^[0-9]+$/ || Q[k, "entitlementRequests"] + 0 <= 0) continue
+    m = micro(Q[k, "remainingPercentage"])
+    if (m < 0 || m + 0 > 100000000) continue
+    r = isoepoch(Q[k, "resetDate"]); w = monthmin(Q[k, "resetDate"])
+    if (r < 0 || w <= 0) continue
+    out = out " copilot." id ":" unmicro(100000000 - m) ":" w ":" r ":file" (at >= 0 ? ":" at : "")
+  }
+  print substr(out, 2)
+}'
+
+# Grok usage.json (facts) or the OpenCode bridge (cost, tokens_in,
+# tokens_out) -> the `cost` object, or nothing (section 9.3).
+COST_FN=$ISO_FN'
+function costjson(usd, tin, tout,   s) {
+  s = ""
+  if (usd != "") s = s ",\"usd\":" usd
+  if (tin ~ /^[0-9]+$/) s = s ",\"tok_in\":" tin
+  if (tout ~ /^[0-9]+$/) s = s ",\"tok_out\":" tout
+  if (s == "") return ""
+  return ",\"cost\":{" substr(s, 2) ",\"scope\":\"session\"}"
+}'
+GROK_COST=$COST_FN'
+BEGIN { FS = "\t" }
+$2 == "r" && !($1 in G) { G[$1] = $3 }
+END {
+  # costUsdTicks: 10^-10 USD each (xAI cost_in_usd_ticks); micro-USD exact.
+  t = G["session.costUsdTicks"]; usd = ""
+  if (t ~ /^[0-9]+$/) { sub(/^0+/, "", t); usd = unmicro(length(t) > 4 ? substr(t, 1, length(t) - 4) : "0") }
+  printf "%s", costjson(usd, G["session.inputTokens"], G["session.outputTokens"])
 }'
 
 # A file path from the hook input (JSON-escaped) that can be read, or empty.
@@ -2711,10 +2940,32 @@ claude_window() { # model
   esac
 }
 
-# Sets U_LINE (see USAGE_FMT) for the current event, or leaves it empty.
+# Sets U_LINE (see USAGE_FMT) and U_COST (the `cost` object) for the
+# current event, or leaves them empty.
 usage_compute() {
-  U_LINE=''
+  U_LINE='' U_COST=''
   case $AGENT in
+    copilot)
+      # The quota of the newest model call in the session's events (file).
+      f=$(input_file "$TPATH")
+      [ -n "$f" ] || return 0
+      ql=$(tail -c 262144 "$f" 2>/dev/null | awk 'index($0, "\"quotaSnapshots\"") && index($0, "\"model.model_call_success\"") { l = $0 } END { print l }')
+      [ -n "$ql" ] || return 0
+      w=$(printf '%s\n' "$ql" | awk "$NORM_FN$JSON_FACTS" 2>/dev/null | awk "$COPILOT_QUOTA" 2>/dev/null)
+      [ -n "$w" ] && U_LINE="- - - 0 - - 0 $w"
+      ;;
+    grok)
+      # Tokens and cost of the session (usage.json; no limits).
+      is_id "$RAWSID" || return 0
+      uf=''
+      for d in "$HOME"/.grok/sessions/*/"$RAWSID"; do [ -f "$d/usage.json" ] && uf=$d/usage.json; done
+      [ -n "$uf" ] || return 0
+      U_COST=$(head -c 262144 "$uf" 2>/dev/null | awk "$NORM_FN$JSON_FACTS" 2>/dev/null | awk "$GROK_COST" 2>/dev/null)
+      ;;
+    opencode)
+      # Tokens and cost of the session, from the bridge (no limits).
+      U_COST=$(awk -v c="$OCCOST" -v i="$OCTIN" -v o="$OCTOUT" "$COST_FN"' BEGIN { m = micro(c); printf "%s", costjson(m >= 0 ? unmicro(m) : "", i, o) }' 2>/dev/null)
+      ;;
     claude)
       reached=0
       [ "$EVENT" = StopFailure ] && [ "$ERR" = rate_limit ] && reached=1
@@ -2787,27 +3038,552 @@ usage_compute() {
   esac
 }
 
-# Reports context and rate limits when they changed: an OSC 9 for the
-# terminal (Claude Code in SimpleTerm, USAGE_SEQ) and a `usage` event for the
-# SSH tunnel links. The relay gets none: it does not push them (an iOS push
-# is always an alert) and every request costs a function call.
+# Reports context, rate limits and cost when they changed: an OSC 9 for the
+# terminal (Claude Code in SimpleTerm, USAGE_SEQ; v1, context and windows
+# only) and a `usage` event for the SSH tunnel links (section 9.1). The relay
+# gets none: it does not push them (an iOS push is always an alert) and every
+# request costs a function call. At a turn's end it may also ask the agent
+# (usage_ask).
 usage_report() {
   USAGE_SEQ=''
-  [ "$(conf_int usage 1)" = 0 ] && return 0
+  conf_usage_on || return 0
   usage_compute
-  [ -n "$U_LINE" ] || return 0
-  out=$(printf '%s\n' "$U_LINE" | awk -v app="$APP" "$USAGE_FMT" 2>/dev/null)
-  osc=$(printf '%s\n' "$out" | sed -n 1p)
-  USAGE_JSON=$(printf '%s\n' "$out" | sed -n 2p)
-  [ -n "$osc" ] && [ -n "$USAGE_JSON" ] || return 0
-  [ "$(cat "$RUN_DIR/$SID.usage" 2>/dev/null)" != "$osc" ] || return 0
+  osc='' USAGE_JSON=''
+  if [ -n "$U_LINE" ]; then
+    out=$(printf '%s\n' "$U_LINE" | awk -v app="$APP" "$USAGE_FMT" 2>/dev/null)
+    osc=$(printf '%s\n' "$out" | sed -n 1p)
+    USAGE_JSON=$(printf '%s\n' "$out" | sed -n 2p)
+  fi
+  usage_ask
+  [ -n "$USAGE_JSON$U_COST" ] || return 0
+  key=$osc$USAGE_JSON$U_COST
+  [ "$(cat "$RUN_DIR/$SID.usage" 2>/dev/null)" != "$key" ] || return 0
   # Recorded as sent only once SimpleTerm has it: on Claude Code's terminal
   # (printed below), or when a tunnel link took the event. Otherwise it goes
   # again next time, though unchanged, in case the app connects meanwhile.
-  USAGE_SEQ='\u001b]9;'$osc'\u0007'
-  [ "$AGENT" = claude ] && [ "${SIMPLETERM:-}" = 1 ] && printf '%s\n' "$osc" >"$RUN_DIR/$SID.usage" 2>/dev/null
-  urid=$(rand_hex 8)
-  is_hex "$urid" 16 && send_bg usage "$urid" tunnel "$RUN_DIR/$SID.usage" "$osc"
+  if [ -n "$osc" ]; then
+    USAGE_SEQ='\u001b]9;'$osc'\u0007'
+    [ "$AGENT" = claude ] && [ "${SIMPLETERM:-}" = 1 ] && printf '%s\n' "$key" >"$RUN_DIR/$SID.usage" 2>/dev/null
+  fi
+  usage_send "$(usage_rid)" "$U_COST" "$RUN_DIR/$SID.usage" "$key"
+}
+
+# A usage event's own rid (SIMPLETERM_HOOK_TEST_URID in tests).
+usage_rid() {
+  if [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ -n "${SIMPLETERM_HOOK_TEST_URID:-}" ]; then
+    printf '%s' "$SIMPLETERM_HOOK_TEST_URID"
+  else
+    rand_hex 8
+  fi
+}
+
+# The `usage` event (USAGE_JSON, then $2: uq, cost) to the tunnels, with the
+# common fields (section 9.1); $3 gets text $4 once a tunnel took it.
+usage_send() { # rid tail [file text]
+  is_hex "$1" 16 || return 0
+  us=$SPEC ux=$V2X um=$NOMSG
+  USAGE_V2=$2 NOMSG=1
+  v2_prep
+  send_bg usage "$1" tunnel "${3:-}" "${4:-}"
+  SPEC=$us V2X=$ux NOMSG=$um USAGE_V2=''
+}
+
+# --- usage asks (TDS_AGENT_EVENTS_V2 section 9.2) ----------------------------------
+
+# Every version and OS is asked (D22, 2026-11-03 user decision). Measured
+# against a local mock API (2026-11-03, .hjc/research/2026-11-03-usage-ask
+# of the app): 0 model requests in 22 asks of Claude Code 2.1.316 and
+# 2.1.317 and 11 of Codex 0.165.0 on macOS (the same harness caught 6 and 31
+# in real turns). What guards the others: the version of the executable
+# that ran stops for good after an answer showing spend or a hook, or after
+# 3 failed asks in a row (run/ask.<agent>.off).
+
+# A value of agent-hook.conf (conf_val), or $2 if empty. The caller compares
+# it in any case.
+conf_word() { # key default
+  v=$(conf_val "$1")
+  printf '%s' "${v:-$2}"
+}
+
+# True if the app is connected: a tunnel link whose last event got an HTTP
+# 200 within 10 minutes (ingest_raw records it). A tunnel file left behind
+# by a closed connection does not count.
+tunnel_live() {
+  tn=$(date +%s)
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    load_link "$f" || continue
+    [ "$L_KIND" = tunnel ] || continue
+    lt='' lc=''
+    read -r lt lc 2>/dev/null <"$RUN_DIR/tun.$(printf %.8s "$L_LINK").last" || continue
+    is_uint "$lt" && [ "$lc" = 200 ] && [ $((tn - lt)) -le 600 ] && [ $((lt - tn)) -le 60 ] && return 0
+  done <<EOF
+$LINKS
+EOF
+  return 1
+}
+
+# True if the last ask of file $1 (ask.<agent>.<h>) started less than 5
+# minutes ago (a time more than 60 seconds ahead does not count).
+ask_recent() { # ask-file
+  la=$(cat "$1" 2>/dev/null)
+  is_uint "$la" && [ $((NOW - la)) -lt 300 ] && [ $((la - NOW)) -le 60 ]
+}
+
+# True if asks of the agent's executable version $1 were stopped (an answer
+# of that version showed model spend or a hook, or 3 asks in a row failed):
+# run/ask.<agent>.off, one version a line (`unknown` among them).
+ask_stopped() { # version
+  [ -f "$RUN_DIR/ask.$AGENT.off" ] || return 1
+  head -c 4096 "$RUN_DIR/ask.$AGENT.off" 2>/dev/null | awk -v v="$1" '$0 == v { f = 1; exit } END { exit !f }'
+}
+
+# How an ask starts its own process group (section 9.2 time): perl's
+# setpgrp, else setsid (Linux, BusyBox); without either it cannot (a POSIX
+# shell without job control does not start one: dash needs a terminal for
+# set -m, macOS has no setsid), and its process tree is ended instead.
+ask_group_how() {
+  if command -v perl >/dev/null 2>&1; then
+    ASK_GRP=perl
+  elif command -v setsid >/dev/null 2>&1; then
+    ASK_GRP=setsid
+  else
+    ASK_GRP=''
+  fi
+}
+
+# Runs command "$@" in place (exec), as the leader of a process group of
+# its own when ASK_GRP says how: its process id is that of the group.
+ask_exec() { # command...
+  case $ASK_GRP in
+    perl) exec perl -e 'setpgrp(0, 0); exec { $ARGV[0] } @ARGV or exit 127' -- "$@" ;;
+    setsid) exec setsid "$@" ;;
+    *) exec "$@" ;;
+  esac
+}
+
+# Ends process $1 and what it started: its process group when ask_exec
+# started one (every process of it, those that left its tree too), else its
+# tree (kill_tree). TERM, then KILL to what is left 2 seconds later.
+ask_kill() { # pid
+  is_uint "$1" && [ "$1" -gt 1 ] || return 0
+  if [ -n "$ASK_GRP" ]; then
+    # (`kill -SIG -<group>`: dash takes no `--`, bash no `-s SIG -<group>`.)
+    kill -TERM -"$1" 2>/dev/null || return 0
+    sleep 2
+    kill -0 -"$1" 2>/dev/null && kill -KILL -"$1" 2>/dev/null
+  else
+    kill_tree "$1"
+  fi
+  return 0
+}
+
+# Ends process $1 and every process under it, where it has no process group
+# of its own: the process and then those under it are stopped first, so
+# that none starts another unseen while ps runs; then all get TERM and go on
+# to take it, and what is left 2 seconds later KILL. A process that left
+# the tree before (its parent gone) is not reached.
+kill_tree() { # pid
+  is_uint "$1" && [ "$1" -gt 1 ] || return 0
+  kill -STOP "$1" 2>/dev/null || return 0
+  kt=$1
+  for kr in 1 2; do
+    kt=$( { ps -A -o pid= -o ppid= 2>/dev/null || ps -o pid= -o ppid= 2>/dev/null; } | awk -v r="$1" '
+      $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { n[$2]++; k[$2, n[$2]] = $1 }
+      END { q[1] = r; m = 1; for (i = 1; i <= m && m < 512; i++) { p = q[i]; for (j = 1; j <= n[p]; j++) q[++m] = k[p, j] } for (i = 1; i <= m; i++) printf "%s ", q[i] }' 2>/dev/null)
+    # (Each a number: the words are the process ids.)
+    # shellcheck disable=SC2086
+    kill -STOP ${kt:-$1} 2>/dev/null
+  done
+  # shellcheck disable=SC2086
+  kill ${kt:-$1} 2>/dev/null
+  # shellcheck disable=SC2086
+  kill -CONT ${kt:-$1} 2>/dev/null
+  sleep 2
+  for kp in ${kt:-$1}; do
+    kill -0 "$kp" 2>/dev/null && kill -KILL "$kp" 2>/dev/null
+  done
+  return 0
+}
+
+# The folder an ask runs in: ~/.simpleterm/probe (700), with no project
+# settings.
+ask_probe_dir() {
+  mkdir -p "$ST_DIR/probe" 2>/dev/null && chmod 700 "$ST_DIR/probe" 2>/dev/null
+}
+
+# The probe's environment, in a subshell: ~/.simpleterm/probe, SIMPLETERM_PROBE=1
+# and none of the agent session's own variables (measured, Claude Code
+# 2.1.316): an ask is not a child of that session.
+ask_env() {
+  cd "$ST_DIR/probe" || exit 0
+  unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_EXECPATH \
+    CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN \
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS CLAUDE_EFFORT CLAUDE_PID AI_AGENT SIMPLETERM 2>/dev/null
+  SIMPLETERM_PROBE=1
+  export SIMPLETERM_PROBE
+}
+
+# True if $1 is a version as av is written (section 3): [0-9A-Za-z.+_-]{1,32}.
+ask_ver_ok() { # version
+  case $1 in '' | *[!0-9A-Za-z.+_-]*) return 1 ;; esac
+  [ "${#1}" -le 32 ]
+}
+
+# The version of agent executable $1, which the ask would run (section 9.2
+# condition 6, D21, D22): ASK_BV, and ASK_EXE the file that the ask then
+# runs. Its links are followed to the end: .../versions/<version> (a native
+# Claude Code install) gives the version. Otherwise run/ver.<agent> (D13,
+# section 10.1: that file's path, and its --version's first dotted number or
+# an empty line if it gave none) is used for the same file while the file is
+# not newer: `unknown` if it holds no version. Else it is measured again in
+# the background (15 seconds at most) and ASK_BV stays empty: no ask this
+# turn.
+ask_bin_version() { # executable
+  ASK_BV='' ASK_EXE=''
+  r=$1 n=0
+  while [ -h "$r" ] && [ "$n" -lt 16 ]; do
+    t=$(readlink "$r" 2>/dev/null) || return 0
+    case $t in '') return 0 ;; /*) r=$t ;; *) r=${r%/*}/$t ;; esac
+    n=$((n + 1))
+  done
+  [ -f "$r" ] && ! [ -h "$r" ] || return 0
+  case $r in *"$CR"* | *'
+'*) return 0 ;; esac
+  v=''
+  case ${r%/*} in */versions) v=${r##*/} ;; esac
+  ask_ver_ok "$v" || v=''
+  if [ -z "$v" ]; then
+    vc=$RUN_DIR/ver.$AGENT
+    if [ -f "$vc" ] && [ "$(sed -n 1p "$vc" 2>/dev/null)" = "$r" ] && ! [ "$r" -nt "$vc" ]; then
+      v=$(sed -n 2p "$vc" 2>/dev/null)
+      ask_ver_ok "$v" || v=unknown
+    else
+      ask_probe_dir || return 0
+      # (A lock left by a measurement that never ended holds a minute.)
+      [ -n "$(find "$vc.lock" -mmin +1 2>/dev/null)" ] && rm -f "$vc.lock"
+      ( set -C; printf '' >"$vc.lock" ) 2>/dev/null || return 0
+      trap '' HUP
+      (
+        ask_group_how
+        v=$(
+          ask_env
+          ask_exec "$r" --version </dev/null >"$vc.out" 2>/dev/null &
+          vk=$!
+          ( sleep 15; ask_kill "$vk" ) </dev/null >/dev/null 2>&1 &
+          wd=$!
+          wait "$vk" 2>/dev/null
+          # (Its sleep ends by itself: ending it as a tree needs ps, which can
+          # be slow on a loaded machine.)
+          kill "$wd" 2>/dev/null
+          head -c 4096 "$vc.out" 2>/dev/null | awk 'match($0, /[0-9]+[.][0-9]+[0-9A-Za-z.+_-]*/) { print substr($0, RSTART, RLENGTH); exit }'
+        )
+        # (None: an empty line, so the same file is not measured again.)
+        ask_ver_ok "$v" || v=''
+        printf '%s\n%s\n' "$r" "$v" >"$vc.tmp" && mv -f "$vc.tmp" "$vc"
+        rm -f "$vc.out" "$vc.tmp" "$vc.lock"
+      ) </dev/null >/dev/null 2>&1 &
+      return 0
+    fi
+  fi
+  ASK_BV=$v ASK_EXE=$r
+}
+
+# The failed asks in a row of executable version ASK_BV (D22): the first line
+# of run/ask.<agent>.fail (its first 4 KiB), `<version> <count>`; 0 if it is
+# another version or not of that form.
+ask_fails() {
+  [ -f "$RUN_DIR/ask.$AGENT.fail" ] || { printf 0; return 0; }
+  head -c 4096 "$RUN_DIR/ask.$AGENT.fail" 2>/dev/null | awk -v v="$ASK_BV" '
+    NR == 1 { if ($0 ~ /^[0-9A-Za-z.+_-]+ [1-9][0-9]*$/ && substr($0, 1, length(v) + 1) == v " " && length($0) - length(v) <= 10) c = substr($0, length(v) + 2); exit }
+    END { print c + 0 }' 2>/dev/null
+}
+
+# After an ask: an answer ($1 0) clears the count; a failed one (failed,
+# timeout; $1 1) adds one, from 1 for another version, written whole to
+# run/ask.<agent>.fail.<pid> and renamed over the file (not counted if that
+# fails); the third stops that version (D22). Sign-in results (auth,
+# not-subscriber) do not come here.
+ask_fail_count() { # 1|0
+  ff=$RUN_DIR/ask.$AGENT.fail
+  if [ "$1" = 0 ]; then
+    rm -f "$ff" 2>/dev/null
+    return 0
+  fi
+  fc=$(($(ask_fails) + 1))
+  if printf '%s %s\n' "$ASK_BV" "$fc" >"$ff.$$" 2>/dev/null && mv -f "$ff.$$" "$ff" 2>/dev/null; then
+    [ "$fc" -ge 3 ] && ask_stop
+  fi
+  rm -f "$ff.$$" 2>/dev/null
+  return 0
+}
+
+# Stops asks of executable version ASK_BV for good (run/ask.<agent>.off).
+ask_stop() {
+  ask_stopped "$ASK_BV" || printf '%s\n' "$ASK_BV" >>"$RUN_DIR/ask.$AGENT.off" 2>/dev/null
+}
+
+# At the end of a turn, while the app is connected, at most every 5 minutes
+# per agent and settings folder: asks Claude Code or Codex for its limits in
+# the background (stdio closed, 20 seconds at most), unless asks of the
+# version of the executable that the ask runs were stopped (section 9.2,
+# D21, D22). After a failed sign-in or an answer of no plan limits
+# (not-subscriber) it asks again only once the agent's credentials file
+# changed. usage_ask=off in agent-hook.conf turns it off; usage_ask_codex=off
+# turns off Codex's only (its app-server writes its own state, syncs its
+# plugins over the network and may refresh an expired sign-in).
+usage_ask() {
+  # (Values in any case: OFF and No turn it off too.)
+  conf_on usage_ask || return 0
+  case $EVENT in Stop | StopFailure) ;; *) return 0 ;; esac
+  case $AGENT in
+    claude)
+      ab=claude cfg=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+      ind=$cfg/.credentials.json
+      ;;
+    codex)
+      conf_on usage_ask_codex || return 0
+      ab=codex cfg=${CODEX_HOME:-$HOME/.codex}
+      ind=$cfg/auth.json
+      ;;
+    *) return 0 ;;
+  esac
+  [ -n "$LINKS" ] && tunnel_live || return 0
+  ap=$(command -v "$ab" 2>/dev/null)
+  case $ap in /*) ;; *) return 0 ;; esac
+  # The version of the executable the ask runs (a native install moves the
+  # link on PATH to a newer version while sessions of the older one still
+  # run): asks of it not stopped.
+  ask_bin_version "$ap"
+  [ -n "$ASK_BV" ] || return 0
+  ask_stopped "$ASK_BV" && return 0
+  [ "$(ask_fails)" -ge 3 ] && return 0
+  v2_common
+  af=$RUN_DIR/ask.$AGENT.$(printf '%s' "$cfg" | cksum | awk '{ print $1 }')
+  if [ -f "$af.auth" ]; then
+    [ -f "$ind" ] && [ "$ind" -nt "$af.auth" ] || return 0
+    rm -f "$af.auth"
+  fi
+  ask_recent "$af" && return 0
+  # The slot is claimed at once: Stop hooks of several sessions of this
+  # agent and settings folder may end together. $af.lk is held while the
+  # time is checked again and written; one left by a hook that died is
+  # taken after 5 minutes.
+  if ! ( set -C; : >"$af.lk" ) 2>/dev/null; then
+    [ -n "$(find "$af.lk" -mmin +5 2>/dev/null)" ] || return 0
+    rm -f "$af.lk"
+    ( set -C; : >"$af.lk" ) 2>/dev/null || return 0
+  fi
+  if ask_recent "$af" || ! printf '%s\n' "$NOW" >"$af" 2>/dev/null; then
+    rm -f "$af.lk"
+    return 0
+  fi
+  rm -f "$af.lk"
+  ask_probe_dir || return 0
+  log "usage-ask $AGENT $ASK_BV"
+  trap '' HUP
+  (ask_run "$ASK_EXE" "$af") </dev/null >/dev/null 2>&1 &
+}
+
+# Runs command "$@" in ~/.simpleterm/probe with SIMPLETERM_PROBE=1, its
+# standard input the lines of file $AQ.in followed by the lines that
+# ask_more prints once file $AQ.out holds $AQ_WAIT1, then open until
+# $AQ.out holds $AQ_WAIT2 (or 20 seconds); its output in $AQ.out. Sets
+# AQ_RES: ok (got $AQ_WAIT2), gone (ended without it) or timeout.
+ask_pipe() { # command...
+  : >"$AQ.out"
+  rm -f "$AQ.done"
+  ask_group_how
+  (
+    ask_env
+    {
+      cat "$AQ.in"
+      if [ -n "$AQ_WAIT1" ]; then
+        aw=0
+        while [ "$aw" -lt 20 ] && [ ! -f "$AQ.done" ]; do
+          case $(head -c 1048576 "$AQ.out" 2>/dev/null) in *"$AQ_WAIT1"*) break ;; esac
+          sleep 1
+          aw=$((aw + 1))
+        done
+        cat "$AQ.more" 2>/dev/null
+      fi
+      aw=0
+      while [ "$aw" -lt 20 ] && [ ! -f "$AQ.done" ]; do sleep 1; aw=$((aw + 1)); done
+    } | ask_exec "$@" >"$AQ.out" 2>/dev/null &
+    apid=$!
+    aw=0 res=timeout
+    while [ "$aw" -lt 20 ]; do
+      case $(head -c 1048576 "$AQ.out" 2>/dev/null) in *"$AQ_WAIT2"*) res=ok; break ;; esac
+      kill -0 "$apid" 2>/dev/null || { res=gone; break; }
+      sleep 1
+      aw=$((aw + 1))
+    done
+    case $(head -c 1048576 "$AQ.out" 2>/dev/null) in *"$AQ_WAIT2"*) res=ok ;; esac
+    printf '%s\n' "$res" >"$AQ.res"
+    : >"$AQ.done"
+    aw=0
+    while [ "$aw" -lt 3 ] && kill -0 "$apid" 2>/dev/null; do sleep 1; aw=$((aw + 1)); done
+    # Still there, or something it started left in its group: all of it.
+    if kill -0 "$apid" 2>/dev/null || { [ -n "$ASK_GRP" ] && kill -0 -"$apid" 2>/dev/null; }; then
+      ask_kill "$apid"
+    fi
+  ) </dev/null >/dev/null 2>&1
+  AQ_RES=$(cat "$AQ.res" 2>/dev/null)
+}
+
+# The first line of $AQ.out holding $1, cut to 256 KiB, as facts.
+ask_facts() { # text
+  awk -v t="$1" 'index($0, t) { print; exit }' "$AQ.out" 2>/dev/null | head -c 262144 | awk "$NORM_FN$JSON_FACTS" 2>/dev/null
+}
+
+# Claude Code get_usage control response (facts) -> "OK <usage line>" or
+# "ERR <uq.err>" (section 9.3). at: the epoch the answer came. An answer
+# whose session shows any model spend (cost, API time or a model's usage;
+# measured 0 in every ask, 2.1.316 and 2.1.317) is "ERR spent": asks of that
+# version stop.
+CLAUDE_USAGE=$ISO_FN'
+BEGIN { FS = "\t" }
+!($1 in F) { F[$1] = $3; T[$1] = $2 }
+function win(id, p, w,   u, r) {
+  u = F[p ".utilization"]; r = isoepoch(F[p ".resets_at"])
+  if (T[p ".utilization"] != "r" || u !~ /^[0-9]+([.][0-9]+)?$/ || r < 0) return
+  out = out " " id ":" u ":" w ":" r ":ask:" at
+}
+END {
+  if (F["response.subtype"] != "success") {
+    e = tolower(F["response.error"])
+    print (e ~ /auth|log ?in|credential|oauth|unauthori|401|403/) ? "ERR auth" : "ERR failed"
+    exit
+  }
+  R = "response.response."
+  if (F[R "session.total_cost_usd"] !~ /^0([.]0+)?$/ || F[R "session.total_api_duration_ms"] !~ /^0([.]0+)?$/) { print "ERR spent"; exit }
+  for (p in F) if (index(p, R "session.model_usage.") == 1) { print "ERR spent"; exit }
+  if (F[R "rate_limits_available"] == "false") { print "ERR not-subscriber"; exit }
+  # Limits there but not known now (traffic turned off, a failed refresh):
+  # nothing to show, not 0 percent.
+  if (!((R "rate_limits.five_hour.utilization") in F) && !((R "rate_limits.seven_day.utilization") in F) && !((R "rate_limits.model_scoped.0.utilization") in F)) { print "ERR failed"; exit }
+  plan = F[R "subscription_type"]
+  if (T[R "subscription_type"] != "s" || plan !~ /^[A-Za-z0-9_-]+$/) plan = "-"
+  out = ""
+  win("five_hour", R "rate_limits.five_hour", 300)
+  win("seven_day", R "rate_limits.seven_day", 10080)
+  for (k = 0; k < 16 && ((R "rate_limits.model_scoped." k ".display_name") in F); k++) {
+    n = F[R "rate_limits.model_scoped." k ".display_name"]
+    gsub(/[^A-Za-z0-9._-]/, "-", n)
+    if (n != "") win(substr("seven_day." n, 1, 64), R "rate_limits.model_scoped." k, 10080)
+  }
+  print "OK - - - 0 - " plan " 0" out
+}'
+
+# Codex app-server account/rateLimits/read reply (facts) -> as CLAUDE_USAGE:
+# each RateLimitSnapshot of rateLimitsByLimitId (else rateLimits) as
+# <limitId>.primary and .secondary, the id as the rollout path makes it.
+CODEX_USAGE='
+BEGIN { FS = "\t" }
+!($1 in F) { F[$1] = $3; T[$1] = $2; O[++no] = $1 }
+function snap(b, key,   id) {
+  id = (T[b ".limitId"] == "s") ? F[b ".limitId"] : key
+  gsub(/[^A-Za-z0-9_.-]/, "", id)
+  if (id == "") id = "codex"
+  w(id ".primary", b ".primary"); w(id ".secondary", b ".secondary")
+  if (plan == "-" && T[b ".planType"] == "s" && F[b ".planType"] ~ /^[A-Za-z0-9_-]+$/) plan = F[b ".planType"]
+  if (T[b ".rateLimitReachedType"] == "s") reached = 1
+}
+function w(id, b,   p, m, r) {
+  p = F[b ".usedPercent"]; m = F[b ".windowDurationMins"]; r = F[b ".resetsAt"]
+  if (p !~ /^[0-9]+([.][0-9]+)?$/ || m !~ /^[0-9]+$/ || r !~ /^[0-9]+$/) return
+  out = out " " id ":" p ":" m ":" r ":ask:" at
+}
+END {
+  # Measured (0.165.0): -32600 "codex account authentication required to
+  # read rate limits" (signed out), -32600 "chatgpt authentication required
+  # to read rate limits" (an API key: no plan limits), -32603 "failed to
+  # fetch codex rate limits: GET .../wham/usage failed: 401 ..." (the
+  # backend refused). The message itself goes nowhere.
+  if ("error.message" in F || "error.code" in F) {
+    e = tolower(F["error.message"])
+    if (e ~ /chatgpt authentication required/) print "ERR not-subscriber"
+    else if (e ~ /authentication required|401|403/) print "ERR auth"
+    else print "ERR failed"
+    exit
+  }
+  plan = "-"; reached = 0; out = ""; nk = 0
+  B = "result.rateLimitsByLimitId."
+  for (i = 1; i <= no; i++) {
+    p = O[i]
+    if (index(p, B) != 1) continue
+    k = substr(p, length(B) + 1); sub(/\..*/, "", k)
+    if (k in SEEN) continue
+    SEEN[k] = 1; snap(B k, k); nk++
+  }
+  if (!nk) snap("result.rateLimits", "codex")
+  if (out == "" && plan == "-" && !reached && !("result.rateLimits.limitId" in F) && !nk) { print "ERR failed"; exit }
+  print "OK - - - 0 - " plan " " reached out
+}'
+
+# The time an answer came (SIMPLETERM_HOOK_TEST_TS in tests).
+ask_now() {
+  if [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ -n "${SIMPLETERM_HOOK_TEST_TS:-}" ]; then
+    printf '%s' "$SIMPLETERM_HOOK_TEST_TS"
+  else
+    date +%s
+  fi
+}
+
+# The ask itself (in the background): runs it, makes the `usage` event from
+# its answer (windows src ask, uq) and sends it to the tunnels.
+ask_run() { # agent-executable ask-file
+  AQ=$RUN_DIR/ask.$$.$(rand_hex 4) A='' hk=''
+  case $AGENT in
+    claude)
+      printf '%s\n' '{"type":"control_request","request_id":"1","request":{"subtype":"get_usage","skip_behaviors":true}}' >"$AQ.in"
+      AQ_WAIT1='' AQ_WAIT2='"type":"control_response"'
+      ask_pipe "$1" -p --input-format stream-json --output-format stream-json --verbose --safe-mode \
+        --strict-mcp-config --no-session-persistence --include-hook-events
+      at=$(ask_now)
+      [ "$AQ_RES" = ok ] && A=$(ask_facts '"type":"control_response"' | awk -v at="$at" "$CLAUDE_USAGE" 2>/dev/null)
+      # A hook ran in the ask (--include-hook-events shows it; measured 0):
+      # the probe guard did not hold or the ask ran as a turn, so as with
+      # spend (D21).
+      case $(head -c 1048576 "$AQ.out" 2>/dev/null) in
+        *'{"type":"system","subtype":"hook_started"'* | *'{"type":"system","subtype":"hook_progress"'* | *'{"type":"system","subtype":"hook_response"'*) hk=1 ;;
+      esac
+      ;;
+    codex)
+      printf '%s\n' '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"simpleterm","version":"'"$HOOK_VERSION"'"}}}' >"$AQ.in"
+      printf '%s\n' '{"method":"initialized"}' '{"id":2,"method":"account/rateLimits/read"}' >"$AQ.more"
+      AQ_WAIT1='"id":1,' AQ_WAIT2='"id":2,'
+      ask_pipe "$1" app-server
+      at=$(ask_now)
+      [ "$AQ_RES" = ok ] && A=$(ask_facts '"id":2,' | awk -v at="$at" "$CODEX_USAGE" 2>/dev/null)
+      ;;
+  esac
+  rm -f "$AQ".* 2>/dev/null
+  case $A in
+    'OK '*) err='' ;;
+    'ERR '*) err=${A#ERR } ;;
+    *) if [ "$AQ_RES" = timeout ]; then err=timeout; else err=failed; fi ;;
+  esac
+  [ -n "$hk" ] && err=spent
+  case $err in
+    # The ask cost a model call: no more asks of this executable version
+    # (added to the set, D21); a failed ask too.
+    spent) ask_stop; err=failed; ask_fail_count 1 ;;
+    failed | timeout | unsupported) ask_fail_count 1 ;;
+    '') ask_fail_count 0 ;;
+  esac
+  log "usage-ask $AGENT ${err:-ok}"
+  # A failed sign-in, or an account without plan limits (an API key, a
+  # gateway): not asked again until the credentials change (one report of
+  # it goes; the files still give what they have).
+  case $err in auth | not-subscriber) : >"$2.auth" ;; esac
+  TS=$at NOW=$at USAGE_JSON=''
+  [ -z "$err" ] && USAGE_JSON=$(printf '%s\n' "${A#OK }" | awk -v app="$APP" "$USAGE_FMT" 2>/dev/null | sed -n 2p)
+  uq=',"uq":{"src":"ask","at":'$at',"ok":'
+  if [ -z "$err" ]; then uq=$uq'true}'; else uq=$uq'false,"err":"'$err'"}'; fi
+  RID_USED=1
+  usage_send "$(usage_rid)" "$uq"
+  wait
 }
 
 # --- the `simpleterm` command --------------------------------------------------
@@ -2932,6 +3708,23 @@ if [ "$AGENT" = codex ]; then
   case $ih in *'"hook_event_name":"PreToolUse"'* | *'"hook_event_name":"PostToolUse"'*) INPUT=$ih ;; esac
 fi
 
+# Tests only (SIMPLETERM_HOOK_TEST=1): `agent-hook.sh <agent> __conf <key>`
+# prints what the hook does with key <key> of agent-hook.conf (the read
+# vectors of TDS_AGENT_ALERTS section 6.7).
+if [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ "${2:-}" = __conf ]; then
+  case ${3:-} in
+    usage) if conf_usage_on; then echo on; else echo off; fi ;;
+    usage_ask | usage_ask_codex) if conf_on "$3"; then echo on; else echo off; fi ;;
+    claude_wait | codex_wait | agy_wait | opencode_wait) conf_wait_cap "${3%_wait}"; echo ;;
+    poll_wait) conf_poll_wait; echo ;;
+    done_delay) conf_done_delay "$AGENT"; echo ;;
+    bg_done_after) conf_int bg_done_after 600; echo ;;
+    codex_goal_check) conf_int codex_goal_check 5; echo ;;
+    ask_delay) conf_int ask_delay 2; echo ;;
+  esac
+  exit 0
+fi
+
 # Nothing to do without a link or a SimpleTerm session.
 LINKS=$(list_links)
 if [ -z "$LINKS" ] && [ "${SIMPLETERM:-}" != 1 ]; then
@@ -3013,7 +3806,7 @@ case $AGENT in
     # v2 (TDS_AGENT_EVENTS_V2 section 10.1): turn, permission mode, the
     # subagent's type, a session's end; from the OpenCode bridge its request
     # id, version family, parent session, message id and session title.
-    WANT=$WANT',prompt_id,permission_mode,agent_type,reason,request_id,oc,parent_session_id,message_id,title'
+    WANT=$WANT',prompt_id,permission_mode,agent_type,reason,request_id,oc,parent_session_id,message_id,title,cost,tokens_in,tokens_out'
     for i in 0 1 2 3 4 5 6 7 8 9; do WANT=$WANT,background_tasks.$i.id,background_tasks.$i.type,background_tasks.$i.description,background_tasks.$i.command; done
     for i in 0 1 2 3 4; do WANT=$WANT,session_crons.$i.id,session_crons.$i.schedule,session_crons.$i.prompt; done
     ;;
@@ -3047,7 +3840,7 @@ esac
 EVENT='' NTYPE='' TOOL='' DETAIL='' DESC='' SID='' CWD='' LAST='' ERR='' QTEXT='' FIRSTIN='' NTYPE2=''
 TPATH='' CTXTOK='' MODEL='' GTYPE='' FULLYIDLE='' TERMREASON='' EXTRA='' GKEY='' REASON=''
 PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS='' REQIDIN='' TOOLUSEID=''
-OCTITLE='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX=''
+OCTITLE='' OCCOST='' OCTIN='' OCTOUT='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX=''
 BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_SEQ=''
 BG_SVC=0 BG_IDMAP='' BG_KEEP='' BG_SHELLS='' BG_IDS='' BG_NOID=0 BG_M=''
 CRON_N=0 CRON_SCHED='' CRON_SUMS=''
@@ -3579,6 +4372,9 @@ while IFS= read -r kv; do
     request_id=*) REQIDIN=${kv#*=} ;;
     oc=*) OCV=${kv#*=} ;;
     parent_session_id=*) SUBPAR_SESSION=${kv#*=} ;;
+    cost=*) OCCOST=${kv#*=} ;;
+    tokens_in=*) OCTIN=${kv#*=} ;;
+    tokens_out=*) OCTOUT=${kv#*=} ;;
     title=*) OCTITLE=${kv#*=} ;;
     toolName=*) [ -n "$TOOL" ] || TOOL=${kv#*=} ;;
     toolUseId=*) TOOLUSEID=${kv#*=} ;;
@@ -3859,8 +4655,7 @@ done_msg() { # what
 # 0 (a second Stop still replaces the first within the wait if one is set).
 done_later() {
   [ -n "$LINKS" ] || return 0
-  case $AGENT in codex | gemini | opencode | copilot | agy) dw=0 ;; *) dw=3 ;; esac
-  dw=$(conf_int done_delay $dw)
+  dw=$(conf_done_delay "$AGENT")
   if [ "$dw" -le 0 ] || ! printf '%s\n' "$RID" >"$RUN_DIR/$SID.pend" 2>/dev/null; then
     send_bg done
     return 0
@@ -3938,7 +4733,9 @@ print_running() {
 # A turn ended: housekeeping.
 turn_end() {
   ensure_cli
-  find "$RUN_DIR" -type f -mtime +0 -exec rm -f {} + 2>/dev/null
+  # (Kept: the hold after an ask got auth or not-subscriber, until the
+  # credentials change, the stopped versions and the count of failed asks.)
+  find "$RUN_DIR" -type f -mtime +0 ! -name 'ask.*.auth' ! -name 'ask.*.off' ! -name 'ask.*.fail' -exec rm -f {} + 2>/dev/null
 }
 
 # --- who started a turn, and what ran before it ------------------------------
@@ -4476,7 +5273,7 @@ case $AGENT:$EVENT in
         # only with agy_wait > 0 (opt-in), and then only when no tunnel
         # answers (an app that is connected sees agy's own prompt, section
         # 4.6), does a request go out and wait.
-        [ -n "$LINKS" ] && [ "$(conf_int agy_wait 0)" -gt 0 ] || finish
+        [ -n "$LINKS" ] && [ "$(conf_wait_cap agy)" -gt 0 ] || finish
         # agy asks before a read only outside the workspace (its policy):
         # a read inside it does not wait.
         [ "$TOOL" = read_file ] && agy_in_workspace "$APATH" && finish

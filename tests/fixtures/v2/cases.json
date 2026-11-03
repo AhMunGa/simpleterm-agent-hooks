@@ -2944,6 +2944,272 @@
     "@@B4@@": "e080af",
     "@@B5@@": "f8"
    }
+  },
+  {
+   "name": "usage_codex_rollout",
+   "agent": "codex",
+   "src": "Codex 0.165.0 rollout token_count (measured shape): the usage event, file source and time",
+   "steps": [
+    {
+     "args": [
+      "codex"
+     ],
+     "input": {
+      "session_id": "019a",
+      "turn_id": "t1",
+      "transcript_path": "HOMEP/ro.jsonl",
+      "cwd": "/home/me/work/api",
+      "hook_event_name": "Stop",
+      "model": "gpt-5.5",
+      "stop_hook_active": false,
+      "last_assistant_message": "Done."
+     },
+     "env": {
+      "SIMPLETERM": "1"
+     }
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {
+    "usage_ask": "off"
+   },
+   "files": {
+    "ro.jsonl": "{\"timestamp\":\"2026-11-03T01:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"019a\",\"cli_version\":\"0.165.0\"}}\n{\"timestamp\":\"2026-11-03T01:02:03.456Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"total_tokens\":15159},\"model_context_window\":258400},\"rate_limits\":{\"limit_id\":\"codex\",\"primary\":{\"used_percent\":4.0,\"window_minutes\":300,\"resets_at\":1795746291},\"secondary\":{\"used_percent\":12.5,\"window_minutes\":10080,\"resets_at\":1796000000},\"plan_type\":\"plus\",\"rate_limit_reached_type\":null}}}\n"
+   },
+   "note": ""
+  },
+  {
+   "name": "usage_grok_cost",
+   "agent": "grok",
+   "src": "Grok Build 1.0.70 usage.json (measured keys): cost only",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "hookEventName": "stop",
+      "sessionId": "01a19b5d-19dc-7e22-ae1b-692475399cbb",
+      "cwd": "/home/me/work/api",
+      "workspaceRoot": "/home/me/work/api",
+      "timestamp": "2026-11-03T01:00:00.000Z",
+      "hook_event_name": "Stop",
+      "session_id": "01a19b5d-19dc-7e22-ae1b-692475399cbb",
+      "reason": "end_turn",
+      "promptId": "p1",
+      "stopHookActive": false,
+      "lastAssistantMessage": "Grok done."
+     },
+     "env": {
+      "GROK_HOOK_EVENT": "stop",
+      "SIMPLETERM": "1"
+     }
+    }
+   ],
+   "links": [
+    "tunnel"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {
+    ".grok/sessions/%2Fhome%2Fme%2Fwork%2Fapi/01a19b5d-19dc-7e22-ae1b-692475399cbb/usage.json": "{\"sessionId\": \"x\", \"session\": {\"inputTokens\": 34380, \"outputTokens\": 93, \"cachedReadTokens\": 25984, \"costUsdTicks\": 303420000, \"primaryModelId\": \"grok-4.7\"}}"
+   },
+   "note": ""
+  },
+  {
+   "name": "usage_claude_ask",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 get_usage control_response (measured shape, values made up): the ask",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "HOMEP/tr.jsonl",
+      "cwd": "/home/me/work/api",
+      "hook_event_name": "Stop",
+      "stop_hook_active": false,
+      "last_assistant_message": "Done.",
+      "background_tasks": [],
+      "session_crons": []
+     },
+     "env": {
+      "SIMPLETERM": "1"
+     }
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "bins": {
+    "claude": "#!/bin/sh\nread -r l\n[ -f \"$HOME/fake.reply\" ] && cat \"$HOME/fake.reply\"\n[ -f \"$HOME/fake.reply2\" ] && { read -r l2; read -r l3; cat \"$HOME/fake.reply2\"; }\ncat >/dev/null\n"
+   },
+   "vercache": {
+    "claude": "2.1.316"
+   },
+   "files": {
+    ".simpleterm/run/tun.e7e7e7e7.last": "NOWEPOCH 200\n",
+    "tr.jsonl": "{\"type\": \"user\", \"version\": \"2.1.316\", \"message\": {\"role\": \"user\", \"content\": \"x\"}}\n",
+    "fake.reply": "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"1\",\"response\":{\"session\":{\"total_cost_usd\":0,\"total_api_duration_ms\":0,\"total_duration_ms\":0,\"total_lines_added\":0,\"total_lines_removed\":0,\"model_usage\":{}},\"subscription_type\":\"max\",\"rate_limits_available\":true,\"rate_limits\":{\"five_hour\":{\"utilization\":37,\"resets_at\":\"2026-11-03T06:00:00.000Z\"},\"seven_day\":{\"utilization\":12.5,\"resets_at\":\"2026-11-10T00:00:00.000Z\"},\"model_scoped\":[{\"display_name\":\"Opus 5 (1M)\",\"utilization\":40.25,\"resets_at\":\"2026-11-10T00:00:00+00:00\"}]}}}}\n"
+   },
+   "note": "",
+   "quiet": 6
+  },
+  {
+   "name": "usage_codex_ask",
+   "agent": "codex",
+   "src": "Codex 0.165.0 app-server account/rateLimits/read (schema shape, values made up): the ask, every limit id",
+   "steps": [
+    {
+     "args": [
+      "codex"
+     ],
+     "input": {
+      "session_id": "019a",
+      "turn_id": "t1",
+      "transcript_path": "HOMEP/ro.jsonl",
+      "cwd": "/home/me/work/api",
+      "hook_event_name": "Stop",
+      "model": "gpt-5.5",
+      "stop_hook_active": false,
+      "last_assistant_message": "Done."
+     },
+     "env": {
+      "SIMPLETERM": "1"
+     }
+    }
+   ],
+   "links": [
+    "tunnel"
+   ],
+   "env": {},
+   "conf": {
+    "usage_ask_codex": "on"
+   },
+   "bins": {
+    "codex": "#!/bin/sh\nread -r l\n[ -f \"$HOME/fake.reply\" ] && cat \"$HOME/fake.reply\"\n[ -f \"$HOME/fake.reply2\" ] && { read -r l2; read -r l3; cat \"$HOME/fake.reply2\"; }\ncat >/dev/null\n"
+   },
+   "vercache": {
+    "codex": "0.165.0"
+   },
+   "files": {
+    ".simpleterm/run/tun.e7e7e7e7.last": "NOWEPOCH 200\n",
+    "ro.jsonl": "{\"timestamp\":\"2026-11-03T01:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"019a\",\"cli_version\":\"0.165.0\"}}\n",
+    "fake.reply": "{\"id\":1,\"result\":{\"userAgent\":\"codex/0.165.0\"}}\n",
+    "fake.reply2": "{\"id\":2,\"result\":{\"rateLimits\":{\"limitId\":\"codex\",\"limitName\":null,\"primary\":{\"usedPercent\":4,\"windowDurationMins\":300,\"resetsAt\":1795746291},\"secondary\":{\"usedPercent\":3,\"windowDurationMins\":10080,\"resetsAt\":1796000000},\"planType\":\"plus\",\"rateLimitReachedType\":null},\"rateLimitsByLimitId\":{\"codex\":{\"limitId\":\"codex\",\"limitName\":null,\"primary\":{\"usedPercent\":4,\"windowDurationMins\":300,\"resetsAt\":1795746291},\"secondary\":{\"usedPercent\":3,\"windowDurationMins\":10080,\"resetsAt\":1796000000},\"planType\":\"plus\",\"rateLimitReachedType\":null},\"codex_bengalfox\":{\"limitId\":\"codex_bengalfox\",\"limitName\":null,\"primary\":{\"usedPercent\":17,\"windowDurationMins\":300,\"resetsAt\":1795746291},\"secondary\":{\"usedPercent\":3,\"windowDurationMins\":10080,\"resetsAt\":1796000000},\"planType\":\"plus\",\"rateLimitReachedType\":null}}}}\n"
+   },
+   "note": "",
+   "quiet": 6
+  },
+  {
+   "name": "usage_claude_ask_unknown",
+   "agent": "claude",
+   "src": "Claude Code get_usage: limits there but not known now (rate_limits null, measured with traffic off): uq failed",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "HOMEP/tr.jsonl",
+      "cwd": "/home/me/work/api",
+      "hook_event_name": "Stop",
+      "stop_hook_active": false,
+      "last_assistant_message": "Done.",
+      "background_tasks": [],
+      "session_crons": []
+     },
+     "env": {
+      "SIMPLETERM": "1"
+     }
+    }
+   ],
+   "links": [
+    "tunnel"
+   ],
+   "env": {},
+   "conf": {},
+   "bins": {
+    "claude": "#!/bin/sh\nread -r l\n[ -f \"$HOME/fake.reply\" ] && cat \"$HOME/fake.reply\"\n[ -f \"$HOME/fake.reply2\" ] && { read -r l2; read -r l3; cat \"$HOME/fake.reply2\"; }\ncat >/dev/null\n"
+   },
+   "vercache": {
+    "claude": "2.1.316"
+   },
+   "files": {
+    ".simpleterm/run/tun.e7e7e7e7.last": "NOWEPOCH 200\n",
+    "tr.jsonl": "{\"type\": \"user\", \"version\": \"2.1.316\", \"message\": {\"role\": \"user\", \"content\": \"x\"}}\n",
+    "fake.reply": "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"1\",\"response\":{\"session\":{\"total_cost_usd\":0,\"total_api_duration_ms\":0,\"total_duration_ms\":0,\"total_lines_added\":0,\"total_lines_removed\":0,\"model_usage\":{}},\"subscription_type\":null,\"rate_limits_available\":true,\"rate_limits\":null,\"behaviors\":null}}}\n"
+   },
+   "note": "",
+   "quiet": 6
+  },
+  {
+   "name": "usage_copilot_quota",
+   "agent": "copilot",
+   "src": "Copilot CLI 1.0.105 events.jsonl model.model_call_success quotaSnapshots (measured shape)",
+   "steps": [
+    {
+     "args": [
+      "copilot"
+     ],
+     "input": {
+      "hookName": "agentStop",
+      "sessionId": "6a716213-e0da-4025-b68e-b871d583f802",
+      "cwd": "/home/me/work/api",
+      "transcriptPath": "HOMEP/ev.jsonl"
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {
+    "ev.jsonl": "{\"type\":\"model.model_call_success\",\"id\":\"e9\",\"timestamp\":\"2026-11-03T01:02:03.456Z\",\"parentId\":null,\"data\":{\"model\":\"gpt-x\",\"quotaSnapshots\":{\"chat\":{\"isUnlimitedEntitlement\":false,\"entitlementRequests\":200,\"usedRequests\":4,\"remainingPercentage\":97.9,\"resetDate\":\"2026-12-01T00:00:00Z\"},\"completions\":{\"isUnlimitedEntitlement\":false,\"entitlementRequests\":2000,\"usedRequests\":0,\"remainingPercentage\":100,\"resetDate\":\"2026-12-01T00:00:00Z\"},\"premium_interactions\":{\"isUnlimitedEntitlement\":false,\"entitlementRequests\":0,\"usedRequests\":0,\"remainingPercentage\":0,\"resetDate\":\"2026-12-01T00:00:00Z\"},\"unlimited_thing\":{\"isUnlimitedEntitlement\":true,\"entitlementRequests\":50,\"remainingPercentage\":10,\"resetDate\":\"2026-12-01T00:00:00Z\"}}}}\n"
+   },
+   "note": ""
+  },
+  {
+   "name": "usage_opencode_cost",
+   "agent": "opencode",
+   "src": "OpenCode 2.2.5 session cost and tokens (measured keys), from the bridge",
+   "steps": [
+    {
+     "args": [
+      "opencode"
+     ],
+     "input": {
+      "hook_event_name": "Stop",
+      "session_id": "ses_9",
+      "cwd": "/home/me/work/api",
+      "oc": "2",
+      "last_assistant_message": "Stub title",
+      "cost": 0.0123456789,
+      "tokens_in": 12800,
+      "tokens_out": 3400
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
   }
  ]
 }
