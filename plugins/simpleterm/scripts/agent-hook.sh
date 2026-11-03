@@ -2417,6 +2417,11 @@ rq_result() { # i scope out rrid [act|win]
 # in the background ($1 out, $2 the link index whose decision applied).
 rq_finish() { # out [i] [act]
   [ -n "${RQ_MARK:-}" ] && rm -f "$RQ_MARK" 2>/dev/null
+  # A held round's posts in flight (a signal during rq_held's wait): their
+  # answers first (5 s at most each, in parallel), so that the results name
+  # the rids they got and no rq file is left behind.
+  for p in ${RQ_FIRE:-}; do wait "$p" 2>/dev/null; done
+  RQ_FIRE=''
   for p in $PIDS; do kill "$p" 2>/dev/null; done
   PIDS=''
   [ -n "${REQ_ID:-}" ] || return 0
@@ -2606,13 +2611,14 @@ rq_held() {
   esac
   # One round, one rid, to every tunnel at once: the app judges the first
   # copy that comes.
-  hjobs=''
+  RQ_FIRE=''
   for hi in $hready; do
     log "held link-$hi: again"
     (rq_fire "$hi" "$hr") </dev/null >/dev/null 2>&1 &
-    hjobs="$hjobs $!"
+    RQ_FIRE="$RQ_FIRE $!"
   done
-  for p in $hjobs; do wait "$p" 2>/dev/null; done
+  for p in $RQ_FIRE; do wait "$p" 2>/dev/null; done
+  RQ_FIRE=''
   for hi in $hready; do rq_poll "$hi"; done
   return 0
 }
@@ -2626,8 +2632,8 @@ rq_fire() { # i rid
   rm -f "$RUN_DIR/rq.$$.$1.body" "$RUN_DIR/rq.$$.$1.rn"
   [ -n "$BODY_" ] && is_hex "$fn" 32 || return 0
   ING_MT=5
-  fi=$(ingest_post "$2" "$RQ_EV" "$RUN_DIR/ing.$$.$1")
-  fp=${fi%% *} fc=${fi#* }
+  fres=$(ingest_post "$2" "$RQ_EV" "$RUN_DIR/ing.$$.$1")
+  fp=${fres%% *} fc=${fres#* }
   fe=${fc#* } fc=${fc%% *}
   rq_note "$1" "$fp" "$fn" "$2" 1 "$fc" "$fe"
 }
@@ -2693,7 +2699,7 @@ request_flow() { # ev mode
   # nothing and leave the decision to the agent.
   rq_sig=gone
   [ "$AGENT" = opencode ] && rq_sig=terminal
-  RQ_AGAIN=$((start + 5)) RQ_WAT='' RQ_MISS=0 RQ_MARK=''
+  RQ_AGAIN=$((start + 5)) RQ_WAT='' RQ_MISS=0 RQ_MARK='' RQ_FIRE=''
   # This session's waiting permission hooks, for rq_alone.
   if [ "$AGENT" = claude ]; then
     RQ_MARK=$RUN_DIR/perm.$SID.$$
