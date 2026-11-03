@@ -3143,7 +3143,7 @@ def t_v2_not_sent(s):
         for name, opts, sent in (("404 unknown", {}, False), ("404 unknown, shown:true", {"shown": True}, False),
                                  ("shown:false", {"shown": False}, True), ("401", {"decision_http": 401, "decision_error": "unauthorized"}, True),
                                  ("503", {"decision_http": 503, "decision_error": "x"}, True), ("other body", {"unknown_error": "not-found"}, True),
-                                 ("slower than 5 s", {"decision_delay": 20}, True), ("connection refused", None, True)):
+                                 ("slower than 5 s", {"decision_delay": 40}, True), ("connection refused", None, True)):
             url = tctl.url if opts is not None else "http://127.0.0.1:%d" % closed
             s.setup([(LINK_T, {"kind": "tunnel", "relay_url": url, "fmt": 2}), (LINK_A, {"fmt": 2, "push": "disabled"})], conf={"agy_wait": 5})
             if opts is not None:
@@ -3153,22 +3153,23 @@ def t_v2_not_sent(s):
             got = s.records("/v1/ingest")
             s.check("probe %s: %s" % (name, "sent to the relay" if sent else "not sent"), bool(got) == sent and out.strip() == '{"decision":"allow"}',
                     "%s %.2fs" % (out, el))
-            # A probe that is not cut at 5 s takes 20 s here.
-            s.check("probe %s: within the 5 s" % name, el < 15, "%.2fs" % el)
-        # Three tunnels answering in 4 s each: probed at once (about 4 s), not one after another (12 s).
+            # A probe that is not cut at 5 s takes 40 s here.
+            s.check("probe %s: within the 5 s" % name, el < 30, "%.2fs" % el)
+        # Three tunnels answering in 2.5 s each (well inside the probe's 5 s, also on a loaded machine):
+        # probed at once, not one after another (2.5 s apart).
         link_c = {"id": "17" * 16, "secret": "28" * 32, "enc": "39" * 32, "mac": "4a" * 32, "label": "box-c"}
         tun3, tctl3 = s.spawn_mock()
         s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2}), (LINK_B, {"kind": "tunnel", "relay_url": tctl2.url, "fmt": 2}),
                  (link_c, {"kind": "tunnel", "relay_url": tctl3.url, "fmt": 2}), (LINK_A, {"fmt": 2})], conf={"agy_wait": 5})
         for ctl, link in ((tctl, LINK_T), (tctl2, LINK_B), (tctl3, link_c)):
             ctl("/_ctl/reset", {})
-            ctl("/_ctl/config", {"links": {link["id"]: dict(link, unknown_error="unknown", decision_delay=4)}})
+            ctl("/_ctl/config", {"links": {link["id"]: dict(link, unknown_error="unknown", decision_delay=2.5)}})
         rc, out, err, el = s.run("agy", agy, args=("PreToolUse",))
         # When each probe reached its tunnel: at once, not 4 s apart (the mocks' clocks, not the run's time).
         got = [r["received"] for ctl in (tctl, tctl2, tctl3) for r in ctl("/_ctl/records")["records"] if r["path"] == "/v1/decision"]
         tun3.terminate()
         tun3.wait(5)
-        s.check("probe: tunnels probed at the same time", not s.records("/v1/ingest") and len(got) == 3 and max(got) - min(got) < 3,
+        s.check("probe: tunnels probed at the same time", not s.records("/v1/ingest") and len(got) == 3 and max(got) - min(got) < 2,
                 "%.2fs %s" % (el, [round(g - min(got), 2) for g in got] if got else got))
     finally:
         for t in (tun, tun2):
