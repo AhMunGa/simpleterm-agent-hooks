@@ -69,7 +69,7 @@ LINK_T = {"id": "e7" * 16, "secret": "f8" * 32, "enc": "a9" * 32, "mac": "ba" * 
 # as on any real system; the hook must still use the shell's builtin.
 SH_UTILS = [
     "awk", "head", "date", "tr", "sed", "cut", "cksum", "wc", "tail", "mv", "rm",
-    "mkdir", "chmod", "find", "sleep", "cat", "dd", "ls", "ps", "printf", "touch",
+    "mkdir", "chmod", "find", "sleep", "cat", "dd", "ls", "ps", "printf", "touch", "readlink",
 ]
 
 
@@ -2702,6 +2702,9 @@ def v2_run_case(s, case, conf=None, want_n=0):
             b = s.bin / name
             b.write_text(text)
             b.chmod(0o755)
+        for name, ver in case.get("vercache", {}).items():
+            # Their measured --version (run/ver.<agent>: the file and its version), not older than the file.
+            write(s.home / ".simpleterm" / "run" / ("ver." + name), "%s\n%s\n" % (s.bin / name, ver))
         dump = s.tmp / "plain"
         shutil.rmtree(dump, ignore_errors=True)
         dump.mkdir()
@@ -2973,25 +2976,287 @@ def t_v2_usage(s):
         tun.wait(5)
 
 
-# A stand-in Claude Code for the usage ask: answers get_usage with the reply in $ST_REPLY (or none), counts its
-# runs, notes its environment and folder, and waits for its input to end, as the real one does.
+# A stand-in Claude Code (or Codex) for the usage ask: answers --version with the file version (else a measured
+# version), get_usage with the file reply (or none), counts its runs and --version runs, notes its environment and
+# folder, and waits for its input to end, as the real one does; with the file linger it then stays, with a child.
 FAKE_ASKER = """#!/bin/sh
-d=${0%/*}/..
+d=$HOME/..
+if [ "$1" = --version ]; then
+  echo x >>"$d/vcalls"
+  if [ -f "$d/version" ]; then cat "$d/version"; elif [ "${0##*/}" = codex ]; then echo "codex-cli 0.165.0"; else echo "2.1.316 (Claude Code)"; fi
+  exit 0
+fi
 n=$(cat "$d/asks" 2>/dev/null || echo 0)
 echo $((n + 1)) >"$d/asks"
-echo "probe=${SIMPLETERM_PROBE:-} simpleterm=${SIMPLETERM:-} pwd=$(pwd)" >"$d/ask.env"
+echo "exe=$0 probe=${SIMPLETERM_PROBE:-} simpleterm=${SIMPLETERM:-} pwd=$(pwd)" >"$d/ask.env"
 read -r l
 [ -f "$d/reply" ] && cat "$d/reply"
 [ -f "$d/reply2" ] && { read -r l2; read -r l3; cat "$d/reply2"; }
 cat >/dev/null
+if [ -f "$d/linger" ]; then sleep 600 & echo $! >"$d/child"; wait; fi
 """
+
+
+def t_v2_usage_ask_gate(s):
+    """Section 9.2 D21/D22: every version is asked, by the version of the executable that the ask runs (a native
+    install links it to versions/<v> and the ask runs that file; else the file's --version, cached, `unknown` if it
+    gives none, measured again in the background when the file is newer or another, no ask that turn); that version
+    stops for good after an answer showing spend or a hook, or 3 failed asks in a row (an answer resets the count;
+    sign-in results do not count); the session's av is a transcript line's top-level "version"; an agent that stays
+    ends with its children; agent-hook.conf values with comments, blanks, quotes or a CR."""
+    tun, tctl = s.spawn_mock()
+    try:
+        trl = lambda v, extra=None: json.dumps(dict({"type": "user", "version": v, "message": {"role": "user", "content": "x"}}, **(extra or {}))) + "\n"
+        tr = write(s.tmp / "trg.jsonl", trl("2.1.316"))
+        stop = lambda sid="sg1": cc_event(sid, "Stop", stop_hook_active=False, last_assistant_message="Done.", background_tasks=[], session_crons=[],
+                                          transcript_path=str(tr))
+        run = s.home / ".simpleterm" / "run"
+        fake = s.bin / "claude"
+        vd = s.tmp / "share" / "claude" / "versions"
+        sess = {"total_cost_usd": 0, "total_api_duration_ms": 0, "total_duration_ms": 0, "total_lines_added": 0, "total_lines_removed": 0, "model_usage": {}}
+        ok = {"type": "control_response", "response": {"subtype": "success", "request_id": "1", "response": {"session": sess,
+            "subscription_type": "max", "rate_limits_available": True, "rate_limits": {"seven_day": {"utilization": 12.5, "resets_at": "2026-11-10T00:00:00Z"}}}}}
+        spent = json.loads(json.dumps(ok))
+        spent["response"]["response"]["session"].update(total_cost_usd=0.0031, total_api_duration_ms=900, model_usage={"claude-x": {"inputTokens": 10}})
+        unknown = json.loads(json.dumps(ok))
+        unknown["response"]["response"]["rate_limits"] = None
+        nosub = {"type": "control_response", "response": {"subtype": "success", "request_id": "1", "response": {"session": sess, "rate_limits_available": False}}}
+        line = lambda o: json.dumps(o, separators=(",", ":")) + "\n"
+        cache = run / "ver.claude"
+
+        def setup(reply=ok, conf_text=None, link=None, seed="2.1.316"):
+            s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})])
+            tctl("/_ctl/reset", {})
+            tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown")}})
+            for f in ("asks", "ask.env", "reply", "vcalls", "version", "linger", "child"):
+                (s.tmp / f).unlink() if (s.tmp / f).exists() else None
+            if conf_text is not None:
+                (s.home / ".simpleterm" / "agent-hook.conf").write_bytes(conf_text)
+            answer(reply)
+            run.mkdir(parents=True, exist_ok=True)
+            fresh()
+            if fake.is_symlink() or fake.exists():
+                fake.unlink()
+            if link:
+                point(link)
+            else:
+                fake.write_text(FAKE_ASKER)
+                fake.chmod(0o755)
+                if seed:
+                    write(cache, "%s\n%s\n" % (fake, seed))
+
+        def answer(reply):
+            (s.tmp / "reply").write_text(reply if isinstance(reply, str) else line(reply))
+
+        def point(v):
+            # A native install: the link on PATH names versions/<v>.
+            if not (vd / v).exists():
+                write(vd / v, FAKE_ASKER).chmod(0o755)
+            if fake.is_symlink():
+                fake.unlink()
+            fake.symlink_to(vd / v)
+
+        def fresh():
+            # The app connected now, the last ask 5 minutes past.
+            (run / ("tun.%s.last" % LINK_T["id"][:8])).write_text("%d 200\n" % int(time.time()))
+            for f in run.glob("ask.claude.*"):
+                if not f.name.endswith((".auth", ".off", ".fail")):
+                    f.write_text("%d\n" % (int(time.time()) - 400))
+
+        def asks():
+            return int((s.tmp / "asks").read_text()) if (s.tmp / "asks").exists() else 0
+
+        def vcalls():
+            return len((s.tmp / "vcalls").read_text().splitlines()) if (s.tmp / "vcalls").exists() else 0
+
+        def events():
+            return [json.loads(r["plain"]) for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and r["body"]["ev"] == "usage"]
+
+        def off():
+            f = run / "ask.claude.off"
+            return f.read_text().splitlines() if f.exists() else []
+
+        def fails():
+            f = run / "ask.claude.fail"
+            return f.read_text().strip() if f.exists() else None
+
+        def turn(sid="sg1", wait=2.5):
+            s.run("claude", stop(sid), {"SIMPLETERM": "1"})
+            time.sleep(wait)
+
+        def asked(sid="sg1", within=20):
+            # One more ask, its event sent.
+            n, e = asks(), len(events())
+            s.run("claude", stop(sid), {"SIMPLETERM": "1"})
+            return bool(wait_for(lambda: asks() > n and len(events()) > e, within))
+        # Any version is asked (D22): executables and a session outside the measured ones.
+        for v in ("2.2.0", "2.1.315"):
+            setup(seed=v)
+            tr.write_text(trl("2.3.0"))
+            s.check("ask: executable %s, session 2.3.0 -> asked" % v, asked() and asks() == 1 and ("usage-ask claude " + v) in s.log_text(), s.log_text()[-300:])
+        tr.write_text(trl("2.1.316"))
+        # No --version measured yet: the first turn measures it (no ask then), the next one asks.
+        setup(seed=None)
+        turn()
+        wait_for(lambda: vcalls() >= 1, 15)
+        s.check("ask gate: no --version cache -> not asked this turn, measured", asks() == 0 and vcalls() == 1, "%d asks, %d --version" % (asks(), vcalls()))
+        wait_for(lambda: cache.exists(), 20)
+        fresh()
+        s.check("ask gate: then asked by the cached version", asked() and asks() == 1 and vcalls() == 1, "%d asks, %d --version" % (asks(), vcalls()))
+        # The executable replaced (newer than the cache): not asked with the old version; measured again.
+        past = fake.stat().st_mtime - 10
+        os.utime(cache, (past, past))
+        (s.tmp / "version").write_text("2.2.1 (Claude Code)\n")
+        fresh()
+        turn()
+        wait_for(lambda: vcalls() >= 2, 15)
+        s.check("ask gate: executable newer than the cache -> not asked this turn, measured again", asks() == 1 and vcalls() == 2, "%d asks, %d --version" % (asks(), vcalls()))
+        wait_for(lambda: not (run / "ver.claude.lock").exists() and "2.2.1" in cache.read_text(), 10)
+        fresh()
+        s.check("ask gate: then asked as 2.2.1", asked() and "usage-ask claude 2.2.1" in s.log_text(), s.log_text()[-300:])
+        # An executable whose --version says nothing: asked as `unknown`, which stops as any version does.
+        setup(spent, seed=None)
+        (s.tmp / "version").write_text("")
+        turn()
+        wait_for(lambda: cache.exists(), 20)
+        fresh()
+        s.check("ask gate: no version from --version -> asked as unknown; spend stops unknown",
+                asked() and "usage-ask claude unknown" in s.log_text() and wait_for(lambda: off() == ["unknown"], 5), "off %s; %s" % (off(), s.log_text()[-300:]))
+        fresh()
+        turn()
+        s.check("ask gate: unknown stopped -> not asked", asks() == 1, str(asks()))
+        # A native install: the link names the version (no --version), and the ask runs the file it names.
+        setup(link="2.2.0")
+        ran = asked()
+        env = (s.tmp / "ask.env").read_text() if (s.tmp / "ask.env").exists() else ""
+        s.check("ask gate: native link to versions/2.2.0 -> asked, running versions/2.2.0, no --version",
+                ran and vcalls() == 0 and ("exe=%s " % (vd / "2.2.0")) in env, "%d --version, %s" % (vcalls(), env.strip()))
+        # Spend stops that executable version only, and each stopped version stays stopped: a native install
+        # moving between two versions, sessions of both.
+        setup(spent, link="2.1.316")
+        for i in range(6):
+            v = ("2.1.316", "2.1.317")[i % 2]
+            tr.write_text(trl(v))
+            point(v)
+            fresh()
+            before = asks()
+            s.run("claude", stop("sg-" + v), {"SIMPLETERM": "1"})
+            if i < 2:
+                wait_for(lambda: asks() > before and len(off()) > i, 15)
+            else:
+                time.sleep(2.5)
+        s.check("ask gate: spend by 2.1.316 and by 2.1.317 -> each asked once, both stopped", asks() == 2 and sorted(off()) == ["2.1.316", "2.1.317"],
+                "%d asks, off %s" % (asks(), off()))
+        tr.write_text(trl("2.1.316"))
+        # Three failed asks in a row (failed, timeout) stop the version: the fourth turn does not ask.
+        setup(unknown)
+        for reply in (unknown, unknown, ""):
+            answer(reply)
+            fresh()
+            asked(within=40)
+        fresh()
+        turn()
+        u = events()
+        s.check("ask gate: failed, failed, timeout -> that version stopped, the 4th turn not asked",
+                asks() == 3 and off() == ["2.1.316"] and fails() == "2.1.316 3" and [x.get("uq", {}).get("err") for x in u] == ["failed", "failed", "timeout"],
+                "%d asks, off %s, fail %r, %s" % (asks(), off(), fails(), [x.get("uq") for x in u]))
+        # An answer clears the count; sign-in results (not-subscriber, auth) leave it as it is.
+        setup(unknown)
+        for reply in (unknown, unknown, ok):
+            answer(reply)
+            fresh()
+            asked()
+        s.check("ask gate: an answer clears the count", fails() is None and not off(), "fail %r, off %s" % (fails(), off()))
+        for reply in (unknown, unknown, nosub):
+            answer(reply)
+            fresh()
+            asked()
+        s.check("ask gate: failed, failed, not-subscriber -> still 2, not stopped", fails() == "2.1.316 2" and not off(), "fail %r, off %s" % (fails(), off()))
+        for f in run.glob("ask.claude.*.auth"):
+            f.unlink()
+        answer({"type": "control_response", "response": {"subtype": "error", "request_id": "1", "error": "Not logged in · Please run /login"}})
+        fresh()
+        asked()
+        s.check("ask gate: then auth -> still 2", fails() == "2.1.316 2" and not off() and events()[-1].get("uq", {}).get("err") == "auth",
+                "fail %r, off %s, %s" % (fails(), off(), events()[-1].get("uq") if events() else None))
+        # Another version counts from 1; a count of 3 alone (the stop not yet written) stops it too.
+        setup(unknown, link="2.1.316")
+        for v in ("2.1.316", "2.1.316", "2.1.317"):
+            point(v)
+            fresh()
+            asked()
+        s.check("ask gate: two failed with 2.1.316, then one with 2.1.317 -> 2.1.317 1", fails() == "2.1.317 1" and not off(), "fail %r, off %s" % (fails(), off()))
+        write(run / "ask.claude.fail", "2.1.317 3\n")
+        fresh()
+        turn()
+        s.check("ask gate: a count of 3 for the version, nothing in the stop set -> not asked", asks() == 3, str(asks()))
+        # The turn-end cleanup keeps the count however old, and takes an old temporary file.
+        old = time.time() - 2 * 86400
+        tmpf = write(run / "ask.claude.fail.99999", "2.1.317 1\n")
+        for f in (run / "ask.claude.fail", tmpf):
+            os.utime(f, (old, old))
+        turn()
+        s.check("ask gate: the turn-end cleanup keeps ask.claude.fail, takes ask.claude.fail.<pid>",
+                (run / "ask.claude.fail").exists() and not tmpf.exists(), "%s %s" % ((run / "ask.claude.fail").exists(), tmpf.exists()))
+        # The session's av: a line's top-level "version", not one inside a tool result.
+        setup()
+        tr.write_text(trl("2.2.5", {"toolUseResult": {"structuredContent": {"name": "some-pkg", "version": "2.1.316"}}}) + json.dumps({"type": "summary", "summary": "x"}) + "\n")
+        asked()
+        u = events()
+        s.check("ask: av is the line's top-level version (2.2.5), not a tool result's", u and u[0].get("av") == "2.2.5", str(u)[:300])
+        tr.write_text(trl("2.1.316"))
+        # A hook ran in the ask (--include-hook-events): as with spend.
+        for sub in ("hook_started", "hook_response"):
+            hook = line({"type": "system", "subtype": sub, "hook_id": "h1", "hook_name": "SessionStart:startup", "hook_event": "SessionStart"})
+            setup(hook + line(ok))
+            asked()
+            u = events()
+            s.check("ask gate: a %s event in the ask -> uq failed, no windows, version stopped" % sub,
+                    u and u[0].get("uq", {}).get("err") == "failed" and "lims" not in u[0] and off() == ["2.1.316"], "%s off %s" % (str(u)[:200], off()))
+        fresh()
+        answer(ok)
+        turn()
+        s.check("ask gate: after a hook event, that version is not asked again", asks() == 1, str(asks()))
+        # The agent stays after its answer, with a child of its own: both end.
+        setup()
+        (s.tmp / "linger").write_text("1")
+        asked()
+        child = wait_for(lambda: (s.tmp / "child").read_text().strip() if (s.tmp / "child").exists() else "", 10)
+
+        def alive(pid):
+            try:
+                os.kill(int(pid), 0)
+                return True
+            except (OSError, ValueError):
+                return False
+        gone = wait_for(lambda: child and not alive(child), 15)
+        s.check("ask gate: an agent that stays, and its child, end after the answer", bool(child) and bool(gone), "child %s alive %s" % (child, child and alive(child)))
+        if child and alive(child):
+            os.kill(int(child), 9)
+        # agent-hook.conf as people write it: comments, blanks, CRLF, quotes; the key's first line decides.
+        for name, text in (("comment", b"usage_ask=off      # off: never ask an agent for its limits\n"), ("blanks around =", b"usage_ask = off\n"),
+                           ("CRLF", b"usage_ask=off\r\n"), ("trailing blank", b"usage_ask=off \n"), ("double quotes", b'usage_ask="off"\n'),
+                           ("single quotes, tabs", b"  usage_ask\t=\t'OFF'  # x\r\n")):
+            setup(conf_text=b"poll_wait=2\ndone_delay=0\n" + text)
+            turn()
+            s.check("ask conf: usage_ask=off with %s -> not asked" % name, asks() == 0, str(asks()))
+        setup(conf_text=b"poll_wait=2\ndone_delay=0\nusage = 0   # no context or limits\r\n")
+        turn()
+        s.check("ask conf: usage = 0 with a comment and CRLF -> not asked, no usage", asks() == 0 and not events(), "%d asks, %d events" % (asks(), len(events())))
+        setup(conf_text=b"poll_wait=2\ndone_delay=0\nusage_ask=yes please   # ask\nusage_ask=off\n")
+        s.check("ask conf: the key's first line decides (\"yes please\", then off) -> asked", asked(), "%d asks; log %s" % (asks(), s.log_text()[-300:]))
+    finally:
+        if fake.is_symlink():
+            fake.unlink()
+        tun.terminate()
+        tun.wait(5)
 
 
 def t_v2_usage_ask(s):
     """Section 9.2: the usage ask — only while the app is connected (a tunnel's last event an HTTP 200 within 10
     minutes), after a turn, every 5 minutes at most, SIMPLETERM_PROBE=1 and ~/.simpleterm/probe, the answer to the
-    tunnel as src ask with uq, no ask again after a failed sign-in until the credentials change, usage_ask=off, and
-    only for the measured agent versions."""
+    tunnel as src ask with uq, no ask again after a failed sign-in until the credentials change, usage_ask=off, any
+    session version (D22), Codex on by default and usage_ask_codex=off."""
     tun, tctl = s.spawn_mock()
     try:
         tr = write(s.tmp / "tr.jsonl", json.dumps({"type": "user", "version": "2.1.316", "message": {"role": "user", "content": "x"}}) + "\n")
@@ -3009,7 +3274,7 @@ def t_v2_usage_ask(s):
             s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2}), (LINK_A, {"fmt": 2, "push": "disabled"})], conf=conf)
             tctl("/_ctl/reset", {})
             tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown")}})
-            for f in ("asks", "ask.env", "reply"):
+            for f in ("asks", "ask.env", "reply", "vcalls", "version", "linger", "child"):
                 (s.tmp / f).unlink() if (s.tmp / f).exists() else None
             for f in run.glob("ask.*"):
                 f.unlink()
@@ -3023,6 +3288,11 @@ def t_v2_usage_ask(s):
                 last.unlink()
             fake.write_text(FAKE_ASKER)
             fake.chmod(0o755)
+            vercache("claude", "2.1.316")
+
+        def vercache(name, ver):
+            # The executable's measured --version (run/ver.<agent>), as an earlier turn leaves it.
+            write(run / ("ver." + name), "%s\n%s\n" % (s.bin / name, ver))
 
         def asks():
             return int((s.tmp / "asks").read_text()) if (s.tmp / "asks").exists() else 0
@@ -3061,13 +3331,13 @@ def t_v2_usage_ask(s):
             s.run("claude", stop, {"SIMPLETERM": "1"})
             time.sleep(2.5)
             s.check("ask: usage_ask=%s" % v, asks() == 0, str(asks()))
-        # Only the measured versions.
-        for v in ("2.2.0", "2.1.315"):
+        # Any session version is asked (D22).
+        for v in ("2.2.0", "1.0.0"):
             tr.write_text(json.dumps({"type": "user", "version": v, "message": {"role": "user", "content": "x"}}) + "\n")
             setup(ok)
             s.run("claude", stop, {"SIMPLETERM": "1"})
-            time.sleep(2.5)
-            s.check("ask: version %s is not asked" % v, asks() == 0, str(asks()))
+            wait_for(lambda: asks() >= 1 and ask_events(), 25)
+            s.check("ask: session version %s is asked" % v, asks() == 1 and len(ask_events()) == 1, "%d asks, %d events" % (asks(), len(ask_events())))
         tr.write_text(json.dumps({"type": "user", "version": "2.1.316", "message": {"role": "user", "content": "x"}}) + "\n")
         # No subscriber limits (API key): uq not-subscriber, no windows.
         setup({"type": "control_response", "response": {"subtype": "success", "request_id": "1", "response": {"session": sess, "rate_limits_available": False}}})
@@ -3120,35 +3390,37 @@ def t_v2_usage_ask(s):
         s.check("ask: asked again once the credentials changed", asks() == 2, str(asks()))
         wait_for(lambda: len(ask_events()) >= 2, 25)
         # Codex app-server: initialize, initialized, account/rateLimits/read; every limit id, as the rollout makes them.
-        if s.kind == "sh":
-            ro = write(s.tmp / "codex" / "ro.jsonl", json.dumps({"type": "session_meta", "payload": {"cli_version": "0.165.0"}}) + "\n")
-            cfake = s.bin / "codex"
-            cfake.write_text(FAKE_ASKER)
-            cfake.chmod(0o755)
-            snap = lambda lid, p1: {"limitId": lid, "primary": {"usedPercent": p1, "windowDurationMins": 300, "resetsAt": 1795746291},
-                                    "secondary": {"usedPercent": 3, "windowDurationMins": 10080, "resetsAt": 1796000000}, "planType": "plus",
-                                    "rateLimitReachedType": None}
-            reply2 = json.dumps({"id": 2, "result": {"rateLimits": snap("codex", 4), "rateLimitsByLimitId": {
-                "codex": snap("codex", 4), "codex_bengalfox": snap("codex_bengalfox", 17)}}}, separators=(",", ":")) + "\n"
-            cstop = json.dumps({"session_id": "cx9", "turn_id": "t", "transcript_path": str(ro), "cwd": "/w/repo", "hook_event_name": "Stop",
-                                "model": "gpt-5.5", "stop_hook_active": False, "last_assistant_message": "Done."})
-            # Off by default (2026-11-03 decision: the app-server's own writes, plugin sync and sign-in
-            # refresh); the rollout gives the limits.
-            setup({"id": 1, "result": {"userAgent": "x"}})
+        ro = write(s.tmp / "codex" / "ro.jsonl", json.dumps({"type": "session_meta", "payload": {"cli_version": "0.165.0"}}) + "\n")
+        cfake = s.bin / "codex"
+        cfake.write_text(FAKE_ASKER)
+        cfake.chmod(0o755)
+        cseed = lambda: vercache("codex", "0.165.0")
+        snap = lambda lid, p1: {"limitId": lid, "primary": {"usedPercent": p1, "windowDurationMins": 300, "resetsAt": 1795746291},
+                                "secondary": {"usedPercent": 3, "windowDurationMins": 10080, "resetsAt": 1796000000}, "planType": "plus",
+                                "rateLimitReachedType": None}
+        reply2 = json.dumps({"id": 2, "result": {"rateLimits": snap("codex", 4), "rateLimitsByLimitId": {
+            "codex": snap("codex", 4), "codex_bengalfox": snap("codex_bengalfox", 17)}}}, separators=(",", ":")) + "\n"
+        cstop = json.dumps({"session_id": "cx9", "turn_id": "t", "transcript_path": str(ro), "cwd": "/w/repo", "hook_event_name": "Stop",
+                            "model": "gpt-5.5", "stop_hook_active": False, "last_assistant_message": "Done."})
+        # On by default (D22); usage_ask_codex=off turns off Codex's asks only.
+        for v in ("off", "No", "OFF   # not Codex", '"false"', "0"):
+            setup({"id": 1, "result": {"userAgent": "x"}}, conf={"usage_ask_codex": v})
+            cseed()
             (s.tmp / "reply2").write_text(reply2)
             s.run("codex", cstop, {"SIMPLETERM": "1"})
             time.sleep(2.5)
-            s.check("ask codex: not asked by default", asks() == 0, str(asks()))
-            setup({"id": 1, "result": {"userAgent": "x"}}, conf={"usage_ask_codex": "Yes"})
-            (s.tmp / "reply2").write_text(reply2)
-            s.run("codex", cstop, {"SIMPLETERM": "1"})
-            u = wait_for(lambda: [x for x in ask_events() if x.get("app") == "codex"], 25)
-            p = u[0] if u else {}
-            s.check("ask codex: each limit id's primary and secondary, src ask, plan",
-                    [(x["id"], x["pct"], x.get("src")) for x in p.get("lims", [])] == [
-                        ("codex.primary", 4, "ask"), ("codex.secondary", 3, "ask"), ("codex_bengalfox.primary", 17, "ask"), ("codex_bengalfox.secondary", 3, "ask")]
-                    and p.get("plan") == "plus" and p.get("uq", {}).get("ok") is True, str(p)[:500])
-            (s.tmp / "reply2").unlink()
+            s.check("ask codex: usage_ask_codex=%s -> not asked" % v, asks() == 0, str(asks()))
+        setup({"id": 1, "result": {"userAgent": "x"}})
+        cseed()
+        (s.tmp / "reply2").write_text(reply2)
+        s.run("codex", cstop, {"SIMPLETERM": "1"})
+        u = wait_for(lambda: [x for x in ask_events() if x.get("app") == "codex"], 25)
+        p = u[0] if u else {}
+        s.check("ask codex: each limit id's primary and secondary, src ask, plan",
+                [(x["id"], x["pct"], x.get("src")) for x in p.get("lims", [])] == [
+                    ("codex.primary", 4, "ask"), ("codex.secondary", 3, "ask"), ("codex_bengalfox.primary", 17, "ask"), ("codex_bengalfox.secondary", 3, "ask")]
+                and p.get("plan") == "plus" and p.get("uq", {}).get("ok") is True, str(p)[:500])
+        (s.tmp / "reply2").unlink()
     finally:
         tun.terminate()
         tun.wait(5)
@@ -3988,7 +4260,7 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js,
-         t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_not_sent,
+         t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_usage_ask_gate, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_not_sent,
          t_v2_state, t_v2_sessions, t_v2_opencode_js, t_copilot_hooks, t_copilot,
          t_v2_versions, t_v2_claude_question_once]
 

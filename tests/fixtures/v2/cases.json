@@ -3053,6 +3053,9 @@
    "bins": {
     "claude": "#!/bin/sh\nread -r l\n[ -f \"$HOME/fake.reply\" ] && cat \"$HOME/fake.reply\"\n[ -f \"$HOME/fake.reply2\" ] && { read -r l2; read -r l3; cat \"$HOME/fake.reply2\"; }\ncat >/dev/null\n"
    },
+   "vercache": {
+    "claude": "2.1.316"
+   },
    "files": {
     ".simpleterm/run/tun.e7e7e7e7.last": "NOWEPOCH 200\n",
     "tr.jsonl": "{\"type\": \"user\", \"version\": \"2.1.316\", \"message\": {\"role\": \"user\", \"content\": \"x\"}}\n",
@@ -3095,6 +3098,9 @@
    "bins": {
     "codex": "#!/bin/sh\nread -r l\n[ -f \"$HOME/fake.reply\" ] && cat \"$HOME/fake.reply\"\n[ -f \"$HOME/fake.reply2\" ] && { read -r l2; read -r l3; cat \"$HOME/fake.reply2\"; }\ncat >/dev/null\n"
    },
+   "vercache": {
+    "codex": "0.165.0"
+   },
    "files": {
     ".simpleterm/run/tun.e7e7e7e7.last": "NOWEPOCH 200\n",
     "ro.jsonl": "{\"timestamp\":\"2026-11-03T01:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"019a\",\"cli_version\":\"0.165.0\"}}\n",
@@ -3135,6 +3141,9 @@
    "conf": {},
    "bins": {
     "claude": "#!/bin/sh\nread -r l\n[ -f \"$HOME/fake.reply\" ] && cat \"$HOME/fake.reply\"\n[ -f \"$HOME/fake.reply2\" ] && { read -r l2; read -r l3; cat \"$HOME/fake.reply2\"; }\ncat >/dev/null\n"
+   },
+   "vercache": {
+    "claude": "2.1.316"
    },
    "files": {
     ".simpleterm/run/tun.e7e7e7e7.last": "NOWEPOCH 200\n",
