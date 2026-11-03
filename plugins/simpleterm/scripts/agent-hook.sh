@@ -1859,7 +1859,55 @@ conf_val() { # key
 conf_int() { # key default
   v=$(conf_val "$1")
   is_uint "$v" || v=$2
+  # Decimal, as the app and the PowerShell hook read it: no leading zeros
+  # ($(( )) reads 060 as octal 48 and fails on 0090; TDS_AGENT_ALERTS
+  # section 6.7 R13).
+  while :; do
+    case $v in 0[0-9]*) v=${v#0} ;; *) break ;; esac
+  done
   printf '%s' "$v"
+}
+
+# What the hook does with each key (TDS_AGENT_ALERTS section 6.7):
+# the device-wait cap of agent $1 (<agent>_wait, at most 540; agy at most
+# 110: its hook's timeout is 120 seconds).
+conf_wait_cap() { # agent
+  case $1 in
+    codex) c=$(conf_int codex_wait 60) ;;
+    agy) c=$(conf_int agy_wait 0) ;;
+    opencode) c=$(conf_int opencode_wait 540) ;;
+    *) c=$(conf_int claude_wait 540) ;;
+  esac
+  [ "$c" -le 540 ] || c=540
+  [ "$1" = agy ] && [ "$c" -gt 110 ] && c=110
+  printf '%s' "$c"
+}
+
+# One long-poll's seconds: poll_wait 1 to 25, else 25.
+conf_poll_wait() {
+  c=$(conf_int poll_wait 25)
+  [ "$c" -ge 1 ] && [ "$c" -le 25 ] || c=25
+  printf '%s' "$c"
+}
+
+# The seconds a done of agent $1 waits (done_delay; 3 where a newer event of
+# the session may come within moments, else 0).
+conf_done_delay() { # agent
+  case $1 in codex | gemini | opencode | copilot | agy) c=0 ;; *) c=3 ;; esac
+  conf_int done_delay $c
+}
+
+# True unless usage (the v1 key) is 0 as a number (00 too, R27): context
+# and limits are reported.
+conf_usage_on() {
+  [ "$(conf_int usage 1)" -ne 0 ]
+}
+
+# True unless word key $1 (usage_ask, usage_ask_codex) is off, 0, no or
+# false, in any case.
+conf_on() { # key
+  case $(conf_word "$1" on | tr 'A-Z' 'a-z') in off | 0 | no | false) return 1 ;; esac
+  return 0
 }
 
 # The decision response $1: DST DDEC DMAC and the decision extension's
@@ -2404,17 +2452,9 @@ EOF
 #            others an alert, only when no tunnel answered and agy_wait > 0
 request_flow() { # ev mode
   RQ_EV=$1 RQ_MODE=$2
-  case $AGENT in
-    codex) cap=$(conf_int codex_wait 60) ;;
-    agy) cap=$(conf_int agy_wait 0) ;;
-    opencode) cap=$(conf_int opencode_wait 540) ;;
-    *) cap=$(conf_int claude_wait 540) ;;
-  esac
-  [ "$cap" -le 540 ] || cap=540
-  # The Antigravity hook's timeout is 120 seconds (hooks.json).
-  [ "$AGENT" = agy ] && [ "$cap" -gt 110 ] && cap=110
-  POLL_WAIT=$(conf_int poll_wait 25)
-  [ "$POLL_WAIT" -ge 1 ] && [ "$POLL_WAIT" -le 25 ] || POLL_WAIT=25
+  # (The Antigravity hook's timeout is 120 seconds, hooks.json.)
+  cap=$(conf_wait_cap "$AGENT")
+  POLL_WAIT=$(conf_poll_wait)
   # The cap counts from the hook's start (the tunnel's 5 seconds and the
   # relay's ingest included, section 4.6).
   start=$T0
@@ -3003,7 +3043,7 @@ usage_compute() {
 # (usage_ask).
 usage_report() {
   USAGE_SEQ=''
-  [ "$(conf_int usage 1)" = 0 ] && return 0
+  conf_usage_on || return 0
   usage_compute
   osc='' USAGE_JSON=''
   if [ -n "$U_LINE" ]; then
@@ -3239,7 +3279,7 @@ ask_stop() {
 # plugins over the network and may refresh an expired sign-in).
 usage_ask() {
   # (Values in any case: OFF and No turn it off too.)
-  case $(conf_word usage_ask on | tr 'A-Z' 'a-z') in off | 0 | no | false) return 0 ;; esac
+  conf_on usage_ask || return 0
   case $EVENT in Stop | StopFailure) ;; *) return 0 ;; esac
   case $AGENT in
     claude)
@@ -3247,7 +3287,7 @@ usage_ask() {
       ind=$cfg/.credentials.json
       ;;
     codex)
-      case $(conf_word usage_ask_codex on | tr 'A-Z' 'a-z') in off | 0 | no | false) return 0 ;; esac
+      conf_on usage_ask_codex || return 0
       ab=codex cfg=${CODEX_HOME:-$HOME/.codex}
       ind=$cfg/auth.json
       ;;
@@ -3596,6 +3636,23 @@ fi
 if [ "$AGENT" = codex ]; then
   ih=$(printf '%.4096s' "$INPUT")
   case $ih in *'"hook_event_name":"PreToolUse"'* | *'"hook_event_name":"PostToolUse"'*) INPUT=$ih ;; esac
+fi
+
+# Tests only (SIMPLETERM_HOOK_TEST=1): `agent-hook.sh <agent> __conf <key>`
+# prints what the hook does with key <key> of agent-hook.conf (the read
+# vectors of TDS_AGENT_ALERTS section 6.7).
+if [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ "${2:-}" = __conf ]; then
+  case ${3:-} in
+    usage) if conf_usage_on; then echo on; else echo off; fi ;;
+    usage_ask | usage_ask_codex) if conf_on "$3"; then echo on; else echo off; fi ;;
+    claude_wait | codex_wait | agy_wait | opencode_wait) conf_wait_cap "${3%_wait}"; echo ;;
+    poll_wait) conf_poll_wait; echo ;;
+    done_delay) conf_done_delay "$AGENT"; echo ;;
+    bg_done_after) conf_int bg_done_after 600; echo ;;
+    codex_goal_check) conf_int codex_goal_check 5; echo ;;
+    ask_delay) conf_int ask_delay 2; echo ;;
+  esac
+  exit 0
 fi
 
 # Nothing to do without a link or a SimpleTerm session.
@@ -4528,8 +4585,7 @@ done_msg() { # what
 # 0 (a second Stop still replaces the first within the wait if one is set).
 done_later() {
   [ -n "$LINKS" ] || return 0
-  case $AGENT in codex | gemini | opencode | copilot | agy) dw=0 ;; *) dw=3 ;; esac
-  dw=$(conf_int done_delay $dw)
+  dw=$(conf_done_delay "$AGENT")
   if [ "$dw" -le 0 ] || ! printf '%s\n' "$RID" >"$RUN_DIR/$SID.pend" 2>/dev/null; then
     send_bg done
     return 0
@@ -5147,7 +5203,7 @@ case $AGENT:$EVENT in
         # only with agy_wait > 0 (opt-in), and then only when no tunnel
         # answers (an app that is connected sees agy's own prompt, section
         # 4.6), does a request go out and wait.
-        [ -n "$LINKS" ] && [ "$(conf_int agy_wait 0)" -gt 0 ] || finish
+        [ -n "$LINKS" ] && [ "$(conf_wait_cap agy)" -gt 0 ] || finish
         # agy asks before a read only outside the workspace (its policy):
         # a read inside it does not wait.
         [ "$TOOL" = read_file ] && agy_in_workspace "$APATH" && finish

@@ -721,6 +721,35 @@ function Get-ConfInt([string]$key, [int64]$default) {
     return $default
 }
 
+# What the hook does with each key (TDS_AGENT_ALERTS section 6.7; as in
+# agent-hook.sh): the device-wait cap of agent $agent (<agent>_wait, at most
+# 540; conf_wait_cap).
+function Get-ConfWaitCap([string]$agent) {
+    if ($agent -ceq 'codex') { $c = Get-ConfInt 'codex_wait' 60 } else { $c = Get-ConfInt 'claude_wait' 540 }
+    if ($c -gt 540) { $c = 540 }
+    return $c
+}
+
+# One long-poll's seconds: poll_wait 1 to 25, else 25 (conf_poll_wait).
+function Get-ConfPollWait {
+    $c = Get-ConfInt 'poll_wait' 25
+    if ($c -lt 1 -or $c -gt 25) { $c = 25 }
+    return $c
+}
+
+# The seconds a done of agent $agent waits (done_delay; 3, Codex 0;
+# conf_done_delay).
+function Get-ConfDoneDelay([string]$agent) {
+    $c = 3
+    if ($agent -ceq 'codex') { $c = 0 }
+    return (Get-ConfInt 'done_delay' $c)
+}
+
+# True unless usage (the v1 key) is 0 (conf_usage_on).
+function Test-ConfUsageOn {
+    return -not ((Get-ConfInt 'usage' 1) -eq 0)
+}
+
 # --- HTTP ------------------------------------------------------------------
 
 try {
@@ -2937,7 +2966,7 @@ function Format-UsageLine([string]$line) {
 # (Invoke-UsageAsk). As usage_report in agent-hook.sh.
 function Invoke-UsageReport {
     $Script:UsageSeq = ''
-    if ((Get-ConfInt 'usage' 1) -eq 0) { return }
+    if (-not (Test-ConfUsageOn)) { return }
     $u = @{ line = ''; cost = '' }
     try { $u = Get-UsageLine } catch { Write-Log ('usage-failed ' + $_.Exception.GetType().Name) }
     $osc = ''
@@ -3008,6 +3037,12 @@ function Get-ConfWord([string]$key, [string]$default) {
     $v = Get-ConfVal $key
     if (-not $v) { return $default }
     return $v
+}
+
+# True unless word key $key (usage_ask, usage_ask_codex) is off, 0, no or
+# false, in any case (conf_on).
+function Test-ConfOn([string]$key) {
+    return -not (@('off', '0', 'no', 'false') -ccontains (Get-ConfWord $key 'on').ToLowerInvariant())
 }
 
 # A number as awk reads a string (its leading number, else 0).
@@ -3258,7 +3293,7 @@ function Invoke-AskVerChild($job) {
 # expired sign-in). As usage_ask in agent-hook.sh.
 function Invoke-UsageAsk {
     # (Values in any case: OFF and No turn it off too.)
-    if (@('off', '0', 'no', 'false') -ccontains (Get-ConfWord 'usage_ask' 'on').ToLowerInvariant()) { return }
+    if (-not (Test-ConfOn 'usage_ask')) { return }
     if ($Script:HookEvent -cne 'Stop' -and $Script:HookEvent -cne 'StopFailure') { return }
     if ($Script:Agent -ceq 'claude') {
         $ab = 'claude'
@@ -3266,7 +3301,7 @@ function Invoke-UsageAsk {
         if (-not $cfg) { $cfg = Join-Path $HOME '.claude' }
         $ind = Join-Path $cfg '.credentials.json'
     } elseif ($Script:Agent -ceq 'codex') {
-        if (@('off', '0', 'no', 'false') -ccontains (Get-ConfWord 'usage_ask_codex' 'on').ToLowerInvariant()) { return }
+        if (-not (Test-ConfOn 'usage_ask_codex')) { return }
         $ab = 'codex'
         $cfg = [string]$env:CODEX_HOME
         if (-not $cfg) { $cfg = Join-Path $HOME '.codex' }
@@ -4079,10 +4114,8 @@ function Complete-Request($links, [string]$out, $dl, [string]$act) {
 #            without a nonce; otherwise the relay is decidable (Codex)
 function Invoke-RequestFlow([string]$ev, [string]$mode) {
     $Script:RqEv = $ev
-    if ($Script:Agent -ceq 'codex') { $cap = Get-ConfInt 'codex_wait' 60 } else { $cap = Get-ConfInt 'claude_wait' 540 }
-    if ($cap -gt 540) { $cap = 540 }
-    $pollWait = Get-ConfInt 'poll_wait' 25
-    if ($pollWait -lt 1 -or $pollWait -gt 25) { $pollWait = 25 }
+    $cap = Get-ConfWaitCap $Script:Agent
+    $pollWait = Get-ConfPollWait
     # The cap counts from the hook's start (the tunnel's 5 seconds and the
     # relay's ingest included, section 4.6).
     $start = $Script:T0
@@ -5024,9 +5057,7 @@ function Invoke-BgLater([string]$token, [string]$what) {
 # registers none that would come within moments, so its default is 0.
 function Send-DoneLater {
     if ($Script:LinkFiles.Count -eq 0) { return }
-    $dw = 3
-    if ($Script:Agent -ceq 'codex') { $dw = 0 }
-    $dw = Get-ConfInt 'done_delay' $dw
+    $dw = Get-ConfDoneDelay $Script:Agent
     $pendFile = Join-Path $RunDir ($Script:Sid + '.pend')
     if ($dw -le 0 -or -not (Write-FileB $pendFile ($Script:Rid + "`n"))) { Send-Background 'done'; return }
     Start-LaterSend 'pend' $dw $pendFile 0 $Script:Rid '' 0
@@ -5511,6 +5542,23 @@ function Invoke-Event {
 
 try {
     $Script:Agent0 = $Agent
+    # Tests only (SIMPLETERM_HOOK_TEST=1): `agent-hook.ps1 <agent> __conf <key>`
+    # prints what the hook does with key <key> of agent-hook.conf (the read
+    # vectors of TDS_AGENT_ALERTS section 6.7; as in agent-hook.sh).
+    if ($env:SIMPLETERM_HOOK_TEST -eq '1' -and $Mode -ceq '__conf' -and $ScriptArgs.Count -gt 2) {
+        $k = [string]$ScriptArgs[2]
+        $o = ''
+        if ($k -ceq 'usage') { if (Test-ConfUsageOn) { $o = 'on' } else { $o = 'off' } }
+        elseif ($k -ceq 'usage_ask' -or $k -ceq 'usage_ask_codex') { if (Test-ConfOn $k) { $o = 'on' } else { $o = 'off' } }
+        elseif ($k -ceq 'claude_wait' -or $k -ceq 'codex_wait') { $o = [string](Get-ConfWaitCap $k.Substring(0, $k.Length - 5)) }
+        elseif ($k -ceq 'poll_wait') { $o = [string](Get-ConfPollWait) }
+        elseif ($k -ceq 'done_delay') { $o = [string](Get-ConfDoneDelay $Agent) }
+        elseif ($k -ceq 'bg_done_after') { $o = [string](Get-ConfInt 'bg_done_after' 600) }
+        elseif ($k -ceq 'codex_goal_check') { $o = [string](Get-ConfInt 'codex_goal_check' 5) }
+        elseif ($k -ceq 'ask_delay') { $o = [string](Get-ConfInt 'ask_delay' 2) }
+        Write-Out ($o + "`n")
+        exit 0
+    }
     if ($Mode -eq '__send') {
         $Script:Rid = ''
         $Script:Ts = '0'
