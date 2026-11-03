@@ -3101,6 +3101,25 @@ function Find-AskAgent([string]$name) {
     return ''
 }
 
+# True if the last ask of file $af (ask.<agent>.<h>) started less than 5
+# minutes ago (a time more than 60 seconds ahead does not count; ask_recent).
+function Test-AskRecent([string]$af) {
+    $la = Read-FileB $af
+    if ($null -eq $la) { $la = '' }
+    $la = $la.TrimEnd([char]10)
+    return ((Test-UInt $la) -and ($Script:Now - [int64]$la) -lt 300 -and ([int64]$la - $Script:Now) -le 60)
+}
+
+# Creates empty file $path only if it is not there (a claim): $true if this
+# call made it.
+function New-ClaimFile([string]$path) {
+    try {
+        $fs = New-Object IO.FileStream($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
+        $fs.Dispose()
+        return $true
+    } catch { return $false }
+}
+
 # True if asks of the agent's executable version $v were stopped (an answer of
 # that version showed model spend or a hook, or 3 asks in a row failed):
 # run/ask.<agent>.off, one version a line, `unknown` among them (ask_stopped).
@@ -3322,11 +3341,21 @@ function Invoke-UsageAsk {
         if (-not ([IO.File]::Exists($ind) -and [IO.File]::GetLastWriteTimeUtc($ind) -gt [IO.File]::GetLastWriteTimeUtc($auth))) { return }
         Remove-FileQ $auth
     }
-    $la = Read-FileB $af
-    if ($null -eq $la) { $la = '' }
-    $la = $la.TrimEnd([char]10)
-    if ((Test-UInt $la) -and ($Script:Now - [int64]$la) -lt 300 -and ([int64]$la - $Script:Now) -le 60) { return }
-    if (-not (Write-FileB $af ([string]$Script:Now + "`n"))) { return }
+    if (Test-AskRecent $af) { return }
+    # The slot is claimed at once: Stop hooks of several sessions of this
+    # agent and settings folder may end together. $af.lk is held while the
+    # time is checked again and written; one left by a hook that died is taken
+    # after 5 minutes (as usage_ask in agent-hook.sh).
+    $lk = $af + '.lk'
+    if (-not (New-ClaimFile $lk)) {
+        $old = $false
+        try { $old = [IO.File]::Exists($lk) -and ([DateTime]::UtcNow - [IO.File]::GetLastWriteTimeUtc($lk)).TotalSeconds -gt 300 } catch { }
+        if (-not $old) { return }
+        Remove-FileQ $lk
+        if (-not (New-ClaimFile $lk)) { return }
+    }
+    if ((Test-AskRecent $af) -or -not (Write-FileB $af ([string]$Script:Now + "`n"))) { Remove-FileQ $lk; return }
+    Remove-FileQ $lk
     if (-not (Initialize-AskProbe)) { return }
     Write-Log ('usage-ask ' + $Script:Agent + ' ' + $bin.bv)
     Initialize-Facts

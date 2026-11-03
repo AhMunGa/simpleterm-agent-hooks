@@ -3120,6 +3120,13 @@ EOF
   return 1
 }
 
+# True if the last ask of file $1 (ask.<agent>.<h>) started less than 5
+# minutes ago (a time more than 60 seconds ahead does not count).
+ask_recent() { # ask-file
+  la=$(cat "$1" 2>/dev/null)
+  is_uint "$la" && [ $((NOW - la)) -lt 300 ] && [ $((la - NOW)) -le 60 ]
+}
+
 # True if asks of the agent's executable version $1 were stopped (an answer
 # of that version showed model spend or a hook, or 3 asks in a row failed):
 # run/ask.<agent>.off, one version a line (`unknown` among them).
@@ -3309,9 +3316,21 @@ usage_ask() {
     [ -f "$ind" ] && [ "$ind" -nt "$af.auth" ] || return 0
     rm -f "$af.auth"
   fi
-  la=$(cat "$af" 2>/dev/null)
-  is_uint "$la" && [ $((NOW - la)) -lt 300 ] && [ $((la - NOW)) -le 60 ] && return 0
-  printf '%s\n' "$NOW" >"$af" 2>/dev/null || return 0
+  ask_recent "$af" && return 0
+  # The slot is claimed at once: Stop hooks of several sessions of this
+  # agent and settings folder may end together. $af.lk is held while the
+  # time is checked again and written; one left by a hook that died is
+  # taken after 5 minutes.
+  if ! ( set -C; : >"$af.lk" ) 2>/dev/null; then
+    [ -n "$(find "$af.lk" -mmin +5 2>/dev/null)" ] || return 0
+    rm -f "$af.lk"
+    ( set -C; : >"$af.lk" ) 2>/dev/null || return 0
+  fi
+  if ask_recent "$af" || ! printf '%s\n' "$NOW" >"$af" 2>/dev/null; then
+    rm -f "$af.lk"
+    return 0
+  fi
+  rm -f "$af.lk"
   ask_probe_dir || return 0
   log "usage-ask $AGENT $ASK_BV"
   trap '' HUP
