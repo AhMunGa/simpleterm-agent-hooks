@@ -25,7 +25,7 @@ Grok Build, OpenCode 2.x and 1.x, and Gemini CLI.
 | Claude Code | permission, question, plan, done, error, sign-in | allow, allow for a suggested scope, deny, deny with a reason, answer a question, approve a plan (default or accept edits) or ask for changes; the terminal prompt stays open, first answer wins (waits up to 540 s) | yes | context; 5-hour/7-day limits with the [status line tap](#context-and-rate-limits) |
 | Codex | permission, plan, done | allow, deny, deny with a reason: in the connected app, or from another device when no app is connected (Codex hides its prompt while a hook waits, up to 60 s) | Codex sends OSC 7501 itself | context, limits, plan |
 | GitHub Copilot CLI | permission and question (alerts), plan, done, error | not yet: its permission hook also runs for calls that never prompt, so it is not used until those can be told apart | no | no |
-| Antigravity CLI (`agy`) | question, plan, done, error; commands, file edits and reads, MCP calls with `agy_wait` | opt-in (`agy_wait`, only while the app is not connected): allow, deny, deny with a reason, approve a plan | agy sends OSC 7501 itself | no |
+| Antigravity CLI (`agy`) | question, plan, done, error; commands, file writes and edits, reads outside the workspace, MCP calls with `agy_wait` | opt-in (`agy_wait`, only while the app is not connected): allow, deny, deny with a reason, approve a plan | agy sends OSC 7501 itself | no |
 | Grok Build | permission, question and plan (alerts), idle question, done, error | no: a Grok hook can block but not approve | no | no |
 | OpenCode 2.x | permission, question (input form, alert), done, error | allow, always (the pattern), deny, deny with a reason; device or terminal, first answer wins | the TUI sends OSC 7501 itself | no |
 | OpenCode 1.x | permission, question, done, error | allow, always, deny (1.19: with a reason), answer a question (1.19); device or terminal, first answer wins | no | no |
@@ -139,8 +139,9 @@ timed-out hook as a failed tool call, measured).
 agy has no "waiting for permission" event: its `PreToolUse` hook runs before every tool call,
 before agy decides whether to ask. So by default the plugin only alerts for agy's own questions
 (`ask_question`), a plan waiting for review, and when the agent stops. To answer from the device
-(`run_command`, `write_file`, `edit_file`, `read_file`, `call_mcp_tool`), set `agy_wait` (seconds,
-at most 110) in `~/.simpleterm/agent-hook.conf`: such a call then first asks the SSH tunnel whether
+(`run_command`, `write_file`, `edit_file`, `call_mcp_tool`, and `read_file` of a path outside the
+workspace folders: agy asks before those reads only), set `agy_wait` (seconds, at most 110) in
+`~/.simpleterm/agent-hook.conf`: such a call then first asks the SSH tunnel whether
 the app is connected, and only when it is not, waits that long for an answer from another device
 before agy's permission policy runs; the terminal shows no prompt meanwhile. With no answer the
 policy decides as usual. While the app is connected, agy shows its own prompt and the app answers
@@ -237,7 +238,7 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | Codex `SessionStart` (resumed or forked session), `PostCompact` | none (context) | none |
 | Gemini `Notification` (`ToolPermission`) | `question` (`approve <tool>: <command or file>`) | none |
 | Gemini `AfterAgent` | `done` (at once); `error` when the turn had no response text (API error, cancel, loop) | none |
-| agy `PreToolUse` `run_command`, `write_file`, `edit_file`, `read_file`, `call_mcp_tool` (only with `agy_wait` and no app connected) | `permission` | none |
+| agy `PreToolUse` `run_command`, `write_file`, `edit_file`, `call_mcp_tool`, `read_file` outside the workspace (only with `agy_wait` and no app connected) | `permission` | none |
 | agy `PreToolUse` `ask_question` | `question` | none |
 | agy `PreToolUse`/`PostToolUse` `write_file` of a plan for review | none (the next `Stop` is the review) | none |
 | agy `Stop` (fully idle) | `done` or `error`; after a plan for review a `question` (plan) | none |
@@ -514,7 +515,7 @@ To send no context or limits at all, set `usage=0` in `~/.simpleterm/agent-hook.
 claude_wait=540   # seconds a Claude Code permission waits for a device, at most 540
 codex_wait=60     # the same for Codex
 opencode_wait=540 # the same for OpenCode
-agy_wait=0        # Antigravity run_command waits; 0 (off) by default, at most 110
+agy_wait=0        # the same for Antigravity (commands, file writes and edits, reads outside the workspace, MCP calls); 0 (off) by default, at most 110
 poll_wait=25      # one long-poll, 1-25
 usage=1           # 0: send no context or rate limits
 bg_done_after=600 # a pause with only shells/monitors left: done after this many seconds; 0: never

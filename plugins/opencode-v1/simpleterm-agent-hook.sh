@@ -69,6 +69,20 @@ trim_log() {
   rm -f "$tl" 2>/dev/null
 }
 
+# True if path $1 is inside one of agy's workspace folders (AWS, from
+# workspacePaths). A path with a .. segment, or none given, counts as outside.
+agy_in_workspace() { # path
+  case $1 in '' | ../* | */../* | */.. | ..) return 1 ;; /*) ;; *) return 0 ;; esac
+  while IFS= read -r aw; do
+    aw=${aw%/}
+    [ -n "$aw" ] || continue
+    case $1 in "$aw" | "$aw"/*) return 0 ;; esac
+  done <<EOF
+$AWS
+EOF
+  return 1
+}
+
 finish() {
   agy_default
   trim_log
@@ -2981,7 +2995,7 @@ case $AGENT in
     ;;
   agy)
     # toolCall.args has no Cwd in 1.4.12 (the workspace is workspacePaths).
-    WANT='conversationId,workspacePaths.0,toolCall.name,toolCall.args.CommandLine,toolCall.args.questions.0.question,toolCall.args.Path,toolCall.args.ServerName,toolCall.args.ToolName,toolCall.args.ArtifactMetadata.RequestFeedback,terminationReason,error,fullyIdle,executionNum,stepIdx,transcriptPath,lastUserInput'
+    WANT='conversationId,workspacePaths.0,workspacePaths.1,workspacePaths.2,workspacePaths.3,workspacePaths.4,workspacePaths.5,workspacePaths.6,workspacePaths.7,toolCall.name,toolCall.args.CommandLine,toolCall.args.questions.0.question,toolCall.args.Path,toolCall.args.ServerName,toolCall.args.ToolName,toolCall.args.ArtifactMetadata.RequestFeedback,terminationReason,error,fullyIdle,executionNum,stepIdx,transcriptPath,lastUserInput'
     ;;
   grok)
     # backgroundTasks (Grok's Stop, camelCase): the first ten tasks.
@@ -3002,7 +3016,7 @@ esac
 EVENT='' NTYPE='' TOOL='' DETAIL='' DESC='' SID='' CWD='' LAST='' ERR='' QTEXT='' FIRSTIN='' NTYPE2=''
 TPATH='' CTXTOK='' MODEL='' GTYPE='' FULLYIDLE='' TERMREASON='' EXTRA='' GKEY='' REASON=''
 PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS='' REQIDIN='' TOOLUSEID=''
-OCTITLE='' RFB='' APATH='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX=''
+OCTITLE='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX=''
 BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_SEQ=''
 BG_SVC=0 BG_IDMAP='' BG_KEEP='' BG_SHELLS='' BG_IDS='' BG_NOID=0 BG_M=''
 CRON_N=0 CRON_SCHED='' CRON_SUMS=''
@@ -3564,7 +3578,12 @@ while IFS= read -r kv; do
     tool_input.description=*) DESC=${kv#*=} ;;
     tool_input.questions.0.question=* | toolCall.args.questions.0.question=*) QTEXT=${kv#*=} ;;
     session_id=* | sessionId=* | conversationId=*) [ -n "$SID" ] || SID=${kv#*=} ;;
-    cwd=* | workspacePaths.0=*) [ -n "$CWD" ] || CWD=${kv#*=} ;;
+    cwd=*) [ -n "$CWD" ] || CWD=${kv#*=} ;;
+    workspacePaths.0=*)
+      [ -n "$CWD" ] || CWD=${kv#*=}
+      AWS="$AWS${kv#*=}$NL"
+      ;;
+    workspacePaths.[1-7]=*) AWS="$AWS${kv#*=}$NL" ;;
     message=*) LAST=${kv#*=} ;;
     last_assistant_message=* | lastAssistantMessage=* | prompt_response=*) LAST=${kv#*=} ;;
     last-assistant-message=*) LAST=${kv#*=} ;;
@@ -4427,6 +4446,9 @@ case $AGENT:$EVENT in
         # answers (an app that is connected sees agy's own prompt, section
         # 4.6), does a request go out and wait.
         [ -n "$LINKS" ] && [ "$(conf_int agy_wait 0)" -gt 0 ] || finish
+        # agy asks before a read only outside the workspace (its policy):
+        # a read inside it does not wait.
+        [ "$TOOL" = read_file ] && agy_in_workspace "$APATH" && finish
         d=$DETAIL
         [ -n "$d" ] || d=$APATH
         [ "$TOOL" = call_mcp_tool ] && d="$AMS/$AMT"

@@ -3081,6 +3081,16 @@ def t_v2_not_sent(s):
     agy = json.dumps({"conversationId": "c-1", "workspacePaths": ["/w/a"], "stepIdx": 4, "toolCall": {"name": "run_command", "args": {"CommandLine": "make"}}})
     rc, out, err, el = s.run("agy", agy, args=("PreToolUse",))
     s.check("not sent: agy run_command with agy_wait 0", out.strip() == '{"decision":"allow"}' and not s.records(), out)
+    # agy asks before a read only outside the workspace: a read inside it does not wait, even with agy_wait.
+    for name, paths, path, sent in (("inside", ["/w/a"], "/w/a/README.md", False), ("in the second folder", ["/w/a", "/w/b/"], "/w/b/src/x.ts", False),
+                                    ("outside", ["/w/a"], "/etc/hosts", True), ("a name that only starts the same", ["/w/a"], "/w/ab/x", True),
+                                    ("climbing out with ..", ["/w/a"], "/w/a/../../etc/passwd", True)):
+        s.setup([(LINK_A, {"fmt": 2, "push": "disabled"})], conf={"agy_wait": 5})
+        rd = json.dumps({"conversationId": "c-1", "workspacePaths": paths, "stepIdx": 3, "toolCall": {"name": "read_file", "args": {"Path": path}}})
+        rc, out, err, el = s.run("agy", rd, args=("PreToolUse",))
+        got = s.records("/v1/ingest")
+        s.check("agy read_file %s: %s" % (name, "asked" if sent else "not asked, no wait"),
+                out.strip() == '{"decision":"allow"}' and bool(got) == sent and (sent or el < 15), "%s %.2fs %s" % (out, el, str(got)[:150]))
     probe = __import__("socket").socket()
     probe.bind(("127.0.0.1", 0))
     closed = probe.getsockname()[1]
