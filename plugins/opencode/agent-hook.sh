@@ -2085,10 +2085,11 @@ rq_judge() { # i
   done
   jsmap=$(printf '%s\n' "$jm" | sed -n "s/^#smap${TAB}s${TAB}//p")
   [ -n "$jrq" ] || jrq=$REQ_ID
-  # OpenCode 1.19 and 2.x settle the session's other open requests with
-  # always and reject: these decisions are judged by the requests open now,
-  # whatever the request carried when it was sent (section 5.5-5).
-  [ "$AGENT" = opencode ] && [ "$OCV" != 1.0 ] && jaff=allow_scope,deny,deny_reason
+  # OpenCode 1.19 and 2.x settle the session's other open permission
+  # requests with always and reject: these decisions are judged by the
+  # requests open now, whatever the request carried when it was sent
+  # (section 5.5-5). A question's reject settles only the question.
+  [ "$AGENT" = opencode ] && [ "$OCV" != 1.0 ] && [ "$EVENT" = PermissionRequest ] && jaff=allow_scope,deny,deny_reason
   case $jd in allow | deny) ;; invalid) JV=bad; return 0 ;; *) return 0 ;; esac
   [ "$jx" = bad ] && { JV=bad; return 0; }
   if [ "$jx" != ok ]; then

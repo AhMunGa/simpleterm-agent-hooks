@@ -3361,14 +3361,16 @@ def t_v2_opencode_js(s):
     d = str(s.tmp)
     ask19 = {"type": "permission.asked", "properties": {"id": "per_1", "sessionID": "ses_1", "permission": "bash", "patterns": ["echo a1"],
                                                        "metadata": {"command": "echo a1"}, "always": ["echo *"], "tool": {"messageID": "msg_1", "callID": "c1"}}}
-    s.setup([(LINK_A, {"fmt": 2, "decision": "allow", "after": 1, "dext": {"act": "allow_scope", "scope": 0}})])
+    # (A 1.19 always or reject settles the session's other requests: the app names the ones the user
+    # saw, this one at least, section 5.5-5.)
+    s.setup([(LINK_A, {"fmt": 2, "decision": "allow", "after": 1, "dext": {"act": "allow_scope", "scope": 0, "seen": ["per_1"]}})])
     calls = node_plugin(s, "v1", {"directory": d, "raw": True, "steps": [{"event": ask19}], "wait": 30000, "replies": 1})
     s.check("opencode 1.19 v2: allow_scope -> reply always (raw route)",
             replies(calls) == [{"url": "/permission/{requestID}/reply", "path": {"requestID": "per_1"}, "body": {"reply": "always"}}], str(calls)[:400])
     p = (ingests(s, "permission") or [{}])[0].get("plain_json") or {}
     s.check("opencode 1.19 v2: request id, scope pattern, message id", (p.get("req") or {}).get("id") == "per_1"
             and (p.get("req") or {}).get("scopes") == [{"label": "echo *", "kind": "pattern", "dest": "process"}], str(p)[:300])
-    s.setup([(LINK_A, {"fmt": 2, "decision": "deny", "after": 1, "dext": {"act": "deny_reason", "reason": "use pnpm"}})])
+    s.setup([(LINK_A, {"fmt": 2, "decision": "deny", "after": 1, "dext": {"act": "deny_reason", "reason": "use pnpm", "seen": ["per_1"]}})])
     calls = node_plugin(s, "v1", {"directory": d, "raw": True, "steps": [{"event": ask19}], "wait": 30000, "replies": 1})
     s.check("opencode 1.19 v2: deny_reason -> reject with the message",
             replies(calls) == [{"url": "/permission/{requestID}/reply", "path": {"requestID": "per_1"}, "body": {"reply": "reject", "message": "use pnpm"}}], str(calls)[:400])
