@@ -482,7 +482,8 @@ plaintext() { # rid ev nonce
 }
 
 # Sends one event to one link; prints "<push result or http<code>> <http
-# code> <error code or ->". ING_MT caps the relay's time (the tunnel's is 5).
+# code> <error code, held (an HTTP 200 with "held":true) or ->". ING_MT caps
+# the relay's time (the tunnel's is 5).
 ingest_raw() { # rid ev nonce outfile
   nh=''
   [ -n "$3" ] && nh=$(sha256_hex "$3")
@@ -509,7 +510,14 @@ ingest_raw() { # rid ev nonce outfile
   code=$(http POST /v1/ingest "$body" "$mt" "$4")
   push='' err=''
   case $code in
-    200) push=$(resp_get "$4" push | sed -n 's/^push=//p' | tr -cd 'a-z-') ;;
+    200)
+      ig=$(resp_get "$4" push,held)
+      push=$(printf '%s\n' "$ig" | sed -n 's/^push=//p' | tr -cd 'a-z-')
+      # The app holds the request back for a wait the user is looking at
+      # and wants it again while it is open (TDS_AGENT_EVENTS_V2 section
+      # 4.6 "held"): the third field says so.
+      case $ig in *held=true*) err=held ;; esac
+      ;;
     410) printf '' 2>/dev/null >"$RUN_DIR/$L_LINK.revoked" ;;
     400) err=$(resp_get "$4" error | sed -n 's/^error=//p' | tr -cd 'a-zA-Z-') ;;
   esac
@@ -2327,6 +2335,14 @@ rq_send() { # i file rid ev dec waitov maxtime pass
     rc=${rc%% *}
   fi
   printf '%s %s %s %s %s %s %s\n' "$rp" "${rn:--}" "$3" "$rd" "${L_KIND:-relay}" "$rc" "${L_FMT:-1}" >"$RUN_DIR/rq.$$.$1.st"
+  # A v2 app's tunnel that holds a decidable request back for a wait the
+  # user is looking at (held, section 4.6): it hears the request again
+  # while the agent's window for it is open (rq_held).
+  rm -f "$RUN_DIR/rq.$$.$1.held"
+  if [ "$rc" = 200 ] && [ "$re" = held ] && [ "$rp" = suppressed ] && [ "$rd" = 1 ] && [ "$L_KIND" = tunnel ] &&
+    [ "$L_FMT" = 2 ] && [ "${RQ_MODE:-}" = shared ]; then
+    printf '' >"$RUN_DIR/rq.$$.$1.held"
+  fi
 }
 
 # Starts the poller of link index $1 if it took the request to wait on.
@@ -2362,6 +2378,7 @@ rq_result() { # i scope out rrid [act|win]
 # Ends the request: the request-level result to every tunnel that took it,
 # in the background ($1 out, $2 the link index whose decision applied).
 rq_finish() { # out [i] [act]
+  [ -n "${RQ_MARK:-}" ] && rm -f "$RQ_MARK" 2>/dev/null
   for p in $PIDS; do kill "$p" 2>/dev/null; done
   PIDS=''
   [ -n "${REQ_ID:-}" ] || return 0
@@ -2410,6 +2427,103 @@ rq_reject() { # i bad|changed
   is_hex "$xnr" 16 || return 0
   rq_send "$1" "$(cat "$RUN_DIR/rq.$$.$1.f")" "$xnr" "$RQ_EV" 1 '' 5 tunnel
   rq_poll "$1"
+}
+
+# Whether the agent's own window for this request is still open, as far as
+# the hook can tell for sure (TDS_AGENT_EVENTS_V2 section 4.6, the
+# open-window check): 0 open, 1 not (closed, another one, or nothing to tell
+# by), 2 not known yet (the agent may record its window a moment after the
+# hook starts). Claude Code only: its session file (sessions/<agent pid>.json
+# under CLAUDE_CONFIG_DIR or ~/.claude, the first 8 KiB) says this session
+# (sessionId) waits on a permission prompt, the one first seen there
+# (statusUpdatedAt unchanged, RQ_WAT), and no other permission hook of this
+# session waits now (rq_alone).
+rq_window() {
+  [ "$AGENT" = claude ] && [ -n "$AGENT_PID" ] || return 1
+  rq_alone || return 1
+  wv=$(head -c 8192 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/$AGENT_PID.json" 2>/dev/null |
+    awk -v want=sessionId,status,waitingFor,statusUpdatedAt "$JSON_GET" 2>/dev/null)
+  wsid='' wst='' wfor='' wat=''
+  while IFS= read -r kv; do
+    case $kv in
+      sessionId=*) wsid=${kv#*=} ;;
+      status=*) wst=${kv#*=} ;;
+      waitingFor=*) wfor=${kv#*=} ;;
+      statusUpdatedAt=*) wat=${kv#*=} ;;
+    esac
+  done <<EOF
+$wv
+EOF
+  case $wat in '' | *[!0-9]*) wat='' ;; esac
+  # Not read (no file yet, or caught while it was written): not known.
+  [ -n "$wst" ] && [ -n "$wat" ] || return 2
+  wopen=0
+  [ -n "$RAWSID" ] && [ "$wsid" = "$RAWSID" ] && [ "$wst" = waiting ] && [ "$wfor" = 'permission prompt' ] || wopen=1
+  if [ -z "$RQ_WAT" ]; then
+    [ "$wopen" = 0 ] || return 2
+    RQ_WAT=$wat
+    return 0
+  fi
+  [ "$wopen" = 0 ] && [ "$wat" = "$RQ_WAT" ]
+}
+
+# No other permission hook of this session is waiting now (perm.<session>.<pid>
+# of a live hook, RQ_MARK). Claude Code shows the requests of parallel tool
+# calls in one window ("1 of 2") and its session file stays as it was from one
+# item to the next [measured 2.1.316]: which one is open cannot be told.
+rq_alone() {
+  for mf in "$RUN_DIR"/perm."$SID".*; do
+    [ -e "$mf" ] || continue
+    [ "$mf" = "$RQ_MARK" ] && continue
+    mp=${mf##*.}
+    is_uint "$mp" && kill -0 "$mp" 2>/dev/null && return 1
+  done
+  return 0
+}
+
+# Tunnels that hold the request back for a wait the user is looking at
+# (rq.$$.<i>.held, section 4.6): while the agent's own window for the request
+# is open (rq_window), the hook goes on and sends it to them again every 5
+# seconds (RQ_AGAIN), checked just before: one new rid for them all (one
+# event, section 3; the app shows a rid once), a new nonce each. A tunnel
+# that now answers sent is waited on (rq_poll); one that no longer answers
+# held is dropped (rq_send). True while one is kept.
+rq_held() {
+  set -- "$RUN_DIR"/rq."$$".*.held
+  [ -e "$1" ] || return 1
+  rq_window
+  hw=$?
+  if [ "$hw" = 2 ]; then
+    # Not known: a few seconds for the agent to record its window, then a
+    # few reads that fail in a row; nothing is sent meanwhile.
+    RQ_MISS=$((RQ_MISS + 1))
+    if [ -z "$RQ_WAT" ]; then [ $(($(date +%s) - start)) -lt 5 ] && return 0
+    else [ "$RQ_MISS" -lt 3 ] && return 0
+    fi
+  fi
+  [ "$hw" = 0 ] && RQ_MISS=0
+  if [ "$hw" != 0 ]; then
+    log "held: the window is not open (stop)"
+    rm -f "$@"
+    return 1
+  fi
+  [ "$(date +%s)" -ge "$RQ_AGAIN" ] || return 0
+  RQ_AGAIN=$(($(date +%s) + 5))
+  # A fresh ts and tms: the tunnel takes events within 5 minutes of now.
+  TS=$(date +%s)
+  is_uint "$TS" || TS=0
+  v2_spec "$V2X@.tms${TAB}s$TAB$(v2_tms)$NL"
+  hr=$(rand_hex 8)
+  is_hex "$hr" 16 || return 0
+  for hf in "$@"; do
+    [ -e "$hf" ] || continue
+    hi=${hf%.held}
+    hi=${hi##*.}
+    log "held link-$hi: again"
+    rq_send "$hi" "$(cat "$RUN_DIR/rq.$$.$hi.f")" "$hr" "$RQ_EV" 1 '' 5 tunnel
+    rq_poll "$hi"
+  done
+  return 0
 }
 
 # True if a tunnel answered the probe (section 4.6): HTTP 404 with error
@@ -2473,6 +2587,12 @@ request_flow() { # ev mode
   # nothing and leave the decision to the agent.
   rq_sig=gone
   [ "$AGENT" = opencode ] && rq_sig=terminal
+  RQ_AGAIN=$((start + 5)) RQ_WAT='' RQ_MISS=0 RQ_MARK=''
+  # This session's waiting permission hooks, for rq_alone.
+  if [ "$AGENT" = claude ]; then
+    RQ_MARK=$RUN_DIR/perm.$SID.$$
+    printf '' 2>/dev/null >"$RQ_MARK" || RQ_MARK=''
+  fi
   trap 'rq_finish $rq_sig; log "permission signal"; finish' TERM INT HUP
 
   while IFS= read -r f; do
@@ -2549,6 +2669,7 @@ EOF
       fi
       case $JV in bad | changed) rq_reject "$i" "$JV" ;; esac
     done
+    rq_held && waiting=1
     [ "$waiting" = 1 ] || break
     if answered_locally "$start" "$FP"; then
       log "permission answered-at-terminal"

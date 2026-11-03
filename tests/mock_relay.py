@@ -5,6 +5,7 @@ Run with `python3 -I mock_relay.py [--port N]`. It prints `PORT <n>` on stdout
 and serves the relay's host endpoints (protocol v1):
 
   POST /v1/ingest                 records the request, answers {"ok":true,"push":...}
+                                  (push "held": {"ok":true,"push":"suppressed","held":true})
   GET  /v1/decision?rid=&wait=    long-polls; answers pending or decided
 
 It also plays the device: for a link configured with a decision it decrypts the
@@ -204,8 +205,13 @@ class Handler(BaseHTTPRequestHandler):
         time.sleep(float(link.get("ingest_delay", 0)))
         rec["status"] = 200
         rec["responded"] = time.time()
+        rec["push"] = push
         with LOCK:
             STATE["records"].append(rec)
+        if push == "held":
+            # A v2 app's tunnel holding the request back for a wait the user is looking at
+            # (TDS_AGENT_EVENTS_V2 section 4.6): suppressed, and asked to tell it again.
+            return self._send(200, {"ok": True, "push": "suppressed", "held": True})
         return self._send(200, {"ok": True, "push": push})
 
     def do_GET(self):

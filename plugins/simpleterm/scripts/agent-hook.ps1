@@ -1649,13 +1649,21 @@ function Start-Ingest($link, [string]$rid, [string]$ev, [string]$nonce) {
     return (Start-IngestOp (New-Ingest $link $rid $ev $nonce))
 }
 
-# Finishes an ingest: @{ push (the push result or http<code>); code (3 digits); err }.
+# Finishes an ingest: @{ push (the push result or http<code>); code (3 digits); err;
+# held (an HTTP 200 with "held":true - the app holds the request back for a
+# wait the user is looking at and wants it again while it is open,
+# TDS_AGENT_EVENTS_V2 section 4.6) }.
 function Complete-Ingest($op) {
-    if ($op.seal) { return @{ push = 'seal'; code = '000'; err = '-' } }
+    if ($op.seal) { return @{ push = 'seal'; code = '000'; err = '-'; held = $false } }
     $r = Complete-Relay $op 4096
     $push = ''
     $err = ''
-    if ($r.code -eq 200) { $push = [regex]::Replace((Get-Field (Get-JsonKV $r.body @('push')) 'push'), '[^a-z-]', '') }
+    $held = $false
+    if ($r.code -eq 200) {
+        $kv = Get-JsonKV $r.body @('push', 'held')
+        $push = [regex]::Replace((Get-Field $kv 'push'), '[^a-z-]', '')
+        $held = ((Get-Field $kv 'held') -ceq 'true')
+    }
     elseif ($r.code -eq 410) { [void](Write-FileB (Join-Path $RunDir ($op.link.link + '.revoked')) '') }
     elseif ($r.code -eq 400) { $err = [regex]::Replace((Get-Field (Get-JsonKV $r.body @('error')) 'error'), '[^a-zA-Z-]', '') }
     $code = Format-Code $r.code
@@ -1667,7 +1675,7 @@ function Complete-Ingest($op) {
     Write-Log ('ingest ev=' + $op.ev + ' link=' + (Short $op.link.link) + ' http=' + $code + ' push=' + $shown)
     if (-not $push) { $push = 'http' + $code }
     if (-not $err) { $err = '-' }
-    return @{ push = $push; code = $code; err = $err }
+    return @{ push = $push; code = $code; err = $err; held = $held }
 }
 
 # Sends event $ev to every link (tunnels first: the app reports a shown event
@@ -4005,7 +4013,7 @@ function Send-RqPass($links, [string]$pass, [bool]$dec, [string]$waitov, [string
             $Script:WaitOv = ''
             $Script:IngMt = ''
             $r2 = Complete-Ingest $op2
-            $r = @{ push = $r2.push; code = $r2.code; err = $r.err }
+            $r = @{ push = $r2.push; code = $r2.code; err = $r.err; held = $false }
             $meta = $op2.meta
         }
         $kind = 'relay'
@@ -4015,6 +4023,11 @@ function Send-RqPass($links, [string]$pass, [bool]$dec, [string]$waitov, [string
         $p.L.st = @{ push = $r.push; nonce = $p.rn; rid = $rid; dec = $p.rd; kind = $kind; code = $r.code; fmt = $fmt }
         $p.L.meta = $meta
         $p.L.link = $p.link
+        # A v2 app's tunnel that holds a decidable request back for a wait the
+        # user is looking at (held, section 4.6): it hears the request again
+        # while the agent's window for it is open (Test-RqHeld).
+        $p.L.held = ($r.code -ceq '200' -and $r.held -and $r.push -ceq 'suppressed' -and $p.rd -and $kind -ceq 'tunnel' -and
+            $fmt -ceq '2' -and $Script:RqMode -ceq 'shared')
     }
 }
 
@@ -4102,6 +4115,94 @@ function Step-RqPoll($L, [int64]$deadline, [int64]$pollWait) {
     $P.nextAt = [DateTime]::UtcNow.AddSeconds(2)
 }
 
+# Whether the agent's own window for this request is still open, as far as the
+# hook can tell for sure (TDS_AGENT_EVENTS_V2 section 4.6, the open-window check): 0
+# open, 1 not (closed, another one, or nothing to tell by), 2 not known yet
+# (the agent may record its window a moment after the hook starts). Claude
+# Code only: its session file (sessions\<agent pid>.json under
+# CLAUDE_CONFIG_DIR or ~\.claude, the first 8 KiB) says this session
+# (sessionId) waits on a permission prompt, the one first seen there
+# (statusUpdatedAt unchanged), and no other permission hook of this session
+# waits now (Test-RqAlone) (rq_window).
+function Get-RqWindow([int]$agentPid) {
+    if ($Script:Agent -cne 'claude' -or $agentPid -le 0) { return 1 }
+    if (-not (Test-RqAlone)) { return 1 }
+    $dir = $env:CLAUDE_CONFIG_DIR
+    if (-not $dir) { $dir = Join-Path $HOME '.claude' }
+    $kv = Get-JsonKV (Read-HeadB (Join-Path (Join-Path $dir 'sessions') ([string]$agentPid + '.json')) 8192) @('sessionId', 'status', 'waitingFor', 'statusUpdatedAt')
+    $wsid = Get-Field $kv 'sessionId'
+    $wst = Get-Field $kv 'status'
+    $wfor = Get-Field $kv 'waitingFor'
+    $wat = Get-Field $kv 'statusUpdatedAt'
+    if ($wat -cnotmatch '\A[0-9]+\z') { $wat = '' }
+    # Not read (no file yet, or caught while it was written): not known.
+    if (-not $wst -or -not $wat) { return 2 }
+    $open = ($Script:RawSid -and $wsid -ceq $Script:RawSid -and $wst -ceq 'waiting' -and $wfor -ceq 'permission prompt')
+    if (-not $Script:RqWat) {
+        if (-not $open) { return 2 }
+        $Script:RqWat = $wat
+        return 0
+    }
+    if ($open -and $wat -ceq $Script:RqWat) { return 0 }
+    return 1
+}
+
+# No other permission hook of this session is waiting now (perm.<session>.<pid>
+# of a live hook, $Script:RqMark). Claude Code shows the requests of parallel
+# tool calls in one window ("1 of 2") and its session file stays as it was from
+# one item to the next [measured 2.1.316]: which one is open cannot be told
+# (rq_alone).
+function Test-RqAlone {
+    try {
+        foreach ($f in [IO.Directory]::GetFiles($RunDir, 'perm.' + $Sid + '.*')) {
+            if ($f -ceq $Script:RqMark) { continue }
+            $mp = [IO.Path]::GetExtension($f).TrimStart('.')
+            if (-not (Test-UInt $mp)) { continue }
+            if ($null -ne (Get-Process -Id ([int]$mp) -ErrorAction SilentlyContinue)) { return $false }
+        }
+    } catch { }
+    return $true
+}
+
+# Tunnels that hold the request back for a wait the user is looking at
+# ($L.held, section 4.6): while the agent's own window for the request is open
+# (Get-RqWindow, read once a second), the hook goes on and sends it to them
+# again every 5 seconds, checked just before: one new rid for them all (one
+# event, section 3; the app shows a rid once), a new nonce each. A tunnel that
+# now answers sent is waited on; one that no longer answers held is dropped.
+# True while one is kept (rq_held).
+function Test-RqHeld($links, [int64]$start, [int]$agentPid) {
+    $held = @($links | Where-Object { $_.held })
+    if ($held.Count -eq 0) { return $false }
+    if ([DateTime]::UtcNow -lt $Script:RqHeldNext) { return $true }
+    $Script:RqHeldNext = [DateTime]::UtcNow.AddSeconds(1)
+    $hw = Get-RqWindow $agentPid
+    if ($hw -eq 2) {
+        # Not known: a few seconds for the agent to record its window, then a
+        # few reads that fail in a row; nothing is sent meanwhile.
+        $Script:RqMiss++
+        if (-not $Script:RqWat) { if ((Now-Epoch) - $start -lt 5) { return $true } }
+        elseif ($Script:RqMiss -lt 3) { return $true }
+    }
+    if ($hw -eq 0) { $Script:RqMiss = 0 }
+    if ($hw -ne 0) {
+        Write-Log 'held: the window is not open (stop)'
+        foreach ($L in $held) { $L.held = $false }
+        return $false
+    }
+    if ((Now-Epoch) -lt $Script:RqAgain) { return $true }
+    $Script:RqAgain = (Now-Epoch) + 5
+    # A fresh ts and tms: the tunnel takes events within 5 minutes of now.
+    $Script:Ts = [string](Now-Epoch)
+    Update-Spec ($Script:V2X + '@.tms' + $Tab + 's' + $Tab + (Get-Tms) + $Nl)
+    $nr = New-RandomHex 8
+    if (-not (Test-Hex $nr 16)) { return $true }
+    foreach ($L in $held) { Write-Log ('held link-' + $L.i + ': again') }
+    Send-RqPass $held 'tunnel' $true '' $Script:RqEv 5 $nr
+    foreach ($L in $held) { Start-RqPoll $L }
+    return $true
+}
+
 # A decision from link $L was dropped (bad or changed, section 5.5): that
 # link's wait ends; a tunnel of a v2 app hears it at once and gets the request
 # again under a new rid (3 times at most) (rq_reject).
@@ -4121,6 +4222,7 @@ function Invoke-RqReject($L, [string]$why, [int64]$start) {
 # Ends the request: the request-level result to every tunnel that took it, from
 # a detached child ($out; $dl the link whose decision applied, $act) (rq_finish).
 function Complete-Request($links, [string]$out, $dl, [string]$act) {
+    if ($Script:RqMark) { Remove-FileQ $Script:RqMark }
     foreach ($L in $links) {
         if ($null -ne $L.poll -and $null -ne $L.poll.op) { try { $L.poll.op.req.Abort() } catch { } }
     }
@@ -4148,6 +4250,7 @@ function Complete-Request($links, [string]$out, $dl, [string]$act) {
 #            without a nonce; otherwise the relay is decidable (Codex)
 function Invoke-RequestFlow([string]$ev, [string]$mode) {
     $Script:RqEv = $ev
+    $Script:RqMode = $mode
     $cap = Get-ConfWaitCap $Script:Agent
     $pollWait = Get-ConfPollWait
     # The cap counts from the hook's start (the tunnel's 5 seconds and the
@@ -4167,7 +4270,17 @@ function Invoke-RequestFlow([string]$ev, [string]$mode) {
     $n = 0
     foreach ($f in $Script:LinkFiles) {
         $n++
-        $links += @{ i = $n; f = $f; st = $null; meta = $null; link = $null; n = 0; waiting = $false; poll = $null }
+        $links += @{ i = $n; f = $f; st = $null; meta = $null; link = $null; n = 0; waiting = $false; poll = $null; held = $false }
+    }
+    $Script:RqAgain = $start + 5
+    $Script:RqWat = ''
+    $Script:RqMiss = 0
+    $Script:RqHeldNext = [DateTime]::MinValue
+    # This session's waiting permission hooks, for Test-RqAlone.
+    $Script:RqMark = ''
+    if ($Script:Agent -ceq 'claude') {
+        $mark = Join-Path $RunDir ('perm.' + $Sid + '.' + $PID)
+        if (Write-FileB $mark '') { $Script:RqMark = $mark }
     }
     function Get-Remain { $r = $deadline - (Now-Epoch); if ($r -lt 1) { $r = 1 }; if ($r -gt 20) { $r = 20 }; return $r }
     if ($mode -ceq 'shared') {
@@ -4214,6 +4327,7 @@ function Invoke-RequestFlow([string]$ev, [string]$mode) {
             if ($Script:JV -ceq 'bad' -or $Script:JV -ceq 'changed') { Invoke-RqReject $L $Script:JV $start }
         }
         if ($ended) { break }
+        if (Test-RqHeld $links $start $agentPid) { $waiting = $true }
         if (-not $waiting) { break }
         if ([DateTime]::UtcNow -ge $nextCheck) {
             $nextCheck = [DateTime]::UtcNow.AddSeconds(1)
