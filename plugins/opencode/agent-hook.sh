@@ -3135,11 +3135,51 @@ ask_stopped() { # version
   head -c 4096 "$RUN_DIR/ask.$AGENT.off" 2>/dev/null | awk -v v="$1" '$0 == v { f = 1; exit } END { exit !f }'
 }
 
-# Ends process $1 and every process under it (the agent's own children): the
-# process and then those under it are stopped first, so that none starts
-# another unseen while ps runs, then all get TERM and go on to take it. (A
-# process group would hold them all, but a POSIX shell without job control
-# cannot start one: dash needs a terminal for set -m, macOS has no setsid.)
+# How an ask starts its own process group (section 9.2 time): perl's
+# setpgrp, else setsid (Linux, BusyBox); without either it cannot (a POSIX
+# shell without job control does not start one: dash needs a terminal for
+# set -m, macOS has no setsid), and its process tree is ended instead.
+ask_group_how() {
+  if command -v perl >/dev/null 2>&1; then
+    ASK_GRP=perl
+  elif command -v setsid >/dev/null 2>&1; then
+    ASK_GRP=setsid
+  else
+    ASK_GRP=''
+  fi
+}
+
+# Runs command "$@" in place (exec), as the leader of a process group of
+# its own when ASK_GRP says how: its process id is that of the group.
+ask_exec() { # command...
+  case $ASK_GRP in
+    perl) exec perl -e 'setpgrp(0, 0); exec { $ARGV[0] } @ARGV or exit 127' -- "$@" ;;
+    setsid) exec setsid "$@" ;;
+    *) exec "$@" ;;
+  esac
+}
+
+# Ends process $1 and what it started: its process group when ask_exec
+# started one (every process of it, those that left its tree too), else its
+# tree (kill_tree). TERM, then KILL to what is left 2 seconds later.
+ask_kill() { # pid
+  is_uint "$1" && [ "$1" -gt 1 ] || return 0
+  if [ -n "$ASK_GRP" ]; then
+    # (`kill -SIG -<group>`: dash takes no `--`, bash no `-s SIG -<group>`.)
+    kill -TERM -"$1" 2>/dev/null || return 0
+    sleep 2
+    kill -0 -"$1" 2>/dev/null && kill -KILL -"$1" 2>/dev/null
+  else
+    kill_tree "$1"
+  fi
+  return 0
+}
+
+# Ends process $1 and every process under it, where it has no process group
+# of its own: the process and then those under it are stopped first, so
+# that none starts another unseen while ps runs; then all get TERM and go on
+# to take it, and what is left 2 seconds later KILL. A process that left
+# the tree before (its parent gone) is not reached.
 kill_tree() { # pid
   is_uint "$1" && [ "$1" -gt 1 ] || return 0
   kill -STOP "$1" 2>/dev/null || return 0
@@ -3156,6 +3196,10 @@ kill_tree() { # pid
   kill ${kt:-$1} 2>/dev/null
   # shellcheck disable=SC2086
   kill -CONT ${kt:-$1} 2>/dev/null
+  sleep 2
+  for kp in ${kt:-$1}; do
+    kill -0 "$kp" 2>/dev/null && kill -KILL "$kp" 2>/dev/null
+  done
   return 0
 }
 
@@ -3218,15 +3262,16 @@ ask_bin_version() { # executable
       ( set -C; printf '' >"$vc.lock" ) 2>/dev/null || return 0
       trap '' HUP
       (
+        ask_group_how
         v=$(
           ask_env
-          "$r" --version </dev/null >"$vc.out" 2>/dev/null &
+          ask_exec "$r" --version </dev/null >"$vc.out" 2>/dev/null &
           vk=$!
-          ( sleep 15; kill_tree "$vk" ) </dev/null >/dev/null 2>&1 &
+          ( sleep 15; ask_kill "$vk" ) </dev/null >/dev/null 2>&1 &
           wd=$!
           wait "$vk" 2>/dev/null
-          # (Its sleep ends by itself; ps, which kill_tree needs, can be slow
-          # on a loaded machine.)
+          # (Its sleep ends by itself: ending it as a tree needs ps, which can
+          # be slow on a loaded machine.)
           kill "$wd" 2>/dev/null
           head -c 4096 "$vc.out" 2>/dev/null | awk 'match($0, /[0-9]+[.][0-9]+[0-9A-Za-z.+_-]*/) { print substr($0, RSTART, RLENGTH); exit }'
         )
@@ -3345,6 +3390,7 @@ usage_ask() {
 ask_pipe() { # command...
   : >"$AQ.out"
   rm -f "$AQ.done"
+  ask_group_how
   (
     ask_env
     {
@@ -3360,7 +3406,7 @@ ask_pipe() { # command...
       fi
       aw=0
       while [ "$aw" -lt 20 ] && [ ! -f "$AQ.done" ]; do sleep 1; aw=$((aw + 1)); done
-    } | "$@" >"$AQ.out" 2>/dev/null &
+    } | ask_exec "$@" >"$AQ.out" 2>/dev/null &
     apid=$!
     aw=0 res=timeout
     while [ "$aw" -lt 20 ]; do
@@ -3374,8 +3420,10 @@ ask_pipe() { # command...
     : >"$AQ.done"
     aw=0
     while [ "$aw" -lt 3 ] && kill -0 "$apid" 2>/dev/null; do sleep 1; aw=$((aw + 1)); done
-    # Still there: it and what it started.
-    kill -0 "$apid" 2>/dev/null && kill_tree "$apid"
+    # Still there, or something it started left in its group: all of it.
+    if kill -0 "$apid" 2>/dev/null || { [ -n "$ASK_GRP" ] && kill -0 -"$apid" 2>/dev/null; }; then
+      ask_kill "$apid"
+    fi
   ) </dev/null >/dev/null 2>&1
   AQ_RES=$(cat "$AQ.res" 2>/dev/null)
 }
