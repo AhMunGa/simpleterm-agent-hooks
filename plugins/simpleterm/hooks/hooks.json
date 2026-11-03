@@ -33,6 +33,17 @@
             "onFailure": "continue"
           }
         ]
+      },
+      {
+        "matcher": "run_terminal_command|run_terminal_cmd|write|search_replace|web_fetch|read_file|ask_user_question|exit_plan_mode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-hook.sh\" claude",
+            "timeout": 10,
+            "onFailure": "continue"
+          }
+        ]
       }
     ],
     "PermissionRequest": [
@@ -121,6 +132,39 @@
       }
     ],
     "PostModelSwitch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-hook.sh\" claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-hook.sh\" claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-hook.sh\" claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
       {
         "hooks": [
           {

@@ -10,6 +10,8 @@
 // first, the device or the terminal prompt, wins. No imports from OpenCode.
 
 import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -46,6 +48,57 @@ const shells = (globalThis.__simpletermShells ??= new Map());
 
 // Permission requests that were answered (bounded), for one still waiting on its session lane.
 const replied = (globalThis.__simpletermReplied ??= new Set());
+// Permission requests open per session (session id -> Set of request ids):
+// in OpenCode 2.x a `reject` or `always` also settles the session's other
+// open requests, so a request carries them (`others`) and the hook checks,
+// when a decision comes, that the user saw every one still open
+// (TDS_AGENT_EVENTS_V2 sections 4.5, 5.5). The hook reads them from
+// ~/.simpleterm/run/oc.<session>.pending.
+const pending = (globalThis.__simpletermPending ??= new Map());
+
+function pendingFile(sessionID) {
+  const st = join(process.env.HOME || homedir(), ".simpleterm");
+  if (!existsSync(st)) return null;
+  const run = join(st, "run");
+  try {
+    mkdirSync(run, { recursive: true, mode: 0o700 });
+  } catch {
+    return null;
+  }
+  const name = String(sessionID).replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 80) || "nosession";
+  return join(run, "oc." + name + ".pending");
+}
+
+function writePending(sessionID) {
+  const f = pendingFile(sessionID);
+  if (!f) return;
+  const ids = [...(pending.get(sessionID) || [])];
+  try {
+    writeFileSync(f + ".tmp", ids.join("\n") + (ids.length ? "\n" : ""), { mode: 0o600 });
+    renameSync(f + ".tmp", f);
+  } catch {
+    // no record: the hook then sees no other open request
+  }
+}
+
+function openRequest(sessionID, id) {
+  if (!sessionID || !id) return;
+  let set = pending.get(sessionID);
+  if (!set) pending.set(sessionID, (set = new Set()));
+  set.add(id);
+  if (set.size > 64) set.delete(set.values().next().value);
+  if (pending.size > 200) pending.delete(pending.keys().next().value);
+  writePending(sessionID);
+}
+
+function closeRequest(id) {
+  for (const [sid, set] of pending) {
+    if (set.delete(id)) {
+      writePending(sid);
+      if (!set.size) pending.delete(sid);
+    }
+  }
+}
 
 function firstSeen(id) {
   if (!id) return true;
@@ -232,8 +285,10 @@ export default {
         const child = waits.get(d.requestID);
         if (child) child.kill("SIGTERM");
         remember(replied, d.requestID, 500); // a request still waiting on the session lane is dropped
+        closeRequest(d.requestID);
         return;
       }
+      if (event.type === "permission.asked") openRequest(d.sessionID, d.id);
       const where = event.location?.directory;
       if (where && home && where !== home) return;
       if (!firstSeen(event.id)) return;
@@ -245,6 +300,8 @@ export default {
           await (lanes.get(d.sessionID) || Promise.resolve());
           if (replied.has(d.id)) return;
           const detail = Array.isArray(d.resources) ? d.resources.join(" ") : String(d.message || "");
+          const parent = await parentOf(ctx, d.sessionID);
+          const others = [...(pending.get(d.sessionID) || [])].filter((id) => id !== d.id);
           const out = await runHook(
             {
               hook_event_name: "PermissionRequest",
@@ -252,6 +309,14 @@ export default {
               cwd,
               tool_name: d.action || "permission",
               tool_input: { command: detail },
+              // event format v2 (TDS_AGENT_EVENTS_V2 sections 4, 10.2)
+              oc: "2",
+              request_id: d.id,
+              ...(Array.isArray(d.save) ? { save: d.save.map(String) } : {}),
+              ...(Array.isArray(d.resources) ? { resources: d.resources.map(String) } : {}),
+              ...(d.metadata && typeof d.metadata === "object" ? { metadata: d.metadata } : {}),
+              ...(others.length ? { others } : {}),
+              ...(parent ? { parent_session_id: parent } : {}),
             },
             cwd,
             waits,
@@ -259,12 +324,14 @@ export default {
           );
           const decision = out && out.decision;
           if (decision !== "allow" && decision !== "deny") return;
+          // allow: once, or always (a scope); deny: reject, with the user's
+          // reason when there is one.
           await ctx.permission
             .reply({
               sessionID: d.sessionID,
               requestID: d.id,
-              decision: decision === "allow" ? "once" : "reject",
-              ...(decision === "deny" ? { message: "Denied from SimpleTerm" } : {}),
+              decision: decision === "allow" ? (out.scope === "always" ? "always" : "once") : "reject",
+              ...(decision === "deny" ? { message: typeof out.message === "string" && out.message ? out.message : "Denied from SimpleTerm" } : {}),
             })
             .catch(() => {}); // answered in the terminal first
           return;
@@ -276,20 +343,26 @@ export default {
           return inLane(d.sessionID, async (job) => {
             const info = await sessionInfo(ctx, d.sessionID);
             if (job.abandoned || info.parentID) return; // given up on, or a subagent's session
-            await runHook({ hook_event_name: "UserPromptSubmit", session_id: d.sessionID, cwd }, cwd, undefined, undefined, job);
+            await runHook({ hook_event_name: "UserPromptSubmit", session_id: d.sessionID, cwd, oc: "2" }, cwd, undefined, undefined, job);
           });
         case "session.execution.succeeded":
         case "session.execution.failed":
           return inLane(d.sessionID, (job) => turnEnd(event, d, cwd, running, open, job));
         case "form.created": {
-          // data: { form: { id, sessionID, title, fields, ... } }
+          // data: { form: { id, sessionID, title, metadata: {kind}, fields, ... } }:
+          // a question (kind question) is answered in the terminal until the
+          // plugin can reply to a form (M8); the alert carries its fields.
           const form = d.form || d;
+          const fields = Array.isArray(form.fields) ? form.fields : [];
           await runHook(
             {
-              hook_event_name: "Notification",
+              hook_event_name: "Form",
               session_id: form.sessionID,
               cwd,
-              message: String(form.title || form.message || ""),
+              oc: "2",
+              request_id: String(form.id || ""),
+              message: String((fields[0] && fields[0].description) || form.title || form.message || ""),
+              form: { fields },
             },
             cwd,
           );
@@ -313,6 +386,7 @@ export default {
               hook_event_name: "StopFailure",
               session_id: d.sessionID,
               cwd,
+              oc: "2",
               error: String(err.type || "error"),
               last_assistant_message: String(err.message || ""),
             }
@@ -320,6 +394,7 @@ export default {
               hook_event_name: "Stop",
               session_id: d.sessionID,
               cwd,
+              oc: "2",
               last_assistant_message: String(info.title || ""),
               ...(background.length ? { background_tasks: background } : {}),
             },

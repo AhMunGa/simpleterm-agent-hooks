@@ -1,0 +1,2949 @@
+{
+ "cases": [
+  {
+   "name": "claude_bash",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "npm test -- --watch=false",
+       "description": "Run the test suite"
+      },
+      "permission_suggestions": [
+       {
+        "type": "addRules",
+        "rules": [
+         {
+          "toolName": "Bash",
+          "ruleContent": "npm test *"
+         }
+        ],
+        "behavior": "allow",
+        "destination": "localSettings"
+       },
+       {
+        "type": "addDirectories",
+        "directories": [
+         "/home/me/other"
+        ],
+        "destination": "session"
+       },
+       {
+        "type": "setMode",
+        "mode": "acceptEdits",
+        "destination": "session"
+       }
+      ]
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "claude_edit",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "Edit",
+      "tool_input": {
+       "file_path": "/home/me/work/api/src/app.ts",
+       "old_string": "const a = 1;\n",
+       "new_string": "const a = 2;\t// → 한글\n",
+       "replace_all": false
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": "",
+   "ascii": true
+  },
+  {
+   "name": "claude_write",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "Write",
+      "tool_input": {
+       "file_path": "/home/me/work/api/notes.md",
+       "content": "# Notes\n\nline é 🚀\n"
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": "",
+   "ascii": true
+  },
+  {
+   "name": "claude_webfetch",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "WebFetch",
+      "tool_input": {
+       "url": "https://example.com/docs?q=1",
+       "prompt": "Summarize the API"
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "claude_mcp",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "mcp__github__create_issue",
+      "tool_input": {
+       "title": "Flaky test",
+       "body": "seen \"twice\""
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "claude_question",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "AskUserQuestion",
+      "tool_input": {
+       "questions": [
+        {
+         "question": "Which database should I use?",
+         "header": "DB",
+         "multiSelect": false,
+         "options": [
+          {
+           "label": "SQLite",
+           "description": "Embedded, no server"
+          },
+          {
+           "label": "Postgres"
+          }
+         ]
+        },
+        {
+         "question": "Which features?",
+         "header": "Features",
+         "multiSelect": true,
+         "options": [
+          {
+           "label": "Auth"
+          },
+          {
+           "label": "Search"
+          }
+         ]
+        }
+       ]
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "claude_plan",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "ExitPlanMode",
+      "tool_input": {
+       "plan": "## Plan\n1. Split the parser\n2. Add tests\n",
+       "planFilePath": "/home/me/.claude/plans/plan-a.md"
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "claude_workflow",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "Workflow",
+      "tool_input": {
+       "description": "Run the release workflow"
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "claude_elicitation",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "Notification",
+      "message": "Claude Code needs your input",
+      "notification_type": "elicitation_dialog"
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "claude_stop_bg",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "UserPromptSubmit",
+      "prompt": "Run the tests and fix the failures"
+     },
+     "env": {}
+    },
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "Stop",
+      "stop_hook_active": false,
+      "last_assistant_message": "Tests are running in the background. Should I also fix the lint warnings?",
+      "background_tasks": [
+       {
+        "id": "b4y66jodr",
+        "type": "shell",
+        "status": "running",
+        "description": "Run tests",
+        "command": "npm test"
+       },
+       {
+        "id": "a42a3936ffcdae563",
+        "type": "subagent",
+        "status": "running",
+        "description": "Review the diff"
+       },
+       {
+        "id": "dream1",
+        "type": "dream",
+        "status": "running"
+       }
+      ],
+      "session_crons": [
+       {
+        "id": "c1",
+        "schedule": "*/5 * * * *",
+        "prompt": "check the deploy"
+       }
+      ]
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "claude_done",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "Stop",
+      "stop_hook_active": true,
+      "last_assistant_message": "All 42 tests pass.\nThe fix is in src/app.ts."
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "claude_stopfailure",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "StopFailure",
+      "error": "rate_limit",
+      "last_assistant_message": "API Error: 429"
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "claude_subagent_perm",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]; agent_id on a subagent's tool hook [static]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "ls"
+      },
+      "agent_id": "a42a3936ffcdae563",
+      "agent_type": "general-purpose"
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "codex_bash",
+   "agent": "codex",
+   "src": "Codex 0.165.0 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "codex"
+     ],
+     "input": {
+      "session_id": "019a1b55-87e1-73b0-b300-43de9f826b82",
+      "turn_id": "019a1b55-d144-7ca2-9f51-3c954b6f607e",
+      "transcript_path": "HOMEP/rollout.jsonl",
+      "cwd": "/home/me/work/api",
+      "hook_event_name": "PermissionRequest",
+      "model": "gpt-5.5",
+      "permission_mode": "default",
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo hi > x",
+       "description": "May I run it?"
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {
+    "rollout.jsonl": "{\"timestamp\":\"2026-11-02T08:17:19.359Z\",\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{\"session_id\":\"019a1b55-87e1-73b0-b300-43de9f826b82\",\"id\":\"019a1b55-87e1-73b0-b300-43de9f826b82\",\"cwd\":\"/home/me/work/api\",\"originator\":\"codex-tui\",\"cli_version\":\"0.165.0\",\"source\":\"cli\"}}\n{\"timestamp\":\"2026-11-02T08:17:35.065Z\",\"ordinal\":39,\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"019a1b55-d144-7ca2-9f51-3c954b6f607e\",\"cwd\":\"/home/me/work/api\",\"approval_policy\":\"on-request\",\"approvals_reviewer\":\"user\",\"sandbox_policy\":{\"type\":\"read-only\"},\"collaboration_mode\":{\"mode\":\"plan\",\"model\":\"gpt-5.5\"}}}\n"
+   },
+   "note": ""
+  },
+  {
+   "name": "codex_bash_relay",
+   "agent": "codex",
+   "src": "Codex 0.165.0 [measured shapes]; no tunnel: the relay is decidable",
+   "steps": [
+    {
+     "args": [
+      "codex"
+     ],
+     "input": {
+      "session_id": "019a1b55-87e1-73b0-b300-43de9f826b82",
+      "turn_id": "019a1b55-d144-7ca2-9f51-3c954b6f607e",
+      "transcript_path": "HOMEP/rollout.jsonl",
+      "cwd": "/home/me/work/api",
+      "hook_event_name": "PermissionRequest",
+      "model": "gpt-5.5",
+      "permission_mode": "default",
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo hi > x"
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {
+    "rollout.jsonl": "{\"timestamp\":\"2026-11-02T08:17:19.359Z\",\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{\"session_id\":\"019a1b55-87e1-73b0-b300-43de9f826b82\",\"id\":\"019a1b55-87e1-73b0-b300-43de9f826b82\",\"cwd\":\"/home/me/work/api\",\"originator\":\"codex-tui\",\"cli_version\":\"0.165.0\",\"source\":\"cli\"}}\n{\"timestamp\":\"2026-11-02T08:17:35.065Z\",\"ordinal\":39,\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"019a1b55-d144-7ca2-9f51-3c954b6f607e\",\"cwd\":\"/home/me/work/api\",\"approval_policy\":\"on-request\",\"approvals_reviewer\":\"user\",\"sandbox_policy\":{\"type\":\"read-only\"},\"collaboration_mode\":{\"mode\":\"plan\",\"model\":\"gpt-5.5\"}}}\n"
+   },
+   "note": ""
+  },
+  {
+   "name": "codex_apply_patch",
+   "agent": "codex",
+   "src": "Codex 0.165.0 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "codex"
+     ],
+     "input": {
+      "session_id": "019a1b55-87e1-73b0-b300-43de9f826b82",
+      "turn_id": "019a1b55-d144-7ca2-9f51-3c954b6f607e",
+      "transcript_path": "HOMEP/rollout.jsonl",
+      "cwd": "/home/me/work/api",
+      "hook_event_name": "PermissionRequest",
+      "model": "gpt-5.5",
+      "permission_mode": "default",
+      "tool_name": "apply_patch",
+      "tool_input": {
+       "command": "*** Begin Patch\n*** Update File: src/a.py\n@@\n-x = 1\n+x = 2\n+y = 3\n*** Add File: src/b.py\n+print('b')\n*** End Patch\n"
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {
+    "rollout.jsonl": "{\"timestamp\":\"2026-11-02T08:17:19.359Z\",\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{\"session_id\":\"019a1b55-87e1-73b0-b300-43de9f826b82\",\"id\":\"019a1b55-87e1-73b0-b300-43de9f826b82\",\"cwd\":\"/home/me/work/api\",\"originator\":\"codex-tui\",\"cli_version\":\"0.165.0\",\"source\":\"cli\"}}\n{\"timestamp\":\"2026-11-02T08:17:35.065Z\",\"ordinal\":39,\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"019a1b55-d144-7ca2-9f51-3c954b6f607e\",\"cwd\":\"/home/me/work/api\",\"approval_policy\":\"on-request\",\"approvals_reviewer\":\"user\",\"sandbox_policy\":{\"type\":\"read-only\"},\"collaboration_mode\":{\"mode\":\"plan\",\"model\":\"gpt-5.5\"}}}\n"
+   },
+   "note": ""
+  },
+  {
+   "name": "codex_mcp",
+   "agent": "codex",
+   "src": "Codex 0.165.0 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "codex"
+     ],
+     "input": {
+      "session_id": "019a1b55-87e1-73b0-b300-43de9f826b82",
+      "turn_id": "019a1b55-d144-7ca2-9f51-3c954b6f607e",
+      "transcript_path": "HOMEP/rollout.jsonl",
+      "cwd": "/home/me/work/api",
+      "hook_event_name": "PermissionRequest",
+      "model": "gpt-5.5",
+      "permission_mode": "default",
+      "tool_name": "mcp__github__create_issue",
+      "tool_input": {
+       "title": "Flaky test"
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {
+    "rollout.jsonl": "{\"timestamp\":\"2026-11-02T08:17:19.359Z\",\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{\"session_id\":\"019a1b55-87e1-73b0-b300-43de9f826b82\",\"id\":\"019a1b55-87e1-73b0-b300-43de9f826b82\",\"cwd\":\"/home/me/work/api\",\"originator\":\"codex-tui\",\"cli_version\":\"0.165.0\",\"source\":\"cli\"}}\n{\"timestamp\":\"2026-11-02T08:17:35.065Z\",\"ordinal\":39,\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"019a1b55-d144-7ca2-9f51-3c954b6f607e\",\"cwd\":\"/home/me/work/api\",\"approval_policy\":\"on-request\",\"approvals_reviewer\":\"user\",\"sandbox_policy\":{\"type\":\"read-only\"},\"collaboration_mode\":{\"mode\":\"plan\",\"model\":\"gpt-5.5\"}}}\n"
+   },
+   "note": ""
+  },
+  {
+   "name": "codex_plan",
+   "agent": "codex",
+   "src": "Codex 0.165.0 [measured shapes]; plan at Stop [measured M2]",
+   "steps": [
+    {
+     "args": [
+      "codex"
+     ],
+     "input": {
+      "session_id": "019a1b55-87e1-73b0-b300-43de9f826b82",
+      "turn_id": "019a1b55-d144-7ca2-9f51-3c954b6f607e",
+      "transcript_path": "HOMEP/rollout.jsonl",
+      "cwd": "/home/me/work/api",
+      "hook_event_name": "Stop",
+      "model": "gpt-5.5",
+      "permission_mode": "default",
+      "stop_hook_active": false,
+      "last_assistant_message": "Here is the plan.\n\n"
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {
+    "rollout.jsonl": "{\"timestamp\":\"2026-11-02T08:17:19.359Z\",\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{\"session_id\":\"019a1b55-87e1-73b0-b300-43de9f826b82\",\"id\":\"019a1b55-87e1-73b0-b300-43de9f826b82\",\"cwd\":\"/home/me/work/api\",\"originator\":\"codex-tui\",\"cli_version\":\"0.165.0\",\"source\":\"cli\"}}\n{\"timestamp\":\"2026-11-02T08:17:35.065Z\",\"ordinal\":39,\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"019a1b55-d144-7ca2-9f51-3c954b6f607e\",\"cwd\":\"/home/me/work/api\",\"approval_policy\":\"on-request\",\"approvals_reviewer\":\"user\",\"sandbox_policy\":{\"type\":\"read-only\"},\"collaboration_mode\":{\"mode\":\"plan\",\"model\":\"gpt-5.5\"}}}\n{\"timestamp\":\"2026-11-02T08:17:35.114Z\",\"ordinal\":42,\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"thread_id\":\"019a1b55-87e1-73b0-b300-43de9f826b82\",\"turn_id\":\"019a1b55-d144-7ca2-9f51-3c954b6f607e\",\"item\":{\"type\":\"Plan\",\"id\":\"019a1b55-d144-7ca2-9f51-3c954b6f607e-plan\",\"text\":\"# Spike plan P1\\n\\n1. Create spike.txt\\n2. Verify it exists\\n\"},\"started_at_ms\":1793607455114,\"completed_at_ms\":1793607455114}}\n"
+   },
+   "note": ""
+  },
+  {
+   "name": "codex_done",
+   "agent": "codex",
+   "src": "Codex 0.165.0 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "codex"
+     ],
+     "input": {
+      "session_id": "019a1b55-87e1-73b0-b300-43de9f826b82",
+      "turn_id": "019a1b55-d144-7ca2-9f51-3c954b6f607e",
+      "transcript_path": "HOMEP/rollout.jsonl",
+      "cwd": "/home/me/work/api",
+      "hook_event_name": "Stop",
+      "model": "gpt-5.5",
+      "permission_mode": "default",
+      "stop_hook_active": false,
+      "last_assistant_message": "Done: x is 2."
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {
+    "rollout.jsonl": "{\"timestamp\":\"2026-11-02T08:17:19.359Z\",\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{\"session_id\":\"019a1b55-87e1-73b0-b300-43de9f826b82\",\"id\":\"019a1b55-87e1-73b0-b300-43de9f826b82\",\"cwd\":\"/home/me/work/api\",\"originator\":\"codex-tui\",\"cli_version\":\"0.165.0\",\"source\":\"cli\"}}\n{\"timestamp\":\"2026-11-02T08:17:35.065Z\",\"ordinal\":39,\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"019a1b55-d144-7ca2-9f51-3c954b6f607e\",\"cwd\":\"/home/me/work/api\",\"approval_policy\":\"on-request\",\"approvals_reviewer\":\"user\",\"sandbox_policy\":{\"type\":\"read-only\"},\"collaboration_mode\":{\"mode\":\"plan\",\"model\":\"gpt-5.5\"}}}\n"
+   },
+   "note": ""
+  },
+  {
+   "name": "opencode2_edit",
+   "agent": "opencode",
+   "src": "OpenCode, from the plugin bridge (2.2.5 permission.asked, measured v2a8)",
+   "steps": [
+    {
+     "args": [
+      "opencode"
+     ],
+     "input": {
+      "hook_event_name": "PermissionRequest",
+      "session_id": "ses_9",
+      "cwd": "/home/me/work/api",
+      "tool_name": "edit",
+      "tool_input": {
+       "command": "hello.txt"
+      },
+      "oc": "2",
+      "request_id": "per_01JDX2",
+      "save": [
+       "*"
+      ],
+      "resources": [
+       "hello.txt"
+      ],
+      "metadata": {
+       "files": [
+        {
+         "file": "hello.txt",
+         "patch": "--- a/hello.txt\n+++ b/hello.txt\n@@ -1 +1 @@\n-hi\n+hello\n"
+        }
+       ]
+      },
+      "others": [
+       "per_01JDX3"
+      ]
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "opencode119_bash",
+   "agent": "opencode",
+   "src": "OpenCode, from the plugin bridge (1.19.5 permission.asked, measured a1/a6)",
+   "steps": [
+    {
+     "args": [
+      "opencode"
+     ],
+     "input": {
+      "hook_event_name": "PermissionRequest",
+      "session_id": "ses_9",
+      "cwd": "/home/me/work/api",
+      "tool_name": "bash",
+      "tool_input": {
+       "command": "echo a1"
+      },
+      "oc": "1.19",
+      "request_id": "per_a1",
+      "patterns": [
+       "echo a1"
+      ],
+      "always": [
+       "echo *"
+      ],
+      "metadata": {
+       "command": "echo a1"
+      },
+      "others": [
+       "per_a2"
+      ],
+      "message_id": "msg_01"
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "opencode10_bash",
+   "agent": "opencode",
+   "src": "OpenCode, from the plugin bridge (1.0.223 permission.updated, measured o1)",
+   "steps": [
+    {
+     "args": [
+      "opencode"
+     ],
+     "input": {
+      "hook_event_name": "PermissionRequest",
+      "session_id": "ses_9",
+      "cwd": "/home/me/work/api",
+      "tool_name": "bash",
+      "tool_input": {
+       "command": "echo once-1"
+      },
+      "oc": "1.0",
+      "request_id": "per_o1",
+      "patterns": [
+       "echo once-1 *"
+      ],
+      "always": [
+       "echo once-1 *"
+      ],
+      "metadata": {
+       "command": "echo once-1"
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "opencode119_question",
+   "agent": "opencode",
+   "src": "OpenCode, from the plugin bridge (1.19.5 question.asked, measured b1)",
+   "steps": [
+    {
+     "args": [
+      "opencode"
+     ],
+     "input": {
+      "hook_event_name": "Question",
+      "session_id": "ses_9",
+      "cwd": "/home/me/work/api",
+      "oc": "1.19",
+      "request_id": "que_1",
+      "tool_input": {
+       "questions": [
+        {
+         "question": "Which DB?"
+        }
+       ]
+      },
+      "questions": [
+       {
+        "question": "Which DB?",
+        "header": "DB",
+        "options": [
+         {
+          "label": "SQLite",
+          "description": "file"
+         },
+         {
+          "label": "Postgres",
+          "description": "server"
+         }
+        ],
+        "multiple": false
+       }
+      ]
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "opencode2_form",
+   "agent": "opencode",
+   "src": "OpenCode, from the plugin bridge (2.2.5 form.created kind question, measured)",
+   "steps": [
+    {
+     "args": [
+      "opencode"
+     ],
+     "input": {
+      "hook_event_name": "Form",
+      "session_id": "ses_9",
+      "cwd": "/home/me/work/api",
+      "oc": "2",
+      "request_id": "frm_1",
+      "message": "Which DB?",
+      "form": {
+       "fields": [
+        {
+         "key": "q0",
+         "title": "DB",
+         "description": "Which DB?",
+         "type": "string",
+         "options": [
+          {
+           "value": "SQLite",
+           "label": "SQLite",
+           "description": "file"
+          }
+         ],
+         "custom": true
+        }
+       ]
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "agy_run_command",
+   "agent": "agy",
+   "src": "Antigravity CLI 1.4.12 [measured shapes]; agy_wait > 0, no tunnel",
+   "steps": [
+    {
+     "args": [
+      "agy",
+      "PreToolUse"
+     ],
+     "input": {
+      "conversationId": "f3e001f9-7d64-4f02-b6fa-5cd414bbfb15",
+      "workspacePaths": [
+       "/home/me/work/api"
+      ],
+      "modelName": "gemini-3.1-pro-low",
+      "transcriptPath": "/home/me/.gemini/antigravity-cli/brain/f3e001f9/.system_generated/logs/transcript_full.jsonl",
+      "stepIdx": 4,
+      "toolCall": {
+       "name": "run_command",
+       "args": {
+        "CommandLine": "make test",
+        "WaitMsBeforeAsync": 0
+       }
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {
+    "agy_wait": 5
+   },
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "agy_write_file",
+   "agent": "agy",
+   "src": "Antigravity CLI 1.4.12 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "agy",
+      "PreToolUse"
+     ],
+     "input": {
+      "conversationId": "f3e001f9-7d64-4f02-b6fa-5cd414bbfb15",
+      "workspacePaths": [
+       "/home/me/work/api"
+      ],
+      "modelName": "gemini-3.1-pro-low",
+      "transcriptPath": "/home/me/.gemini/antigravity-cli/brain/f3e001f9/.system_generated/logs/transcript_full.jsonl",
+      "stepIdx": 5,
+      "toolCall": {
+       "name": "write_file",
+       "args": {
+        "Path": "/home/me/work/api/hello.txt",
+        "Content": "hello\n",
+        "Overwrite": true
+       }
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {
+    "agy_wait": 5
+   },
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "agy_edit_file",
+   "agent": "agy",
+   "src": "Antigravity CLI 1.4.12 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "agy",
+      "PreToolUse"
+     ],
+     "input": {
+      "conversationId": "f3e001f9-7d64-4f02-b6fa-5cd414bbfb15",
+      "workspacePaths": [
+       "/home/me/work/api"
+      ],
+      "modelName": "gemini-3.1-pro-low",
+      "transcriptPath": "/home/me/.gemini/antigravity-cli/brain/f3e001f9/.system_generated/logs/transcript_full.jsonl",
+      "stepIdx": 6,
+      "toolCall": {
+       "name": "edit_file",
+       "args": {
+        "Path": "/home/me/work/api/hello.txt",
+        "Target": "hello",
+        "Replacement": "hi"
+       }
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {
+    "agy_wait": 5
+   },
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "agy_read_file",
+   "agent": "agy",
+   "src": "Antigravity CLI 1.4.12 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "agy",
+      "PreToolUse"
+     ],
+     "input": {
+      "conversationId": "f3e001f9-7d64-4f02-b6fa-5cd414bbfb15",
+      "workspacePaths": [
+       "/home/me/work/api"
+      ],
+      "modelName": "gemini-3.1-pro-low",
+      "transcriptPath": "/home/me/.gemini/antigravity-cli/brain/f3e001f9/.system_generated/logs/transcript_full.jsonl",
+      "stepIdx": 7,
+      "toolCall": {
+       "name": "read_file",
+       "args": {
+        "Path": "/etc/hosts"
+       }
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {
+    "agy_wait": 5
+   },
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "agy_mcp",
+   "agent": "agy",
+   "src": "Antigravity CLI 1.4.12 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "agy",
+      "PreToolUse"
+     ],
+     "input": {
+      "conversationId": "f3e001f9-7d64-4f02-b6fa-5cd414bbfb15",
+      "workspacePaths": [
+       "/home/me/work/api"
+      ],
+      "modelName": "gemini-3.1-pro-low",
+      "transcriptPath": "/home/me/.gemini/antigravity-cli/brain/f3e001f9/.system_generated/logs/transcript_full.jsonl",
+      "stepIdx": 8,
+      "toolCall": {
+       "name": "call_mcp_tool",
+       "args": {
+        "ServerName": "stmcp",
+        "ToolName": "spike_write",
+        "Arguments": {
+         "text": "x"
+        }
+       }
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {
+    "agy_wait": 5
+   },
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "agy_ask_question",
+   "agent": "agy",
+   "src": "Antigravity CLI 1.4.12 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "agy",
+      "PreToolUse"
+     ],
+     "input": {
+      "conversationId": "f3e001f9-7d64-4f02-b6fa-5cd414bbfb15",
+      "workspacePaths": [
+       "/home/me/work/api"
+      ],
+      "modelName": "gemini-3.1-pro-low",
+      "transcriptPath": "/home/me/.gemini/antigravity-cli/brain/f3e001f9/.system_generated/logs/transcript_full.jsonl",
+      "stepIdx": 9,
+      "toolCall": {
+       "name": "ask_question",
+       "args": {
+        "questions": [
+         {
+          "question": "Which color?",
+          "options": [
+           "Red",
+           "Green"
+          ],
+          "is_multi_select": false
+         }
+        ]
+       }
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "agy_plan",
+   "agent": "agy",
+   "src": "Antigravity CLI 1.4.12 [measured shapes]; plan at Stop [measured M3]",
+   "steps": [
+    {
+     "args": [
+      "agy",
+      "PreToolUse"
+     ],
+     "input": {
+      "conversationId": "f3e001f9-7d64-4f02-b6fa-5cd414bbfb15",
+      "workspacePaths": [
+       "/home/me/work/api"
+      ],
+      "modelName": "gemini-3.1-pro-low",
+      "transcriptPath": "/home/me/.gemini/antigravity-cli/brain/f3e001f9/.system_generated/logs/transcript_full.jsonl",
+      "stepIdx": 2,
+      "toolCall": {
+       "name": "write_file",
+       "args": {
+        "ArtifactMetadata": {
+         "RequestFeedback": true,
+         "Summary": "Implementation plan for adding hello.txt",
+         "UserFacing": true
+        },
+        "Content": "# Implementation Plan: Add hello.txt\n\n1. Create hello.txt with hello\n",
+        "Overwrite": true,
+        "Path": "/home/me/.gemini/antigravity-cli/brain/f3e001f9/plan.md"
+       }
+      }
+     },
+     "env": {}
+    },
+    {
+     "args": [
+      "agy",
+      "PostToolUse"
+     ],
+     "input": {
+      "conversationId": "f3e001f9-7d64-4f02-b6fa-5cd414bbfb15",
+      "workspacePaths": [
+       "/home/me/work/api"
+      ],
+      "modelName": "gemini-3.1-pro-low",
+      "transcriptPath": "/home/me/.gemini/antigravity-cli/brain/f3e001f9/.system_generated/logs/transcript_full.jsonl",
+      "stepIdx": 2,
+      "toolCall": {
+       "name": "write_file",
+       "args": {
+        "ArtifactMetadata": {
+         "RequestFeedback": true,
+         "Summary": "Implementation plan for adding hello.txt",
+         "UserFacing": true
+        },
+        "Content": "# Implementation Plan: Add hello.txt\n\n1. Create hello.txt with hello\n",
+        "Overwrite": true,
+        "Path": "/home/me/.gemini/antigravity-cli/brain/f3e001f9/plan.md"
+       }
+      }
+     },
+     "env": {}
+    },
+    {
+     "args": [
+      "agy",
+      "Stop"
+     ],
+     "input": {
+      "conversationId": "f3e001f9-7d64-4f02-b6fa-5cd414bbfb15",
+      "workspacePaths": [
+       "/home/me/work/api"
+      ],
+      "modelName": "gemini-3.1-pro-low",
+      "transcriptPath": "/home/me/.gemini/antigravity-cli/brain/f3e001f9/.system_generated/logs/transcript_full.jsonl",
+      "error": "",
+      "executionNum": 0,
+      "fullyIdle": true,
+      "terminationReason": "NO_TOOL_CALL",
+      "lastUserInput": "plan hello file"
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {
+    "agy_wait": 5
+   },
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "agy_done",
+   "agent": "agy",
+   "src": "Antigravity CLI 1.4.12 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "agy",
+      "Stop"
+     ],
+     "input": {
+      "conversationId": "f3e001f9-7d64-4f02-b6fa-5cd414bbfb15",
+      "workspacePaths": [
+       "/home/me/work/api"
+      ],
+      "modelName": "gemini-3.1-pro-low",
+      "transcriptPath": "/home/me/.gemini/antigravity-cli/brain/f3e001f9/.system_generated/logs/transcript_full.jsonl",
+      "error": "",
+      "executionNum": 0,
+      "fullyIdle": true,
+      "terminationReason": "NO_TOOL_CALL",
+      "lastUserInput": "plan hello file"
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "copilot_notif_shell",
+   "agent": "copilot",
+   "src": "GitHub Copilot CLI 1.0.105 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "copilot",
+      "notification"
+     ],
+     "input": {
+      "sessionId": "246c0f5b-8a7a-47f9-a1ef-8d3f2cf9653a",
+      "cwd": "/home/me/work/api",
+      "timestamp": 1793608018859,
+      "hook_event_name": "Notification",
+      "message": "Run command: npm test",
+      "notification_type": "permission_prompt",
+      "title": "Permission needed"
+     },
+     "env": {
+      "COPILOT_CLI": "1",
+      "COPILOT_CLI_BINARY_VERSION": "1.0.105"
+     }
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "copilot_notif_edit",
+   "agent": "copilot",
+   "src": "GitHub Copilot CLI 1.0.105 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "copilot",
+      "notification"
+     ],
+     "input": {
+      "sessionId": "246c0f5b-8a7a-47f9-a1ef-8d3f2cf9653a",
+      "cwd": "/home/me/work/api",
+      "timestamp": 1793608018859,
+      "hook_event_name": "Notification",
+      "message": "Edit file: /home/me/work/api/a.txt",
+      "notification_type": "permission_prompt",
+      "title": "Permission needed"
+     },
+     "env": {
+      "COPILOT_CLI": "1",
+      "COPILOT_CLI_BINARY_VERSION": "1.0.105"
+     }
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "copilot_notif_web",
+   "agent": "copilot",
+   "src": "GitHub Copilot CLI 1.0.105 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "copilot",
+      "notification"
+     ],
+     "input": {
+      "sessionId": "246c0f5b-8a7a-47f9-a1ef-8d3f2cf9653a",
+      "cwd": "/home/me/work/api",
+      "timestamp": 1793608018859,
+      "hook_event_name": "Notification",
+      "message": "Fetch URL: https://example.com/x",
+      "notification_type": "permission_prompt",
+      "title": "Permission needed"
+     },
+     "env": {
+      "COPILOT_CLI": "1",
+      "COPILOT_CLI_BINARY_VERSION": "1.0.105"
+     }
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "copilot_notif_mcp",
+   "agent": "copilot",
+   "src": "GitHub Copilot CLI 1.0.105 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "copilot",
+      "notification"
+     ],
+     "input": {
+      "sessionId": "246c0f5b-8a7a-47f9-a1ef-8d3f2cf9653a",
+      "cwd": "/home/me/work/api",
+      "timestamp": 1793608018859,
+      "hook_event_name": "Notification",
+      "message": "Use MCP tool: stmcp/spike_write",
+      "notification_type": "permission_prompt",
+      "title": "Permission needed"
+     },
+     "env": {
+      "COPILOT_CLI": "1",
+      "COPILOT_CLI_BINARY_VERSION": "1.0.105"
+     }
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "copilot_ask_user",
+   "agent": "copilot",
+   "src": "GitHub Copilot CLI 1.0.105 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "copilot",
+      "preToolUse"
+     ],
+     "input": {
+      "sessionId": "246c0f5b-8a7a-47f9-a1ef-8d3f2cf9653a",
+      "cwd": "/home/me/work/api",
+      "timestamp": 1793608018859,
+      "toolName": "ask_user",
+      "toolArgs": {
+       "message": "Which color?",
+       "requestedSchema": {
+        "type": "object"
+       }
+      }
+     },
+     "env": {
+      "COPILOT_CLI": "1",
+      "COPILOT_CLI_BINARY_VERSION": "1.0.105"
+     }
+    },
+    {
+     "args": [
+      "copilot",
+      "notification"
+     ],
+     "input": {
+      "sessionId": "246c0f5b-8a7a-47f9-a1ef-8d3f2cf9653a",
+      "cwd": "/home/me/work/api",
+      "timestamp": 1793608018859,
+      "hook_event_name": "Notification",
+      "message": "Information requested",
+      "notification_type": "elicitation_dialog",
+      "title": "Input needed"
+     },
+     "env": {
+      "COPILOT_CLI": "1",
+      "COPILOT_CLI_BINARY_VERSION": "1.0.105"
+     }
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "copilot_plan",
+   "agent": "copilot",
+   "src": "GitHub Copilot CLI 1.0.105 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "copilot",
+      "preToolUse"
+     ],
+     "input": {
+      "sessionId": "246c0f5b-8a7a-47f9-a1ef-8d3f2cf9653a",
+      "cwd": "/home/me/work/api",
+      "timestamp": 1793608018859,
+      "toolName": "exit_plan_mode",
+      "toolArgs": {
+       "summary": "Add hello.txt",
+       "showFleet": false,
+       "recommendedAction": "interactive"
+      }
+     },
+     "env": {
+      "COPILOT_CLI": "1",
+      "COPILOT_CLI_BINARY_VERSION": "1.0.105"
+     }
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "copilot_stop_bg",
+   "agent": "copilot",
+   "src": "GitHub Copilot CLI 1.0.105 [measured shapes]; events.jsonl [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "copilot",
+      "agentStop"
+     ],
+     "input": {
+      "sessionId": "246c0f5b-8a7a-47f9-a1ef-8d3f2cf9653a",
+      "cwd": "/home/me/work/api",
+      "timestamp": 1793608018859,
+      "transcriptPath": "HOMEP/events.jsonl",
+      "stopReason": "end_turn",
+      "stop_hook_active": false
+     },
+     "env": {
+      "COPILOT_CLI": "1",
+      "COPILOT_CLI_BINARY_VERSION": "1.0.105"
+     }
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {
+    "bg_done_after": 0
+   },
+   "files": {
+    "events.jsonl": "{\"type\":\"user.message\",\"data\":{\"content\":\"start a background job\"}}\n{\"type\":\"tool.execution_start\",\"data\":{\"toolCallId\":\"call_1_0\",\"toolName\":\"bash\",\"arguments\":{\"command\":\"sleep 25; echo BGDONE\",\"mode\":\"async\",\"shellId\":\"bg1\",\"description\":\"bg sleep\"},\"turnId\":\"0\"}}\n{\"type\":\"subagent.started\",\"data\":{\"toolCallId\":\"call_2_0\",\"agentName\":\"explore\",\"agentDisplayName\":\"sub1\",\"agentType\":\"explore\",\"executionMode\":\"background\"},\"agentId\":\"23a7\"}\n{\"type\":\"assistant.message\",\"data\":{\"content\":\"Started the job. Done for now.\",\"toolRequests\":[]}}\n"
+   },
+   "note": ""
+  },
+  {
+   "name": "copilot_done",
+   "agent": "copilot",
+   "src": "GitHub Copilot CLI 1.0.105 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "copilot",
+      "agentStop"
+     ],
+     "input": {
+      "sessionId": "246c0f5b-8a7a-47f9-a1ef-8d3f2cf9653a",
+      "cwd": "/home/me/work/api",
+      "timestamp": 1793608018859,
+      "transcriptPath": "HOMEP/events.jsonl",
+      "stopReason": "end_turn",
+      "stop_hook_active": false
+     },
+     "env": {
+      "COPILOT_CLI": "1",
+      "COPILOT_CLI_BINARY_VERSION": "1.0.105"
+     }
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {
+    "events.jsonl": "{\"type\":\"assistant.message\",\"data\":{\"content\":\"All set.\",\"toolRequests\":[]}}\n"
+   },
+   "note": ""
+  },
+  {
+   "name": "copilot_error",
+   "agent": "copilot",
+   "src": "GitHub Copilot CLI 1.0.105 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "copilot",
+      "errorOccurred"
+     ],
+     "input": {
+      "sessionId": "246c0f5b-8a7a-47f9-a1ef-8d3f2cf9653a",
+      "cwd": "/home/me/work/api",
+      "timestamp": 1793608018859,
+      "error": {
+       "message": "model overloaded",
+       "name": "ServerError"
+      }
+     },
+     "env": {
+      "COPILOT_CLI": "1",
+      "COPILOT_CLI_BINARY_VERSION": "1.0.105"
+     }
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "grok_notif_shell",
+   "agent": "grok",
+   "src": "Grok Build 1.0.70 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "hookEventName": "pre_tool_use",
+      "sessionId": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "cwd": "/home/me/work/api",
+      "workspaceRoot": "/home/me/work/api",
+      "timestamp": "2026-11-01T10:08:55.902298+00:00",
+      "transcriptPath": "/home/me/.grok/sessions/x/01a19695/updates.jsonl",
+      "permissionMode": "default",
+      "hook_event_name": "PreToolUse",
+      "session_id": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "toolName": "run_terminal_command",
+      "toolUseId": "call-6f76-0",
+      "toolInput": {
+       "command": "./tool.sh s2",
+       "description": "Run s2 tool script"
+      }
+     },
+     "env": {
+      "GROK_HOOK_EVENT": "pre_tool_use"
+     }
+    },
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "hookEventName": "notification",
+      "sessionId": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "cwd": "/home/me/work/api",
+      "workspaceRoot": "/home/me/work/api",
+      "timestamp": "2026-11-01T10:08:55.902298+00:00",
+      "transcriptPath": "/home/me/.grok/sessions/x/01a19695/updates.jsonl",
+      "permissionMode": "default",
+      "hook_event_name": "Notification",
+      "session_id": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "notificationType": "permission_prompt",
+      "message": "Tool permission requested",
+      "level": "info"
+     },
+     "env": {
+      "GROK_HOOK_EVENT": "notification"
+     }
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "grok_notif_edit",
+   "agent": "grok",
+   "src": "Grok Build 1.0.70 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "hookEventName": "pre_tool_use",
+      "sessionId": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "cwd": "/home/me/work/api",
+      "workspaceRoot": "/home/me/work/api",
+      "timestamp": "2026-11-01T10:08:55.902298+00:00",
+      "transcriptPath": "/home/me/.grok/sessions/x/01a19695/updates.jsonl",
+      "permissionMode": "default",
+      "hook_event_name": "PreToolUse",
+      "session_id": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "toolName": "search_replace",
+      "toolUseId": "call-6f76-0",
+      "toolInput": {
+       "file_path": "/home/me/work/api/a.txt",
+       "old_string": "a",
+       "new_string": "b"
+      }
+     },
+     "env": {
+      "GROK_HOOK_EVENT": "pre_tool_use"
+     }
+    },
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "hookEventName": "notification",
+      "sessionId": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "cwd": "/home/me/work/api",
+      "workspaceRoot": "/home/me/work/api",
+      "timestamp": "2026-11-01T10:08:55.902298+00:00",
+      "transcriptPath": "/home/me/.grok/sessions/x/01a19695/updates.jsonl",
+      "permissionMode": "default",
+      "hook_event_name": "Notification",
+      "session_id": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "notificationType": "permission_prompt",
+      "message": "Tool permission requested",
+      "level": "info"
+     },
+     "env": {
+      "GROK_HOOK_EVENT": "notification"
+     }
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "grok_notif_mcp",
+   "agent": "grok",
+   "src": "Grok Build 1.0.70 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "hookEventName": "pre_tool_use",
+      "sessionId": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "cwd": "/home/me/work/api",
+      "workspaceRoot": "/home/me/work/api",
+      "timestamp": "2026-11-01T10:08:55.902298+00:00",
+      "transcriptPath": "/home/me/.grok/sessions/x/01a19695/updates.jsonl",
+      "permissionMode": "default",
+      "hook_event_name": "PreToolUse",
+      "session_id": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "toolName": "spike__spike_write",
+      "toolUseId": "call-6f76-0",
+      "toolInput": {
+       "text": "x"
+      }
+     },
+     "env": {
+      "GROK_HOOK_EVENT": "pre_tool_use"
+     }
+    },
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "hookEventName": "notification",
+      "sessionId": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "cwd": "/home/me/work/api",
+      "workspaceRoot": "/home/me/work/api",
+      "timestamp": "2026-11-01T10:08:55.902298+00:00",
+      "transcriptPath": "/home/me/.grok/sessions/x/01a19695/updates.jsonl",
+      "permissionMode": "default",
+      "hook_event_name": "Notification",
+      "session_id": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "notificationType": "permission_prompt",
+      "message": "Tool permission requested",
+      "level": "info"
+     },
+     "env": {
+      "GROK_HOOK_EVENT": "notification"
+     }
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "grok_plan",
+   "agent": "grok",
+   "src": "Grok Build 1.0.70 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "hookEventName": "notification",
+      "sessionId": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "cwd": "/home/me/work/api",
+      "workspaceRoot": "/home/me/work/api",
+      "timestamp": "2026-11-01T10:08:55.902298+00:00",
+      "transcriptPath": "/home/me/.grok/sessions/x/01a19695/updates.jsonl",
+      "permissionMode": "default",
+      "hook_event_name": "Notification",
+      "session_id": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "notificationType": "permission_prompt",
+      "message": "Plan approval requested",
+      "level": "info"
+     },
+     "env": {
+      "GROK_HOOK_EVENT": "notification"
+     }
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "grok_question",
+   "agent": "grok",
+   "src": "Grok Build 1.0.70 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "hookEventName": "pre_tool_use",
+      "sessionId": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "cwd": "/home/me/work/api",
+      "workspaceRoot": "/home/me/work/api",
+      "timestamp": "2026-11-01T10:08:55.902298+00:00",
+      "transcriptPath": "/home/me/.grok/sessions/x/01a19695/updates.jsonl",
+      "permissionMode": "default",
+      "hook_event_name": "PreToolUse",
+      "session_id": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "toolName": "ask_user_question",
+      "toolUseId": "call-q-0",
+      "toolInput": {
+       "questions": [
+        {
+         "question": "Which DB?",
+         "header": "DB",
+         "options": [
+          {
+           "label": "SQLite"
+          },
+          {
+           "label": "Postgres"
+          }
+         ],
+         "multiSelect": false
+        }
+       ]
+      }
+     },
+     "env": {
+      "GROK_HOOK_EVENT": "pre_tool_use"
+     }
+    },
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "hookEventName": "notification",
+      "sessionId": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "cwd": "/home/me/work/api",
+      "workspaceRoot": "/home/me/work/api",
+      "timestamp": "2026-11-01T10:08:55.902298+00:00",
+      "transcriptPath": "/home/me/.grok/sessions/x/01a19695/updates.jsonl",
+      "permissionMode": "default",
+      "hook_event_name": "Notification",
+      "session_id": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "notificationType": "elicitation_dialog",
+      "message": "User question requested",
+      "level": "info"
+     },
+     "env": {
+      "GROK_HOOK_EVENT": "notification"
+     }
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "budget_questions",
+   "agent": "claude",
+   "src": "synthetic (sections 2.1, 2.2)",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "AskUserQuestion",
+      "tool_input": {
+       "questions": [
+        {
+         "question": "Q0 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+         "header": "H0hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+         "multiSelect": false,
+         "options": [
+          {
+           "label": "L0-0 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L0-1 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L0-2 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L0-3 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L0-4 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L0-5 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L0-6 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L0-7 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L0-8 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L0-9 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          }
+         ]
+        },
+        {
+         "question": "Q1 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+         "header": "H1hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+         "multiSelect": false,
+         "options": [
+          {
+           "label": "L1-0 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L1-1 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L1-2 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L1-3 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L1-4 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L1-5 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L1-6 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L1-7 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L1-8 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L1-9 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          }
+         ]
+        },
+        {
+         "question": "Q2 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+         "header": "H2hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+         "multiSelect": false,
+         "options": [
+          {
+           "label": "L2-0 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L2-1 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L2-2 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L2-3 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L2-4 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L2-5 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L2-6 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L2-7 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L2-8 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L2-9 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          }
+         ]
+        },
+        {
+         "question": "Q3 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+         "header": "H3hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+         "multiSelect": false,
+         "options": [
+          {
+           "label": "L3-0 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L3-1 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L3-2 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L3-3 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L3-4 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L3-5 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L3-6 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L3-7 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L3-8 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L3-9 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          }
+         ]
+        },
+        {
+         "question": "Q4 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+         "header": "H4hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+         "multiSelect": false,
+         "options": [
+          {
+           "label": "L4-0 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L4-1 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L4-2 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L4-3 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L4-4 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L4-5 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L4-6 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L4-7 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L4-8 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L4-9 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          }
+         ]
+        },
+        {
+         "question": "Q5 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+         "header": "H5hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+         "multiSelect": false,
+         "options": [
+          {
+           "label": "L5-0 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L5-1 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L5-2 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L5-3 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L5-4 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L5-5 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L5-6 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L5-7 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L5-8 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+           "label": "L5-9 한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한",
+           "description": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          }
+         ]
+        }
+       ]
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "budget_plan_cut",
+   "agent": "claude",
+   "src": "synthetic: a long plan (text and file cut per link, section 2.2 stage 0)",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "ExitPlanMode",
+      "tool_input": {
+       "plan": "# Plan 🚀\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u2028 \"quoted\" é\nstep \\u",
+       "planFilePath": "/p/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/dir/plan.md"
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": "",
+   "ascii": true
+  },
+  {
+   "name": "budget_msg_cut",
+   "agent": "claude",
+   "src": "synthetic: msg cut at 200 characters (v1 limit), Korean",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo 가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다"
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "budget_bg_limits",
+   "agent": "claude",
+   "src": "synthetic: many background tasks (the count and text limits of turn.bg)",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "Stop",
+      "stop_hook_active": false,
+      "last_assistant_message": "still working?",
+      "background_tasks": [
+       {
+        "id": "t00",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 0 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x0.log"
+       },
+       {
+        "id": "t01",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 1 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x1.log"
+       },
+       {
+        "id": "t02",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 2 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x2.log"
+       },
+       {
+        "id": "t03",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 3 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x3.log"
+       },
+       {
+        "id": "t04",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 4 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x4.log"
+       },
+       {
+        "id": "t05",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 5 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x5.log"
+       },
+       {
+        "id": "t06",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 6 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x6.log"
+       },
+       {
+        "id": "t07",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 7 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x7.log"
+       },
+       {
+        "id": "t08",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 8 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x8.log"
+       },
+       {
+        "id": "t09",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 9 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x9.log"
+       },
+       {
+        "id": "t10",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 10 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x10.log"
+       },
+       {
+        "id": "t11",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 11 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x11.log"
+       },
+       {
+        "id": "t12",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 12 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x12.log"
+       },
+       {
+        "id": "t13",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 13 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x13.log"
+       },
+       {
+        "id": "t14",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 14 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x14.log"
+       },
+       {
+        "id": "t15",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 15 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x15.log"
+       },
+       {
+        "id": "t16",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 16 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x16.log"
+       },
+       {
+        "id": "t17",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 17 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x17.log"
+       },
+       {
+        "id": "t18",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 18 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x18.log"
+       },
+       {
+        "id": "t19",
+        "type": "monitor",
+        "status": "running",
+        "description": "monitor 19 mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "command": "tail -f /var/log/x19.log"
+       }
+      ]
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "budget_scopes_stage1",
+   "agent": "claude",
+   "src": "synthetic: the relay drops scopes from the end (stage 1), then allow_scope",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "npm run task-0 한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글한글",
+       "description": "설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명"
+      },
+      "permission_suggestions": [
+       {
+        "type": "addRules",
+        "rules": [
+         {
+          "toolName": "Bash",
+          "ruleContent": "npm run task-0 설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정 *"
+         }
+        ],
+        "behavior": "allow",
+        "destination": "localSettings"
+       },
+       {
+        "type": "addRules",
+        "rules": [
+         {
+          "toolName": "Bash",
+          "ruleContent": "npm run task-1 설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정 *"
+         }
+        ],
+        "behavior": "allow",
+        "destination": "localSettings"
+       },
+       {
+        "type": "addRules",
+        "rules": [
+         {
+          "toolName": "Bash",
+          "ruleContent": "npm run task-2 설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정 *"
+         }
+        ],
+        "behavior": "allow",
+        "destination": "localSettings"
+       },
+       {
+        "type": "addRules",
+        "rules": [
+         {
+          "toolName": "Bash",
+          "ruleContent": "npm run task-3 설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정 *"
+         }
+        ],
+        "behavior": "allow",
+        "destination": "localSettings"
+       },
+       {
+        "type": "addRules",
+        "rules": [
+         {
+          "toolName": "Bash",
+          "ruleContent": "npm run task-4 설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정 *"
+         }
+        ],
+        "behavior": "allow",
+        "destination": "localSettings"
+       },
+       {
+        "type": "addRules",
+        "rules": [
+         {
+          "toolName": "Bash",
+          "ruleContent": "npm run task-5 설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정설정 *"
+         }
+        ],
+        "behavior": "allow",
+        "destination": "localSettings"
+       }
+      ]
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "budget_others_stage1",
+   "agent": "opencode",
+   "src": "synthetic: OpenCode with many other open requests; the relay drops others from the end (stage 1), then affects",
+   "steps": [
+    {
+     "args": [
+      "opencode"
+     ],
+     "input": {
+      "hook_event_name": "PermissionRequest",
+      "session_id": "ses_9",
+      "cwd": "/home/me/work/api",
+      "tool_name": "bash",
+      "tool_input": {
+       "command": "echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "oc": "2",
+      "request_id": "per_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "save": [
+       "echo *"
+      ],
+      "others": [
+       "per_00_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_01_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_02_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_03_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_04_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_05_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_06_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_07_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_08_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_09_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_10_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_11_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_12_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_13_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_14_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_15_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_16_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_17_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_18_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_19_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_20_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_21_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_22_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_23_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_24_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_25_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_26_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_27_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_28_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_29_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_30_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_31_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_32_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_33_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_34_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_35_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_36_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_37_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_38_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+       "per_39_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+      ]
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "budget_stage2",
+   "agent": "claude",
+   "src": "synthetic: the relay drops req.ask whole (stage 2) after the field limits",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+      "transcript_path": "/x/t.jsonl",
+      "cwd": "/home/me/작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업",
+      "permission_mode": "default",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "Bash",
+      "agent_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "agent_type": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+      "tool_input": {
+       "command": "echo 가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다",
+       "description": "설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명"
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": ""
+  },
+  {
+   "name": "opencode2_alone",
+   "agent": "opencode",
+   "src": "OpenCode, from the plugin bridge (2.2.5 permission.asked, measured v2a8)",
+   "steps": [
+    {
+     "args": [
+      "opencode"
+     ],
+     "input": {
+      "hook_event_name": "PermissionRequest",
+      "session_id": "ses_9",
+      "cwd": "/home/me/work/api",
+      "tool_name": "edit",
+      "tool_input": {
+       "command": "hello.txt"
+      },
+      "oc": "2",
+      "request_id": "per_01JDX2",
+      "save": [
+       "*"
+      ],
+      "resources": [
+       "hello.txt"
+      ],
+      "metadata": {
+       "files": [
+        {
+         "file": "hello.txt",
+         "patch": "--- a/hello.txt\n+++ b/hello.txt\n@@ -1 +1 @@\n-hi\n+hello\n"
+        }
+       ]
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": "2.2.5 with no other request open: affects and others [] all the same (section 4.5)"
+  },
+  {
+   "name": "opencode119_alone",
+   "agent": "opencode",
+   "src": "OpenCode, from the plugin bridge (1.19.5 permission.asked, measured a1/a6)",
+   "steps": [
+    {
+     "args": [
+      "opencode"
+     ],
+     "input": {
+      "hook_event_name": "PermissionRequest",
+      "session_id": "ses_9",
+      "cwd": "/home/me/work/api",
+      "tool_name": "bash",
+      "tool_input": {
+       "command": "echo a1"
+      },
+      "oc": "1.19",
+      "request_id": "per_a1",
+      "patterns": [
+       "echo a1"
+      ],
+      "always": [
+       "echo *"
+      ],
+      "metadata": {
+       "command": "echo a1"
+      },
+      "message_id": "msg_01"
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": "1.19.5 with no other request open: affects and others [] all the same (section 4.5)"
+  },
+  {
+   "name": "claude_bad_utf8",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo @@B1@@/@@B2@@/@@B3@@/@@B4@@/@@B5@@ 가 ok",
+       "description": "bytes @@B1@@ and @@B2@@\nnext line"
+      },
+      "permission_suggestions": [
+       {
+        "type": "addRules",
+        "rules": [
+         {
+          "toolName": "Bash",
+          "ruleContent": "npm test *"
+         }
+        ],
+        "behavior": "allow",
+        "destination": "localSettings"
+       },
+       {
+        "type": "addDirectories",
+        "directories": [
+         "/home/me/other"
+        ],
+        "destination": "session"
+       },
+       {
+        "type": "setMode",
+        "mode": "acceptEdits",
+        "destination": "session"
+       }
+      ]
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": "bytes that are not well-formed UTF-8 (overlong, encoded surrogate, past U+10FFFF, bad lead) become spaces, the same in sh and PowerShell",
+   "raw": {
+    "@@B1@@": "c0af",
+    "@@B2@@": "eda080",
+    "@@B3@@": "f4908080",
+    "@@B4@@": "e080af",
+    "@@B5@@": "f8"
+   }
+  }
+ ]
+}

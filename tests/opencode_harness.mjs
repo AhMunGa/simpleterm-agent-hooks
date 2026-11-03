@@ -31,6 +31,15 @@ if (kind === "v1") {
     },
     session: { get: async ({ path }) => ({ data: (scenario.sessions || {})[path.id] || {} }) },
   };
+  // scenario.raw: the client's raw HTTP (1.19), which carries a reason and the question routes.
+  if (scenario.raw) {
+    client._client = {
+      post: async (args) => {
+        calls.push({ reply: { url: args.url, path: args.path, body: args.body } });
+        return { response: { status: 200 }, data: true };
+      },
+    };
+  }
   const entries = Object.entries(mod);
   calls.push({ exports: entries.map(([k, v]) => [k, typeof v]) });
   const hooks = [];

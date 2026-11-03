@@ -4,30 +4,36 @@ Hooks that connect a coding agent on your server to the SimpleTerm iPad/phone SS
 
 - **Alerts**: end-to-end encrypted notifications when the agent finishes, asks a question,
   hits an error, or needs a permission.
-- **Approvals**: approve or deny a permission request from the notification. The hook waits
-  for your answer and hands it to the agent. If no answer comes, the agent's own prompt in the
+- **Approvals and answers**: approve or deny a permission request from the app, with a reason or
+  for a scope the agent suggested, answer an agent's question, approve a plan. The hook waits for
+  your answer and hands it to the agent. If no answer comes, the agent's own prompt in the
   terminal stays in charge.
+- **What is asked**: the command, the diff, the URL, the questions and their choices, the plan, and
+  which answers the agent takes from a hook (event format v2, see below).
 - **Status badges** (Claude Code): the terminal tab shows running, waiting for approval, or done.
 - **Context and rate limits**: how full the agent's context window is and, where the agent
   reports it, how much of its rate limits is used.
 - **`simpleterm notify`**: the same alerts from your own scripts.
 
-One repository serves seven agents: Claude Code, Codex, Gemini CLI, Antigravity CLI, Grok Build,
-and OpenCode 2.x and 1.x.
+One repository serves eight agents: Claude Code, Codex, GitHub Copilot CLI, Antigravity CLI,
+Grok Build, OpenCode 2.x and 1.x, and Gemini CLI.
 
 ## What each agent supports
 
-| Agent | Alerts | Approve from the device | Badge | Context / limits |
+| Agent | Alerts | Answer from the device | Badge | Context / limits |
 |---|---|---|---|---|
-| Claude Code | permission, question, done, error, sign-in | yes; the terminal prompt stays open, first answer wins (waits up to 540 s) | yes | context; 5-hour/7-day limits with the [status line tap](#context-and-rate-limits) |
-| Codex | permission, done | yes; Codex shows its own prompt after the hook (waits up to 60 s) | Codex sends OSC 7501 itself | context, limits, plan |
+| Claude Code | permission, question, plan, done, error, sign-in | allow, allow for a suggested scope, deny, deny with a reason, answer a question, approve a plan (default or accept edits) or ask for changes; the terminal prompt stays open, first answer wins (waits up to 540 s) | yes | context; 5-hour/7-day limits with the [status line tap](#context-and-rate-limits) |
+| Codex | permission, plan, done | allow, deny, deny with a reason: in the connected app, or from another device when no app is connected (Codex hides its prompt while a hook waits, up to 60 s) | Codex sends OSC 7501 itself | context, limits, plan |
+| GitHub Copilot CLI | permission and question (alerts), plan, done, error | not yet: its permission hook also runs for calls that never prompt, so it is not used until those can be told apart | no | no |
+| Antigravity CLI (`agy`) | question, plan, done, error; commands, file writes and edits, reads outside the workspace, MCP calls with `agy_wait` | opt-in (`agy_wait`, only while the app is not connected): allow, deny, deny with a reason, approve a plan | agy sends OSC 7501 itself | no |
+| Grok Build | permission, question and plan (alerts), idle question, done, error | no: a Grok hook can block but not approve | no | no |
+| OpenCode 2.x | permission, question (input form, alert), done, error | allow, always (the pattern), deny, deny with a reason; device or terminal, first answer wins | the TUI sends OSC 7501 itself | no |
+| OpenCode 1.x | permission, question, done, error | allow, always, deny (1.19: with a reason), answer a question (1.19); device or terminal, first answer wins | no | no |
 | Gemini CLI | permission (alert only), done | no: Gemini takes no answer from a hook | no | context |
-| Antigravity CLI (`agy`) | done, error, `ask_question`/`ask_permission`; commands with `agy_wait` | opt-in (`agy_wait`): `run_command` waits before agy's permission policy | agy sends OSC 7501 itself | no |
-| Grok Build | permission (alert only), idle question, done, error | no: a Grok hook can block but not approve | no | no |
-| OpenCode 2.x | permission, done, error, input forms | yes; device or terminal, first answer wins | the TUI sends OSC 7501 itself | no |
-| OpenCode 1.x | permission, done, error | yes; device or terminal, first answer wins | no | no |
 
 "Alert only" means the device shows that the agent is waiting; you answer in the terminal.
+Which answers a request takes is in the request itself (`req.can`, see [Event format v2](#event-format-v2)):
+the app never shows a button the agent would not take.
 Windows: Claude Code (through Git Bash) and Codex (PowerShell) only; see [Windows](#windows).
 
 ## Requirements
@@ -37,9 +43,12 @@ Windows: Claude Code (through Git Bash) and Codex (PowerShell) only; see [Window
   `printf` is not a shell builtin (OpenBSD `sh`/`ksh`, mksh), so that secrets never appear in the
   process list.
 - One of the agents below. Tested with the real CLI: Claude Code 2.1.312 (alerts, approvals,
-  context reports), Codex 0.165.0 (alerts and approvals), Gemini CLI 0.63.0 and 0.66.0. Codex
-  context reports, Antigravity CLI, Grok Build and OpenCode are built from their documentation and
-  source and tested with recorded events, not yet with the real CLI.
+  context reports), Codex 0.165.0 (alerts and approvals), Gemini CLI 0.63.0 and 0.66.0, GitHub
+  Copilot CLI 1.0.105 (the plugin given with `--plugin-dir` and installed with `copilot plugin
+  install`, with a local model stub: prompt, done, session end, errors). The event format v2 inputs
+  are recorded hook inputs of Claude Code 2.1.316, Codex 0.165.0, OpenCode 1.0.223, 1.19.5 and
+  2.2.5, Copilot CLI 1.0.105, Antigravity CLI 1.4.12 and Grok Build 1.0.70 (measured with local
+  model stubs), replayed in `tests/`.
 - The SimpleTerm app, paired with this server (see [Pair with the SimpleTerm app](#pair-with-the-simpleterm-app)).
 
 ## Install
@@ -82,6 +91,22 @@ project. Gemini installs the whole repository as the extension `simpleterm` (it 
 `gemini-extension.json` and `hooks/hooks.json` at the top). It needs `git`, and it cannot be run
 from inside a Gemini session.
 
+### GitHub Copilot CLI
+
+```sh
+copilot plugin install AhMunGa/simpleterm-agent-hooks:plugins/copilot
+```
+
+The plugin is `simpleterm-copilot`, a folder of its own (`plugins/copilot`) with hooks in Copilot's
+own format: a session's prompts, the plan review (`exit_plan_mode`), its prompts and questions
+(`notification`), the end of a turn (`agentStop`), subagents, errors and the session's end.
+Copilot does not read `~/.claude`; do not give it the Claude Code plugin (if you do, the hook sees
+`COPILOT_CLI=1` and acts as this plugin, without waiting). Copilot's permission hook runs for every
+tool call, also for those that never prompt (read-only commands, already allowed ones), so the
+plugin does not register it yet and Copilot's permission prompts are alerts: answer them in the
+terminal. Errors that Copilot retries are no alerts; a session that ends on an error is one
+(`copilot -p`). Unix only.
+
 ### Antigravity CLI (`agy`)
 
 ```sh
@@ -99,22 +124,33 @@ The plugin is `simpleterm-antigravity`, a folder of its own (`plugins/antigravit
 `plugin.json` and `hooks.json` at a plugin's top, and treats a folder with `.claude-plugin/` as a
 Claude Code plugin. Check that the hooks loaded with `agy -p "/hooks" --output-format json`.
 
-**Not tested with a real `agy` yet**: this plugin is built from agy's documentation and change
-log. They do not say in which folder a hook command runs, so each command finds the script
-itself, in this order: `${PLUGIN_ROOT}` and `${CLAUDE_PLUGIN_ROOT}` (if agy fills them in), the
-install folder `~/.gemini/config/plugins/simpleterm-antigravity`, the older install folder from
-agy's documentation `~/.gemini/antigravity-cli/plugins/simpleterm-antigravity`, then the app's
-copy `~/.simpleterm/src/plugins/simpleterm`. It never looks in the folder the hook runs in: that
-can be a workspace, and a repository's own `scripts/agent-hook.sh` must not run. If none is
-there, `PreToolUse` answers `{"decision":"allow"}`, as the script does when the device did not
-decide, and `Stop` prints nothing; both exit 0.
+Each hook command finds the script itself, in this order: `${PLUGIN_ROOT}` and
+`${CLAUDE_PLUGIN_ROOT}` (if agy fills them in), the install folder
+`~/.gemini/config/plugins/simpleterm-antigravity`, the older install folder from agy's
+documentation `~/.gemini/antigravity-cli/plugins/simpleterm-antigravity`, the app's copy
+`~/.simpleterm/src/plugins/simpleterm`, and last the folder the hook runs in: agy 1.4.12 runs a
+plugin's hooks in the plugin's own folder and gives them no `PLUGIN_ROOT` (measured with a
+workspace plugin), so that folder counts, but only when its `plugin.json` names
+`simpleterm-antigravity`: a workspace's own `scripts/agent-hook.sh` never runs. If none is there,
+`PreToolUse` answers `{"decision":"allow"}`, as the script does when the device did not decide, and
+`Stop` prints nothing; all exit 0 (agy reads `{}` from `PreToolUse` as a denial and a failed or
+timed-out hook as a failed tool call, measured).
 
 agy has no "waiting for permission" event: its `PreToolUse` hook runs before every tool call,
 before agy decides whether to ask. So by default the plugin only alerts for agy's own questions
-(`ask_question`, `ask_permission`) and when the agent stops. To approve commands from the device,
-set `agy_wait` (seconds, at most 110) in `~/.simpleterm/agent-hook.conf`: every `run_command`
-then waits that long for your answer before agy's permission policy runs, and the terminal shows
-no prompt meanwhile. With no answer the policy decides as usual.
+(`ask_question`), a plan waiting for review, and when the agent stops. To answer from the device
+(`run_command`, `write_file`, `edit_file`, `call_mcp_tool`, and `read_file` of a path outside the
+workspace folders: agy asks before those reads only), set `agy_wait` (seconds, at most 110) in
+`~/.simpleterm/agent-hook.conf`: such a call then first asks the SSH tunnel whether
+the app is connected, and only when it is not, waits that long for an answer from another device
+before agy's permission policy runs; the terminal shows no prompt meanwhile. With no answer the
+policy decides as usual. While the app is connected, agy shows its own prompt and the app answers
+it there. A plan for review (agy writes `plan.md` with `RequestFeedback`) is an alert, not a
+`done`; with `agy_wait` and no app connected, the `Stop` hook waits for an approval from a device
+(a v2 relay) and agy goes on with the plan in the same turn.
+
+**Signing in over SSH.** With SSH variables set, agy keeps its sign-in in a file instead of the
+keychain (measured), so on a server you reach by SSH you sign in to agy there once.
 
 ### Grok Build
 
@@ -187,27 +223,36 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 
 | Agent event | Alert (`ev`) | Badge (Claude Code, SimpleTerm sessions only) |
 |---|---|---|
-| Claude `PermissionRequest` | `permission` (waits for your answer, up to 540 s) | waiting, then running |
-| Claude `PreToolUse` `AskUserQuestion`, `Notification` (idle, elicitation, input needed) | `question` (one per question: `PermissionRequest` repeats it; `idle_prompt` only when no `done` was sent or is pending for the turn) | waiting (idle keeps done; `agent_needs_input`, another session's, leaves the badge) |
+| Claude `PermissionRequest` | `permission` (waits for your answer, up to 540 s); for `AskUserQuestion` a `question` you can answer where the receiver takes answers (`fmt=2`) | waiting, then running |
+| Claude `PreToolUse` `AskUserQuestion`, `Notification` (idle, elicitation, input needed) | `question` (one per question: the `PermissionRequest` of the same question goes first, the `PreToolUse` one only when none came within `ask_delay`; `idle_prompt` only when no `done` was sent or is pending for the turn) | waiting (idle keeps done; `agent_needs_input`, another session's, leaves the badge) |
 | Claude `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure` | none (context, see below) | running |
 | Claude `Stop` / `StopFailure` | `done` (sent 3 s later on Claude Code, see below) / `error` or `auth` | done |
 | Claude `Stop` with `background_tasks` in flight | none (and no idle question until the next turn), unless the last message asks you something (`question`), only services or tasks that ran before your prompt are left (`done`) | background (+ an OSC 7501 `working` record, see below); waiting (+ a `blocked` record) for a question |
 | Claude `Stop` with `session_crons` set, turn started by a schedule | none (a question: `question`) | background, `scheduled: <schedule>` |
 | Claude `PostToolUseFailure` with `is_interrupt` (Esc; not for a subagent's tool, `agent_id` set) | none | idle |
 | Claude `SessionStart`, `PostCompact`, `PostModelSwitch` | none (context) | none |
-| Codex `PermissionRequest` | `permission` (waits up to 60 s) | none |
-| Codex `Stop` | `done`, none while a `/goal` is active | none |
+| Claude `SessionEnd`, `SubagentStart`, `SubagentStop` | `state` `ended`, `sub_start`, `sub_stop` (SSH tunnel only) | none |
+| Codex `PermissionRequest` | `permission`, to the SSH tunnel first; to the relay (waits up to 60 s) only when no tunnel answered, else an alert there | none |
+| Codex `Stop` | `done`, none while a `/goal` is active; a `question` (plan) when the turn ended on "Implement this plan?" | none |
+| Codex `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | none (session records; `state` `running`) | none |
 | Codex `SessionStart` (resumed or forked session), `PostCompact` | none (context) | none |
 | Gemini `Notification` (`ToolPermission`) | `question` (`approve <tool>: <command or file>`) | none |
 | Gemini `AfterAgent` | `done` (at once); `error` when the turn had no response text (API error, cancel, loop) | none |
-| agy `PreToolUse` `run_command` (only with `agy_wait`) | `permission` | none |
-| agy `PreToolUse` `ask_question`, `ask_permission` | `question` | none |
-| agy `Stop` (fully idle) | `done`, or `error` | none |
-| Grok `Notification` `permission_prompt`, `idle_prompt` | `question` (`idle_prompt` only when no `done` was sent or is pending for the turn) | none |
+| agy `PreToolUse` `run_command`, `write_file`, `edit_file`, `call_mcp_tool`, `read_file` outside the workspace (only with `agy_wait` and no app connected) | `permission` | none |
+| agy `PreToolUse` `ask_question` | `question` | none |
+| agy `PreToolUse`/`PostToolUse` `write_file` of a plan for review | none (the next `Stop` is the review) | none |
+| agy `Stop` (fully idle) | `done` or `error`; after a plan for review a `question` (plan) | none |
+| Grok `Notification` `permission_prompt` (also "Plan approval requested"), `elicitation_dialog`, `idle_prompt` | `question`, with what is asked from the `PreToolUse` before it (`idle_prompt` only when no `done` was sent or is pending for the turn) | none |
+| Grok `SessionEnd`, `SubagentStart`, `SubagentStop` | `state` (SSH tunnel only) | none |
 | Grok `Stop` (`end_turn`) / `StopFailure` | `done` (none with `backgroundTasks` or `sessionCrons`, same rules as Claude) / `error` or `auth` | none |
 | OpenCode permission request | `permission` (waits up to 540 s) | none |
 | OpenCode turn finished / failed | `done` (none while a subagent of it runs; a background shell is judged as Claude Code's `background_tasks`) / `error` or `auth` | none |
 | OpenCode 2.x input form | `question` | none |
+| OpenCode 1.19 question | `question` you can answer (`fmt=2`) | none |
+| Copilot `notification` (permission prompt, question) | `question` (an alert) | none |
+| Copilot `preToolUse` `exit_plan_mode` | `question` (plan) | none |
+| Copilot `agentStop` | `done` (none while background shells or subagents run, as for Claude Code); a subagent's own stop: `state` `sub_stop` | none |
+| Copilot `userPromptSubmitted`, `sessionEnd`, `subagentStart`/`Stop` | `state` (SSH tunnel only); `error` when a session ends on one | none |
 | `simpleterm notify` | `notify` | OSC 777 notification instead |
 
 **Background work is not done.** Claude Code (2.1.145+), Grok Build and OpenCode end a turn while a
@@ -346,6 +391,55 @@ standard output (`~/.zshenv`, `BASH_ENV`, or a login profile when Codex uses `-l
 can end up in the developer context of a resumed or forked session.** Print from those files
 only in an interactive shell (zsh: `[[ -o interactive ]] && …`).
 
+## Event format v2
+
+From 0.4.0 the plugin adds fields to every event (the numeric `v` stays 1: older apps read the v1
+fields and skip the rest). The contract is `docs/tech_specs/TDS_AGENT_EVENTS_V2.md` of the SimpleTerm
+app; in short:
+
+- **Who sent it**: the format (`fmt`: 2), the plugin's version, the agent's version (from its
+  transcript or rollout, `COPILOT_CLI_BINARY_VERSION`, or for OpenCode, Antigravity and Grok Build a
+  cached `--version`, run in the background when the executable changes), the session and turn
+  ids, the subagent, the working folder, the permission mode, a multiplexer (`tmux`, `screen`;
+  `unknown` for OpenCode 2.x, whose service keeps the first TUI's environment). These are for
+  diagnosis and records; nothing is switched on or off by a version.
+- **What is asked** (`req`): the window's kind (shell, edit, read, web, mcp, question, plan, form,
+  login, other), the tool, the request itself (the command and its description, the file and the
+  change as a replacement, a whole new file or a patch, the URL, the MCP server, tool and
+  arguments, the questions with their choices, the plan), the answers the agent takes from a hook
+  (`can`), the scopes Claude Code or OpenCode suggest, the other requests an OpenCode answer also
+  settles, and whether the agent's own prompt shows while the hook waits (`wait`: shared, hidden,
+  none).
+- **Per link**: the SSH tunnel gets the whole request (32 KiB), the relay a summary (2048 bytes):
+  each field is cut at its limit, then whole items and objects are left out in a fixed order and
+  the event says what was cut (`cut`), the same bytes from the sh and the PowerShell hook. A link
+  whose receiver has not said it takes v2 decisions (`fmt=2` in its link file, written by the app)
+  gets only the answers a v1 allow/deny can give, and questions there are alerts.
+- **Answers** (`dext`): the app seals what you chose (a scope, a reason, your answers, a plan mode)
+  with the link's keys next to the v1 allow/deny. The hook checks it: its MAC, that it answers this
+  request (`req`), that the choice was offered to that link, that you saw every other request an
+  OpenCode answer also settles, and that the request was not answered in the terminal meanwhile.
+  A decision that fails ends only that link's wait; a v2 tunnel hears it (`resolved`, scope link)
+  and gets the request again (3 times at most). A v1 allow/deny (an older app, an alert's quick
+  action) still works, with its plain meaning.
+- **Who waits where**: Claude Code and OpenCode show their prompt while the hook waits, so every
+  link gets the request at once. Codex and Antigravity hide it: the SSH tunnel gets it first, and
+  when the app answers there the relay only gets an alert (other devices show it without buttons),
+  so nothing you press on another device goes unheard; only when no tunnel answers is the relay
+  asked, and the hook waits there. A link answering `sent` (also an older app's tunnel) is waited
+  for, other answers end that link only.
+- **Ends and states**: a turn's end carries how it ended, who started it, whether its last message
+  asks you something, its last message (tunnel), the background work still running (new this turn
+  or older, services), the schedules and an active Codex goal. To the SSH tunnel only: `state`
+  (running, background, scheduled, idle, ended, a subagent starting or stopping) and `resolved`
+  (how a request ended: applied, answered in the terminal, left to the agent's window, ...).
+- **Session records** (SimpleTerm sessions only, `SIMPLETERM=1`): `~/.simpleterm/sessions/<agent>/`
+  keeps one record per session (id, folder, title, last prompt, times, transcript path, permission
+  mode, settings folder, state), a `.beat` file whose time is the session's last hook event (touched
+  at most every 30 seconds) and an `.ended` file after the session ended, for the app's "resume"
+  list. 30 days, 200 records at most. Not for OpenCode 2.x (its service cannot tell a SimpleTerm
+  session from another).
+
 ## `simpleterm notify`
 
 ```sh
@@ -421,12 +515,13 @@ To send no context or limits at all, set `usage=0` in `~/.simpleterm/agent-hook.
 claude_wait=540   # seconds a Claude Code permission waits for a device, at most 540
 codex_wait=60     # the same for Codex
 opencode_wait=540 # the same for OpenCode
-agy_wait=0        # Antigravity run_command waits; 0 (off) by default, at most 110
+agy_wait=0        # the same for Antigravity (commands, file writes and edits, reads outside the workspace, MCP calls); 0 (off) by default, at most 110
 poll_wait=25      # one long-poll, 1-25
 usage=1           # 0: send no context or rate limits
 bg_done_after=600 # a pause with only shells/monitors left: done after this many seconds; 0: never
 codex_goal_check=5 # seconds to wait for a Codex /goal's next turn before sending done
-done_delay=3      # seconds a done waits for a newer event of the session (another Stop hook); 0: at once (default 3 on Claude Code and Grok Build, 0 on Codex, Gemini CLI and OpenCode)
+done_delay=3      # seconds a done waits for a newer event of the session (another Stop hook); 0: at once (default 3 on Claude Code and Grok Build, 0 on the others)
+ask_delay=2       # seconds a Claude Code question from PreToolUse waits for its PermissionRequest (the answerable one)
 ```
 
 ## Privacy
@@ -442,6 +537,14 @@ done_delay=3      # seconds a done waits for a newer event of the session (anoth
   reset times and the Codex plan name. To compute it the hook reads the end of the agent's
   transcript and takes the `usage` keys; it reads no message text.
 - `simpleterm notify` sends the title and body you give it.
+- Event format v2 (see above) also sends what an agent asks: the command, the file and its change,
+  the URL, the MCP call's arguments, the questions, the plan, and the end of a turn's last message
+  and background work. The SSH tunnel gets them whole (at most 32 KiB an event); the relay gets
+  a short summary, still encrypted end to end, and no file contents, diffs, MCP arguments or last
+  message. The working folder's full path, the permission mode and the settings folder go only to
+  the tunnel.
+- Session records stay on the server, in `~/.simpleterm/sessions` (folder 700, files 600); the app
+  reads them over SFTP when you open its resume list.
 - A permission answer is signed by the device; the hook ignores an answer whose signature does not match.
 - The hook keeps a 200-line log in `~/.simpleterm/agent-hook.log` with event types, the first
   8 characters of link IDs and HTTP results, never message text or host names.
@@ -472,6 +575,7 @@ done_delay=3      # seconds a done waits for a newer event of the session (anoth
 | Claude Code | `claude plugin update simpleterm@simpleterm-agent-hooks` |
 | Codex | `codex plugin marketplace upgrade simpleterm-agent-hooks`, then trust the changed hooks again in `codex` |
 | Gemini CLI | `gemini extensions update simpleterm` |
+| GitHub Copilot CLI | `copilot plugin update simpleterm-copilot` |
 | Antigravity | run the install command again (from a copy: `git -C ~/.simpleterm/src pull` first) |
 | Grok Build | `grok plugin update simpleterm` (nothing to do when it uses the Claude Code plugin) |
 | OpenCode 2.x | `opencode plugin update 'github:AhMunGa/simpleterm-agent-hooks#main::path:plugins/opencode'` |
@@ -486,6 +590,7 @@ codex plugin remove simpleterm@simpleterm-agent-hooks
 codex plugin marketplace remove simpleterm-agent-hooks
 gemini extensions uninstall simpleterm
 agy plugin uninstall simpleterm-antigravity
+copilot plugin uninstall simpleterm-copilot
 grok plugin uninstall simpleterm --confirm
 opencode plugin remove 'github:AhMunGa/simpleterm-agent-hooks#main::path:plugins/opencode'
 rm -f ~/.config/opencode/plugins/simpleterm.js ~/.config/opencode/plugins/simpleterm-agent-hook.sh
@@ -514,6 +619,13 @@ Not tested on Windows yet.
 
 ## Known limitations
 
+- **Copilot CLI answers come from the terminal.** Until its permission hook can tell a call that
+  will prompt from one that will not, the plugin does not register it; Copilot's prompts are alerts.
+  An interactive session whose model calls keep failing gets no error alert (Copilot reports each
+  try as recoverable and the session goes on); `copilot -p` gets one when the session ends on it.
+- **OpenCode 2.x questions are alerts** (its input forms are answered over its HTTP server, which a
+  plugin cannot reach yet), and OpenCode's last message is not in a turn's end.
+- **Claude Code MCP forms** are alerts without the server's name (the `Notification` has none).
 - **Background work that never ends.** A dev server the table of services does not know, or
   another endless job left in the background, never wakes the agent: `done` comes only after
   `bg_done_after` (default 10 minutes), and the badge stays `background` until the next turn
@@ -574,9 +686,10 @@ plugins/simpleterm/                    Claude Code, Codex and Grok Build
   scripts/simpleterm-notify.sh         the `simpleterm` command
   scripts/statusline-tap.sh            optional Claude Code status line tap
 plugins/antigravity/                   Antigravity CLI plugin (plugin.json, hooks.json, script copies)
+plugins/copilot/                       GitHub Copilot CLI plugin (plugin.json, hooks.json, script copies)
 plugins/opencode/                      OpenCode 2.x plugin (package.json, index.js, script copy)
 plugins/opencode-v1/                   OpenCode 1.x plugin file and script copy
-tests/                                 hook tests, mock relay, OpenCode harness (not part of a plugin)
+tests/                                 hook tests, mock relay, OpenCode harness, v2 fixtures (not part of a plugin)
 ```
 
 ## Development
@@ -601,15 +714,23 @@ cp plugins/simpleterm/scripts/agent-hook.sh plugins/opencode/agent-hook.sh
 cp plugins/simpleterm/scripts/agent-hook.sh plugins/opencode-v1/simpleterm-agent-hook.sh
 cp plugins/simpleterm/scripts/agent-hook.sh plugins/simpleterm/scripts/simpleterm-notify.sh \
    plugins/simpleterm/scripts/statusline-tap.sh plugins/antigravity/scripts/
+cp plugins/simpleterm/scripts/agent-hook.sh plugins/simpleterm/scripts/simpleterm-notify.sh plugins/copilot/scripts/
 ```
 
-Test-only variables: with `SIMPLETERM_HOOK_TEST=1`, `SIMPLETERM_HOOK_TEST_IV`, `_NONCE`, `_RID` and
-`_TS` replace the random values so the envelope can be compared with the protocol test vectors.
-They are ignored otherwise.
+Test-only variables: with `SIMPLETERM_HOOK_TEST=1`, `SIMPLETERM_HOOK_TEST_IV`, `_NONCE`, `_RID`,
+`_TS` and `_TMS` replace the random values so the envelope can be compared with the protocol test
+vectors, and `SIMPLETERM_HOOK_TEST_PLAIN=<folder>` keeps each plaintext before it is sealed (one
+file per event and link). They are ignored otherwise.
+
+`tests/fixtures/v2/cases.json` holds hook inputs per agent and version, `expected.json` the
+plaintext every link gets, byte for byte; the sh hook and, for the agents it serves (Claude Code,
+Codex, Grok Build), the PowerShell hook are both held to it.
+After a deliberate change, `python3 -I tests/run_tests.py --regen-v2` rewrites `expected.json`
+from the sh hook: read the diff before committing it.
 
 When releasing, bump `version` in every manifest (`plugins/simpleterm/.claude-plugin/plugin.json`,
 `.codex-plugin/plugin.json`, `gemini-extension.json`, `plugins/antigravity/plugin.json`,
-`plugins/opencode/package.json`) and the release in the scripts (`HOOK_VERSION` in
+`plugins/opencode/package.json`, `plugins/copilot/plugin.json`) and the release in the scripts (`HOOK_VERSION` in
 `scripts/agent-hook.sh`, `$HookVersion` in `scripts/agent-hook.ps1`); installed copies update only
 when it changes, and the tests fail while they differ.
 

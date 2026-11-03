@@ -12,9 +12,17 @@ envelope with `openssl` (the enc key is part of the test config), checks the MAC
 and `nh == sha256(nonce)`, and signs the decision with the link's mac key
 (`dmac`), exactly as the app would before calling /v1/decide.
 
+It also makes decision extensions (`dext`, event format v2, TDS_AGENT_EVENTS_V2
+section 5): a link (or one entry of its `decisions` plan) configured with
+`dext: {act, scope?, mode?, reason?, answers?, seen?, req?, rid?, nonce?,
+decision?, bad_mac?, raw?}` gets the extension sealed with the link's keys
+(AES-256-CBC, MAC over "st1-dext." + iv + "." + ct) at the end of the decided
+response. `req` defaults to the request's own req.id.
+
 Test control endpoints (no auth, loopback only):
   POST /_ctl/config   {"links":{id:{secret,enc,mac,push,decision,after,decisions,
-                        revoked,decision_http,ingest_delay}}}
+                        revoked,decision_http,ingest_delay,dext,unknown_error,
+                        shown,qdec,push_seq}}}
   GET  /_ctl/records  every request seen, with decrypted plaintext and checks
   POST /_ctl/reset
 """
@@ -52,6 +60,33 @@ def decrypt(env, enc_hex, mac_hex):
     if out.returncode != 0:
         return None, True
     return out.stdout.decode("utf-8"), True
+
+
+def seal_dext(plain, enc_hex, mac_hex, iv_hex=None, bad_mac=False):
+    """The decision extension envelope (section 5.1) of plaintext `plain` (str)."""
+    import os
+    iv = iv_hex or os.urandom(16).hex()
+    out = subprocess.run(
+        [OPENSSL, "enc", "-aes-256-cbc", "-K", enc_hex, "-iv", iv, "-a", "-A"],
+        input=plain.encode("utf-8"), capture_output=True, check=True,
+    )
+    ct = out.stdout.decode().strip()
+    mac = hmac.new(bytes.fromhex(mac_hex), ("st1-dext." + iv + "." + ct).encode("ascii"), hashlib.sha256).hexdigest()
+    if bad_mac:
+        mac = ("0" if mac[0] != "0" else "1") + mac[1:]
+    return {"v": 1, "iv": iv, "ct": ct, "mac": mac}
+
+
+def dext_plain(spec, rid, nonce, decision, req_id):
+    if spec.get("raw") is not None:
+        return spec["raw"]
+    p = {"v": 1, "fmt": 2, "rid": spec.get("rid", rid), "nonce": spec.get("nonce", nonce),
+         "decision": spec.get("decision", decision), "req": spec.get("req", req_id), "act": spec["act"]}
+    for k in ("scope", "mode", "reason", "answers", "seen"):
+        if k in spec:
+            p[k] = spec[k]
+    p["ts"] = int(time.time())
+    return json.dumps(p, separators=(",", ":"), ensure_ascii=False)
 
 
 def dmac_for(mac_hex, rid, decision, nonce):
@@ -122,13 +157,19 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 STATE["records"].append(rec)
             return self._send(410, {"ok": False, "error": "revoked"})
-        if len(raw) > 4096:
+        if len(raw) > int(link.get("max_body", 4096)):
             rec["status"] = 413
             with LOCK:
                 STATE["records"].append(rec)
             return self._send(413, {"ok": False, "error": "too-large"})
         body = json.loads(raw)
         rec["body"] = body
+        if body.get("ev") == "question" and body.get("nh") is not None and link.get("qdec") is False:
+            # A relay before R1 (or rolled back): no nh on a question.
+            rec["status"] = 400
+            with LOCK:
+                STATE["records"].append(rec)
+            return self._send(400, {"ok": False, "error": "invalid-nh"})
         plain, mac_ok = decrypt(body["env"], link["enc"], link["mac"])
         rec["mac_ok"] = mac_ok
         rec["plain"] = plain
@@ -141,19 +182,31 @@ class Handler(BaseHTTPRequestHandler):
                 rec["nh_ok"] = (
                     hashlib.sha256(nonce.encode()).hexdigest() == body.get("nh")
                 )
+        req_id = None
+        if plain:
+            try:
+                req_id = (json.loads(plain).get("req") or {}).get("id")
+            except (ValueError, AttributeError):
+                req_id = None
         with LOCK:
-            req = {"created": received, "nonce": nonce, "ev": body.get("ev")}
-            # Optional per-request plan: links[id].decisions = [{"decision", "after"}, ...]
+            req = {"created": received, "nonce": nonce, "ev": body.get("ev"), "req_id": req_id}
+            # Optional per-request plan: links[id].decisions = [{"decision", "after", "dext"}, ...]
             if nonce is not None and link.get("decisions"):
                 plan = link["decisions"].pop(0)
                 req["decision"], req["after"] = plan.get("decision"), plan.get("after", 0)
+                if "dext" in plan:
+                    req["dext"] = plan["dext"]
             STATE["requests"][(lid, body["rid"])] = req
+            # Optional push answers in order: links[id].push_seq = ["sent", "suppressed", ...]
+            push = link.get("push", "sent")
+            if link.get("push_seq"):
+                push = link["push_seq"].pop(0)
         time.sleep(float(link.get("ingest_delay", 0)))
         rec["status"] = 200
         rec["responded"] = time.time()
         with LOCK:
             STATE["records"].append(rec)
-        return self._send(200, {"ok": True, "push": link.get("push", "sent")})
+        return self._send(200, {"ok": True, "push": push})
 
     def do_GET(self):
         url = urlparse(self.path)
@@ -172,12 +225,18 @@ class Handler(BaseHTTPRequestHandler):
             STATE["records"].append(rec)
         if not lid:
             return self._send(401, {"ok": False, "error": "unauthorized"})
+        time.sleep(float(link.get("decision_delay", 0)))
         if link.get("decision_http"):
             return self._send(int(link["decision_http"]), {"ok": False, "error": link.get("decision_error", "expired")})
         with LOCK:
             req = STATE["requests"].get((lid, rid))
         if not req:
-            return self._send(404, {"ok": False, "error": "not-found"})
+            # The relay says not-found; the app's tunnel says unknown, and a v2
+            # app adds whether it can show anything (section 4.6 probe).
+            obj = {"ok": False, "error": link.get("unknown_error", "not-found")}
+            if "shown" in link:
+                obj["shown"] = link["shown"]
+            return self._send(404, obj)
         decision = req["decision"] if "decision" in req else link.get("decision")
         after = req["after"] if "after" in req else link.get("after", 0)
         end = time.time() + wait
@@ -189,15 +248,17 @@ class Handler(BaseHTTPRequestHandler):
                     d, mac_key = "allow", "ff" * 32
                 else:
                     d = decision
-                return self._send(
-                    200,
-                    {
-                        "ok": True,
-                        "status": "decided",
-                        "decision": d,
-                        "dmac": dmac_for(mac_key, rid, d, req["nonce"]),
-                    },
-                )
+                obj = {
+                    "ok": True,
+                    "status": "decided",
+                    "decision": d,
+                    "dmac": dmac_for(mac_key, rid, d, req["nonce"]),
+                }
+                spec = req["dext"] if "dext" in req else link.get("dext")
+                if spec:
+                    plain = dext_plain(spec, rid, req["nonce"], d, req.get("req_id"))
+                    obj["dext"] = seal_dext(plain, link["enc"], link["mac"], iv_hex=spec.get("iv"), bad_mac=spec.get("bad_mac", False))
+                return self._send(200, obj)
             if time.time() >= end:
                 return self._send(200, {"ok": True, "status": "pending"})
             time.sleep(0.1)

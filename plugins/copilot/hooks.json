@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "sh -c 'for d in \"${PLUGIN_ROOT:-}\" \"${COPILOT_PLUGIN_ROOT:-}\" \"${CLAUDE_PLUGIN_ROOT:-}\" \"${COPILOT_HOME:-$HOME/.copilot}\"/installed-plugins/*/simpleterm-copilot \"${COPILOT_HOME:-$HOME/.copilot}\"/installed-plugins/_direct/*; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && [ -f \"$d/plugin.json\" ] || continue; case $(head -c 4096 \"$d/plugin.json\") in *'\"'\"'\"simpleterm-copilot\"'\"'\"'*) exec sh \"$d/scripts/agent-hook.sh\" copilot \"$0\" ;; esac; done; exit 0' sessionStart",
+        "timeoutSec": 10
+      }
+    ],
+    "userPromptSubmitted": [
+      {
+        "type": "command",
+        "bash": "sh -c 'for d in \"${PLUGIN_ROOT:-}\" \"${COPILOT_PLUGIN_ROOT:-}\" \"${CLAUDE_PLUGIN_ROOT:-}\" \"${COPILOT_HOME:-$HOME/.copilot}\"/installed-plugins/*/simpleterm-copilot \"${COPILOT_HOME:-$HOME/.copilot}\"/installed-plugins/_direct/*; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && [ -f \"$d/plugin.json\" ] || continue; case $(head -c 4096 \"$d/plugin.json\") in *'\"'\"'\"simpleterm-copilot\"'\"'\"'*) exec sh \"$d/scripts/agent-hook.sh\" copilot \"$0\" ;; esac; done; exit 0' userPromptSubmitted",
+        "timeoutSec": 10
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "sh -c 'for d in \"${PLUGIN_ROOT:-}\" \"${COPILOT_PLUGIN_ROOT:-}\" \"${CLAUDE_PLUGIN_ROOT:-}\" \"${COPILOT_HOME:-$HOME/.copilot}\"/installed-plugins/*/simpleterm-copilot \"${COPILOT_HOME:-$HOME/.copilot}\"/installed-plugins/_direct/*; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && [ -f \"$d/plugin.json\" ] || continue; case $(head -c 4096 \"$d/plugin.json\") in *'\"'\"'\"simpleterm-copilot\"'\"'\"'*) exec sh \"$d/scripts/agent-hook.sh\" copilot \"$0\" ;; esac; done; exit 0' preToolUse",
+        "timeoutSec": 10,
+        "matcher": "exit_plan_mode|ask_user"
+      }
+    ],
+    "notification": [
+      {
+        "type": "command",
+        "bash": "sh -c 'for d in \"${PLUGIN_ROOT:-}\" \"${COPILOT_PLUGIN_ROOT:-}\" \"${CLAUDE_PLUGIN_ROOT:-}\" \"${COPILOT_HOME:-$HOME/.copilot}\"/installed-plugins/*/simpleterm-copilot \"${COPILOT_HOME:-$HOME/.copilot}\"/installed-plugins/_direct/*; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && [ -f \"$d/plugin.json\" ] || continue; case $(head -c 4096 \"$d/plugin.json\") in *'\"'\"'\"simpleterm-copilot\"'\"'\"'*) exec sh \"$d/scripts/agent-hook.sh\" copilot \"$0\" ;; esac; done; exit 0' notification",
+        "timeoutSec": 10
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "sh -c 'for d in \"${PLUGIN_ROOT:-}\" \"${COPILOT_PLUGIN_ROOT:-}\" \"${CLAUDE_PLUGIN_ROOT:-}\" \"${COPILOT_HOME:-$HOME/.copilot}\"/installed-plugins/*/simpleterm-copilot \"${COPILOT_HOME:-$HOME/.copilot}\"/installed-plugins/_direct/*; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && [ -f \"$d/plugin.json\" ] || continue; case $(head -c 4096 \"$d/plugin.json\") in *'\"'\"'\"simpleterm-copilot\"'\"'\"'*) exec sh \"$d/scripts/agent-hook.sh\" copilot \"$0\" ;; esac; done; exit 0' agentStop",
+        "timeoutSec": 30
+      }
+    ],
+    "subagentStart": [
+      {
+        "type": "command",
+        "bash": "sh -c 'for d in \"${PLUGIN_ROOT:-}\" \"${COPILOT_PLUGIN_ROOT:-}\" \"${CLAUDE_PLUGIN_ROOT:-}\" \"${COPILOT_HOME:-$HOME/.copilot}\"/installed-plugins/*/simpleterm-copilot \"${COPILOT_HOME:-$HOME/.copilot}\"/installed-plugins/_direct/*; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && [ -f \"$d/plugin.json\" ] || continue; case $(head -c 4096 \"$d/plugin.json\") in *'\"'\"'\"simpleterm-copilot\"'\"'\"'*) exec sh \"$d/scripts/agent-hook.sh\" copilot \"$0\" ;; esac; done; exit 0' subagentStart",
+        "timeoutSec": 10
+      }
+    ],
+    "subagentStop": [
+      {
+        "type": "command",
+        "bash": "sh -c 'for d in \"${PLUGIN_ROOT:-}\" \"${COPILOT_PLUGIN_ROOT:-}\" \"${CLAUDE_PLUGIN_ROOT:-}\" \"${COPILOT_HOME:-$HOME/.copilot}\"/installed-plugins/*/simpleterm-copilot \"${COPILOT_HOME:-$HOME/.copilot}\"/installed-plugins/_direct/*; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && [ -f \"$d/plugin.json\" ] || continue; case $(head -c 4096 \"$d/plugin.json\") in *'\"'\"'\"simpleterm-copilot\"'\"'\"'*) exec sh \"$d/scripts/agent-hook.sh\" copilot \"$0\" ;; esac; done; exit 0' subagentStop",
+        "timeoutSec": 10
+      }
+    ],
+    "errorOccurred": [
+      {
+        "type": "command",
+        "bash": "sh -c 'for d in \"${PLUGIN_ROOT:-}\" \"${COPILOT_PLUGIN_ROOT:-}\" \"${CLAUDE_PLUGIN_ROOT:-}\" \"${COPILOT_HOME:-$HOME/.copilot}\"/installed-plugins/*/simpleterm-copilot \"${COPILOT_HOME:-$HOME/.copilot}\"/installed-plugins/_direct/*; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && [ -f \"$d/plugin.json\" ] || continue; case $(head -c 4096 \"$d/plugin.json\") in *'\"'\"'\"simpleterm-copilot\"'\"'\"'*) exec sh \"$d/scripts/agent-hook.sh\" copilot \"$0\" ;; esac; done; exit 0' errorOccurred",
+        "timeoutSec": 10
+      }
+    ],
+    "sessionEnd": [
+      {
+        "type": "command",
+        "bash": "sh -c 'for d in \"${PLUGIN_ROOT:-}\" \"${COPILOT_PLUGIN_ROOT:-}\" \"${CLAUDE_PLUGIN_ROOT:-}\" \"${COPILOT_HOME:-$HOME/.copilot}\"/installed-plugins/*/simpleterm-copilot \"${COPILOT_HOME:-$HOME/.copilot}\"/installed-plugins/_direct/*; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && [ -f \"$d/plugin.json\" ] || continue; case $(head -c 4096 \"$d/plugin.json\") in *'\"'\"'\"simpleterm-copilot\"'\"'\"'*) exec sh \"$d/scripts/agent-hook.sh\" copilot \"$0\" ;; esac; done; exit 0' sessionEnd",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}

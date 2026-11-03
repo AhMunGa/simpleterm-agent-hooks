@@ -2,12 +2,24 @@
   "simpleterm-agent-hooks": {
     "PreToolUse": [
       {
-        "matcher": "run_command|ask_question|ask_permission",
+        "matcher": "run_command|ask_question|write_file|edit_file|read_file|call_mcp_tool",
         "hooks": [
           {
             "type": "command",
-            "command": "sh -c 'for d in \"${PLUGIN_ROOT}\" \"${CLAUDE_PLUGIN_ROOT}\" \"$HOME/.gemini/config/plugins/simpleterm-antigravity\" \"$HOME/.gemini/antigravity-cli/plugins/simpleterm-antigravity\" \"$HOME/.simpleterm/src/plugins/simpleterm\"; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && exec sh \"$d/scripts/agent-hook.sh\" agy PreToolUse; done; printf \"{\\\"decision\\\":\\\"allow\\\"}\\n\"; exit 0'",
+            "command": "sh -c 'for d in \"${PLUGIN_ROOT}\" \"${CLAUDE_PLUGIN_ROOT}\" \"$HOME/.gemini/config/plugins/simpleterm-antigravity\" \"$HOME/.gemini/antigravity-cli/plugins/simpleterm-antigravity\" \"$HOME/.simpleterm/src/plugins/simpleterm\"; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && exec sh \"$d/scripts/agent-hook.sh\" agy PreToolUse; done; case $(head -c 4096 ./plugin.json 2>/dev/null) in *'\"'\"'\"simpleterm-antigravity\"'\"'\"'*) [ -f ./scripts/agent-hook.sh ] && exec sh ./scripts/agent-hook.sh agy PreToolUse ;; esac; printf \"{\\\"decision\\\":\\\"allow\\\"}\\n\"; exit 0'",
             "timeout": 120
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "write_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'for d in \"${PLUGIN_ROOT}\" \"${CLAUDE_PLUGIN_ROOT}\" \"$HOME/.gemini/config/plugins/simpleterm-antigravity\" \"$HOME/.gemini/antigravity-cli/plugins/simpleterm-antigravity\" \"$HOME/.simpleterm/src/plugins/simpleterm\"; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && exec sh \"$d/scripts/agent-hook.sh\" agy PostToolUse; done; case $(head -c 4096 ./plugin.json 2>/dev/null) in *'\"'\"'\"simpleterm-antigravity\"'\"'\"'*) [ -f ./scripts/agent-hook.sh ] && exec sh ./scripts/agent-hook.sh agy PostToolUse ;; esac; exit 0'",
+            "timeout": 30
           }
         ]
       }
@@ -15,8 +27,8 @@
     "Stop": [
       {
         "type": "command",
-        "command": "sh -c 'for d in \"${PLUGIN_ROOT}\" \"${CLAUDE_PLUGIN_ROOT}\" \"$HOME/.gemini/config/plugins/simpleterm-antigravity\" \"$HOME/.gemini/antigravity-cli/plugins/simpleterm-antigravity\" \"$HOME/.simpleterm/src/plugins/simpleterm\"; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && exec sh \"$d/scripts/agent-hook.sh\" agy Stop; done; exit 0'",
-        "timeout": 30
+        "command": "sh -c 'for d in \"${PLUGIN_ROOT}\" \"${CLAUDE_PLUGIN_ROOT}\" \"$HOME/.gemini/config/plugins/simpleterm-antigravity\" \"$HOME/.gemini/antigravity-cli/plugins/simpleterm-antigravity\" \"$HOME/.simpleterm/src/plugins/simpleterm\"; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && exec sh \"$d/scripts/agent-hook.sh\" agy Stop; done; case $(head -c 4096 ./plugin.json 2>/dev/null) in *'\"'\"'\"simpleterm-antigravity\"'\"'\"'*) [ -f ./scripts/agent-hook.sh ] && exec sh ./scripts/agent-hook.sh agy Stop ;; esac; exit 0'",
+        "timeout": 130
       }
     ]
   }

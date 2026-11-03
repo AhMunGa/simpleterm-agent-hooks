@@ -1,5 +1,84 @@
 # Changelog
 
+## 0.4.0 - 2026-11-03
+
+Event format v2 (SimpleTerm `docs/tech_specs/TDS_AGENT_EVENTS_V2.md`, issue AhMunGa/simple-term#381):
+the app sees what an agent asks and which answers that agent takes from a hook, and answers with
+more than allow and deny. The numeric `v` stays 1 and every v1 field keeps its meaning and place:
+older apps and relays read these events as before, and a v1 allow or deny still works.
+
+- **What is asked, per link.** Every event names the plugin and agent version, the session, turn
+  and subagent, the folder, the permission mode and a multiplexer; a request names its window
+  (shell, edit, read, web, mcp, question, plan, form, login, other), the tool, the command, the
+  file and its change, the URL, the MCP call, the questions with their choices or the plan, the
+  answers the agent takes (`can`), the suggested scopes, and the other OpenCode requests an answer
+  also settles. The SSH tunnel gets it whole (32 KiB), the relay a summary (2048 bytes): fields are
+  cut at fixed limits, then items and objects are left out in a fixed order, recorded in `cut`; the
+  sh and the PowerShell hook make the same bytes. A link without `fmt=2` gets only the answers a v1
+  decision can give, and a question there stays an alert.
+- **Answers.** Claude Code: allow for a suggested scope (`updatedPermissions`), deny with your
+  reason (worded as a user's rejection, so the model reads it), answer `AskUserQuestion` (by
+  `PermissionRequest`: `updatedInput` with your answers), approve a plan (`updatedInput`, optionally
+  accept edits) or ask for changes; a v1 allow of a plan now works too. Codex and Antigravity: deny
+  with a reason; Antigravity: approve a plan from its `Stop` hook. OpenCode: always (the pattern),
+  reject with a reason (1.19 and 2.x), answer a 1.19 question. The extension (`dext`) is checked:
+  its MAC (`st1-dext.`), the request it answers, the answers offered to that link, the other
+  requests an OpenCode answer settles, a request answered in the terminal meanwhile; a key given
+  twice counts with its first value, as in the agent's input. OpenCode 1.19 and 2.x always and
+  reject settle every request of the session open at that moment: such an answer (also a v1 deny,
+  also from an older app) applies only if the user saw every one of them, those that opened after
+  the request was sent included; the request always names them (`affects`, `others`, `[]` when
+  none).
+- **Waiting per link.** A decision that does not hold ends only that link's wait; a v2 tunnel hears
+  it (`resolved`) and gets the request again under a new rid, 3 times at most. Codex and
+  Antigravity, whose prompt hides while a hook waits: the tunnel first; when the app answers there,
+  the relay gets an alert without buttons and nothing waits on it; only when no tunnel answers is the
+  relay asked. A relay that rejects a question's `nh` gets it once more without one. The cap counts
+  from the hook's start.
+- **Results and states** to the SSH tunnel: `resolved` (applied, answered in the terminal, left to
+  the agent, another device's answer, gone) and `state` (running, background, scheduled, idle, ended,
+  a subagent starting or stopping). A turn's end carries how it ended, who started it, its last
+  message, the background work and schedules left, a Codex goal.
+- **Session records** for the app's resume list: `~/.simpleterm/sessions/<agent>/<session>.json`,
+  `.beat` (the last hook event) and `.ended`, SimpleTerm sessions only, 30 days and 200 records at
+  most; not for OpenCode 2.x.
+- **Plans.** Codex: a turn that ended on "Implement this plan?" (the rollout's Plan item) is a
+  `question` (plan), not a `done`. Antigravity: a plan written for review (`RequestFeedback`) makes
+  the next `Stop` a `question` (plan), and with `agy_wait` and no app connected that `Stop` waits for
+  an approval. Copilot: `exit_plan_mode` is a `question` (plan).
+- **GitHub Copilot CLI** (`plugins/copilot`, `copilot plugin install
+  AhMunGa/simpleterm-agent-hooks:plugins/copilot`): alerts for its prompts and questions, plan, done
+  (not while background shells or subagents run, read from its `events.jsonl`; a subagent's own stop
+  is not the session's), an error when a session ends on one (retried errors are not), session
+  records and states. Its permission hook also runs for calls that never prompt, so it is not
+  registered yet: answers stay in the terminal. The Claude Code plugin given to Copilot acts the
+  same way (`COPILOT_CLI=1`) instead of waiting. Measured with Copilot 1.0.105 and a local model.
+- **Antigravity fixes** (#381): file writes and edits, reads outside the workspace and MCP calls
+  can be answered too (with `agy_wait`); `ask_permission` (no such tool) is gone; a call is only
+  sent when no app is connected (the tunnel is asked first: 404 `unknown`, unless `shown:false`);
+  the hook folder counts when it is this plugin's own (agy gives no `PLUGIN_ROOT`); `Stop` waits up
+  to 130 s; `toolCall.args.Cwd` (not there) is no longer read; signing in over SSH is documented.
+- **Grok Build**: a permission prompt's alert names the tool, command, file or URL from the
+  `PreToolUse` before it; questions and the plan review are alerts; session end and subagents are
+  states.
+- **Claude Code**: `SessionEnd`, `SubagentStart`, `SubagentStop` hooks; the `PreToolUse` report of
+  a question waits `ask_delay` (2 s) for the answerable `PermissionRequest` one.
+- **Codex**: `UserPromptSubmit`, `PreToolUse` and `PostToolUse` hooks for the session records (no
+  output; their tool input and output are not read).
+- **PowerShell hook** (Windows): event format v2 as above for Claude Code, Codex and Grok Build, the
+  same bytes as the sh hook; a `[1m]` model's context window is 1M (exact); the OSC 7501 version
+  check takes spaces around `:`; a run folder that cannot be made no longer stops the hook; Windows
+  PowerShell 5.1 no longer queues a third request to the relay behind a long poll (2 connections
+  per host); a waiting background `done` ends as soon as a newer event replaces it.
+- **State events**: a subagent's start and stop are sent each time, at once; within the second
+  only session states replace one another.
+- **Fixes**: an input past 256 KiB is read to its end, so the agent no longer gets a broken pipe
+  (Codex: `failed to write hook stdin`); bytes that are not well-formed UTF-8 (overlong forms,
+  encoded surrogates, past U+10FFFF) become spaces in every event, as the app drops an event it
+  cannot decode; an Antigravity read inside the workspace never waits with `agy_wait` (agy asks
+  only for reads outside it); a background send that trimmed `~/.simpleterm/agent-hook.log` at the
+  moment the hook did could leave it empty.
+
 ## 0.3.2 - 2026-11-02
 
 Fixes and refinements to the background-work handling of 0.3.1.
