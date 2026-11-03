@@ -690,7 +690,8 @@ function Get-LinkFiles {
 }
 
 # conf_val: the value of $key in ~/.simpleterm/agent-hook.conf (section 9.2
-# D21, its first 4 KiB): the first line `key=value` of that key decides,
+# D21, its first 4 KiB; a UTF-8 BOM at the start of the file is dropped):
+# the first line `key=value` of that key decides,
 # blanks allowed around the line and the `=`. From the value a CR, a comment
 # (from the first `#`), the blanks around it and one pair of quotes around all
 # of it are taken away. Empty: the default.
@@ -699,7 +700,11 @@ function Get-ConfVal([string]$key) {
     $blank = [char[]]@([char]32, [char]9)
     try {
         if ([IO.File]::Exists($path)) {
-            foreach ($line in (Read-HeadB $path 4096).Split([char]10)) {
+            $text = Read-HeadB $path 4096
+            # A UTF-8 BOM at the start of the file is dropped (TDS_AGENT_ALERTS
+            # section 6.7; conf_val).
+            if ($text.StartsWith([string][char]0xEF + [char]0xBB + [char]0xBF, $Ord)) { $text = $text.Substring(3) }
+            foreach ($line in $text.Split([char]10)) {
                 $e = $line.IndexOf('=')
                 if ($e -lt 0 -or $line.Substring(0, $e).Trim($blank) -cne $key) { continue }
                 $v = $line.Substring($e + 1).Replace([string][char]13, '')

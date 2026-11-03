@@ -1838,14 +1838,17 @@ state_json() { # running|waiting|done -> ,"terminalSequence":... or nothing
 
 # --- permission flow -------------------------------------------------------
 
-# The value of key $1 in agent-hook.conf (section 9.2 D21, its first 4 KiB):
-# the first line `key=value` of that key decides, blanks allowed around the
-# line and the `=`. From the value a CR, a comment (from the first `#`), the
+# The value of key $1 in agent-hook.conf (section 9.2 D21, its first 4 KiB;
+# a UTF-8 BOM at the start of the file is dropped, TDS_AGENT_ALERTS section
+# 6.7): the first line `key=value` of that key decides, blanks allowed
+# around the line and the `=`. From the value a CR, a comment (from the first `#`), the
 # blanks around it and one pair of quotes around all of it are taken away
 # (`usage_ask = "off"  # never`). Empty: the default.
 conf_val() { # key
   [ -f "$ST_DIR/agent-hook.conf" ] || return 0
-  head -c 4096 "$ST_DIR/agent-hook.conf" 2>/dev/null | awk -v k="$1" -v q="'" '{
+  head -c 4096 "$ST_DIR/agent-hook.conf" 2>/dev/null | awk -v k="$1" -v q="'" '
+  NR == 1 && substr($0, 1, 3) == "\357\273\277" { $0 = substr($0, 4) }
+  {
     i = index($0, "="); if (!i) next
     kk = substr($0, 1, i - 1); gsub(/^[ \t]+|[ \t]+$/, "", kk)
     if (kk != k) next
