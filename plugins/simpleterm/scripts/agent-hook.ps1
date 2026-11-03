@@ -1937,15 +1937,74 @@ function Invoke-VerChild($job) {
     Remove-FileQ ($vc + '.lock')
 }
 
+# A JSON line -> the string value of its top-level key "version", or ''
+# (TOP_VERSION in agent-hook.sh).
+function Get-TopVersion([string]$s) {
+    $last = $s.LastIndexOf('"version"', [StringComparison]::Ordinal)
+    if ($last -lt 0) { return '' }
+    # Scanned up to just past the last "version" (no key there after it).
+    $n = [Math]::Min($s.Length, $last + 80)
+    $marks = [char[]]@([char]34, [char]123, [char]125, [char]91, [char]93, [char]58, [char]44)
+    $d = 0
+    $st = ''
+    $key = ''
+    $i = 0
+    while ($i -lt $n) {
+        $i = $s.IndexOfAny($marks, $i, $n - $i)
+        if ($i -lt 0) { break }
+        $c = $s[$i]
+        if ($c -eq [char]34) {
+            # A string: to its closing quote (one not escaped).
+            $j = $i + 1
+            while ($true) {
+                if ($j -ge $n) { return '' }
+                $j = $s.IndexOfAny([char[]]@([char]34, [char]92), $j, $n - $j)
+                if ($j -lt 0) { return '' }
+                if ($s[$j] -eq [char]92) { $j += 2; continue }
+                break
+            }
+            if ($d -eq 1 -and $st -ceq 'k') { $key = $s.Substring($i + 1, $j - $i - 1) }
+            elseif ($d -eq 1 -and $st -ceq 'v' -and $key -ceq 'version') { return $s.Substring($i + 1, $j - $i - 1) }
+            $i = $j + 1
+            continue
+        }
+        if ($c -eq [char]123 -or $c -eq [char]91) {
+            $d++
+            if ($d -eq 1) { if ($c -eq [char]123) { $st = 'k' } else { $st = '' } }
+        } elseif ($c -eq [char]125 -or $c -eq [char]93) {
+            $d--
+            if ($d -lt 1) { return '' }
+        } elseif ($d -eq 1 -and $c -eq [char]58) {
+            $st = 'v'
+        } elseif ($d -eq 1 -and $c -eq [char]44) {
+            $st = 'k'
+            $key = ''
+        }
+        $i++
+    }
+    return ''
+}
+
 # AV and AVS: the agent's version and where it came from (section 10.1).
 function Get-AgentVersion {
     $Script:AV = ''
     $Script:AVS = ''
     if ($Script:Agent -ceq 'claude') {
+        # The top-level "version" of the last transcript line that has one,
+        # in the last 256 KiB (the first line there cut unless the file is
+        # shorter): not a "version" inside a tool result or message.
         $vf = Get-InputFile $Script:TPath
         if ($vf) {
-            $ms = [regex]::Matches((Read-TailB $vf 65536), '"version" *: *"([0-9][0-9A-Za-z.+_-]*)"')
-            if ($ms.Count -gt 0) { $Script:AV = $ms[$ms.Count - 1].Groups[1].Value }
+            $cut = $false
+            try { $cut = ((New-Object IO.FileInfo $vf).Length -gt 262144) } catch { }
+            $lines = (Read-TailB $vf 262144).Split([char]10)
+            $first = 0
+            if ($cut) { $first = 1 }
+            for ($j = $lines.Length - 1; $j -ge $first; $j--) {
+                if (-not $lines[$j].Contains('"version"')) { continue }
+                $v = Get-TopVersion $lines[$j]
+                if ($v) { $Script:AV = $v; break }
+            }
         }
         $Script:AVS = 'transcript'
     } elseif ($Script:Agent -ceq 'codex') {

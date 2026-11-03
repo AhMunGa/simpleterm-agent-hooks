@@ -1455,15 +1455,59 @@ ver_cache() { # executable-name
   ) </dev/null >/dev/null 2>&1 &
 }
 
+# JSON lines -> the string value of the top-level key "version" of the last
+# line that has one (cut=1: the first line is a partial one, skipped).
+TOP_VERSION='
+function topver(s,   n, i, c, d, ins, esc, st, key, ks) {
+  # Scanned up to just past the last "version" (no key there after it).
+  n = length(s); i = 0
+  while ((c = index(substr(s, i + 1), "\"version\"")) > 0) i += c
+  if (!i) return ""
+  if (n > i + 79) n = i + 79
+  d = 0; ins = 0; esc = 0; st = ""; key = ""
+  for (i = 1; i <= n; i++) {
+    c = substr(s, i, 1)
+    if (ins) {
+      if (esc) esc = 0
+      else if (c == "\\") esc = 1
+      else if (c == "\"") {
+        ins = 0
+        if (d == 1 && st == "k") key = substr(s, ks, i - ks)
+        else if (d == 1 && st == "v" && key == "version") return substr(s, ks, i - ks)
+      }
+      continue
+    }
+    if (c == "\"") { ins = 1; ks = i + 1 }
+    else if (c == "{" || c == "[") { d++; if (d == 1) st = (c == "{") ? "k" : "" }
+    else if (c == "}" || c == "]") { d--; if (d < 1) return "" }
+    else if (d == 1 && c == ":") st = "v"
+    else if (d == 1 && c == ",") { st = "k"; key = "" }
+  }
+  return ""
+}
+{ L[NR] = $0 }
+END {
+  for (j = NR; j > cut; j--) {
+    if (!index(L[j], "\"version\"")) continue
+    v = topver(L[j])
+    if (v != "") { print v; exit }
+  }
+}'
+
 # AV and AVS: the agent's version and where it came from (section 10.1).
 v2_version() {
   AV='' AVS=''
   case $AGENT in
     claude)
+      # The top-level "version" of the last transcript line that has one, in
+      # the last 256 KiB (the first line there cut unless the file is
+      # shorter): not a "version" inside a tool result or message.
       vf=$(input_file "$TPATH")
-      [ -n "$vf" ] && AV=$(tail -c 65536 "$vf" 2>/dev/null | awk '
-        { s = $0; while (match(s, /"version"[ ]*:[ ]*"[0-9][0-9A-Za-z.+_-]*"/)) { v = substr(s, RSTART, RLENGTH - 1); s = substr(s, RSTART + RLENGTH); sub(/.*"/, "", v) } }
-        END { print v }')
+      if [ -n "$vf" ]; then
+        vz=$(wc -c 2>/dev/null <"$vf" | tr -d ' ')
+        is_uint "$vz" || vz=0
+        AV=$(tail -c 262144 "$vf" 2>/dev/null | awk -v cut=$((vz > 262144)) "$TOP_VERSION" 2>/dev/null)
+      fi
       AVS=transcript
       ;;
     codex)
