@@ -3904,6 +3904,51 @@ def t_v2_held(s):
         state(agent.pid, status="idle", waiting_for=None, at=1793232009000)
         finished(agent, 15)
         (run / ("perm.held-1.%d" % os.getpid())).unlink()
+        # A window first written well after the hook started is not taken for its own: the user may
+        # have answered this request and the next prompt come (TDS section 4.6).
+        setup(["held"])
+        agent, hook = start(at=int(time.time() + 30) * 1000)
+        done, out = finished(agent, 20)
+        s.check("held: a window recorded after the hook's start + 2 s is not its own: not told again",
+                done and len(perms()) == 1, "%d %s" % (len(perms()), s.log_text()[-200:]))
+        # Two tunnels hold it: one round is one rid for both, sent at once (the slower tunnel's answer
+        # does not hold back the other's copy; its link file sorts first).
+        tun2, tctl2 = s.spawn_mock()
+        try:
+            link_s = {"id": "b9" * 16, "secret": "c8" * 32, "enc": "d7" * 32, "mac": "e6" * 32, "label": "dev-box"}
+            s.setup([(link_s, {"kind": "tunnel", "relay_url": tctl2.url, "fmt": 2}), (LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})],
+                    conf={"claude_wait": 40})
+            for ctl, link, delay in ((tctl2, link_s, 3), (tctl, LINK_T, 0)):
+                ctl("/_ctl/reset", {})
+                ctl("/_ctl/config", {"links": {link["id"]: dict(link, unknown_error="unknown", max_body=65536, push="held", ingest_delay=delay)}})
+            shutil.rmtree(sessions, ignore_errors=True)
+            sessions.mkdir(parents=True)
+            agent, hook = start()
+            def both():
+                a = [r for r in tctl2("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and r["body"]["ev"] == "permission"]
+                b = perms()
+                return (a, b) if len(a) >= 2 and len(b) >= 2 else None
+            got = wait_for(both, 25)
+            state(agent.pid, status="idle", waiting_for=None, at=1793232009000)
+            finished(agent, 20)
+            if got:
+                a, b = got
+                s.check("held: two tunnels: one rid a round for both, a nonce each",
+                        a[1]["body"]["rid"] == b[1]["body"]["rid"] and a[1]["body"]["rid"] != a[0]["body"]["rid"]
+                        and (a[1].get("plain_json") or {}).get("nonce") != (b[1].get("plain_json") or {}).get("nonce"), str([a[1]["body"]["rid"], b[1]["body"]["rid"]]))
+                s.check("held: two tunnels: sent at once (the slow tunnel does not delay the other)",
+                        abs(a[1]["received"] - b[1]["received"]) < 1.5, "%.2f s apart" % abs(a[1]["received"] - b[1]["received"]))
+            else:
+                s.check("held: two tunnels: both told again", False, "%d %d" % (len(perms()), len(tctl2("/_ctl/records")["records"])))
+        finally:
+            tun2.terminate()
+            tun2.wait(5)
+        # Codex hides its prompt while a hook waits (hidden): even a held answer is not told again.
+        setup(["held"])
+        codex = json.dumps({"session_id": "held-1", "turn_id": "t1", "transcript_path": None, "cwd": "/w/repo", "hook_event_name": "PermissionRequest",
+                            "tool_name": "Bash", "tool_input": {"command": "make"}})
+        rc, out, err, el = s.run("codex", codex)
+        s.check("held: a Codex (hidden) request is not told again", len(perms()) == 1 and el < 15, "%d %.1fs" % (len(perms()), el))
         if s.kind == "sh":
             # No ps (some containers): the agent's pid from /proc instead (Linux).
             nops = s.tmp / "nops"
@@ -4095,6 +4140,10 @@ def t_v2_sessions(s):
     rc, out, err, el = s.run("codex", cev("SessionEnd", reason="other"), env)
     s.check("session: codex .ended at SessionEnd, nothing printed",
             (cd / (cx + ".json")).exists() and (cd / (cx + ".ended")).exists() and out.strip() == "" and el < 3, "%r %.2fs" % (out, el))
+    # Quit before any prompt: SessionEnd only, no record, no lone mark (the keep counts records).
+    nr = "019a5c3e-0000-7000-8000-00000000beef"
+    s.run("codex", json.dumps({"session_id": nr, "transcript_path": None, "cwd": "/w/repo", "hook_event_name": "SessionEnd", "reason": "other"}), env)
+    s.check("session: no .ended for a session without a record", not (cd / (nr + ".ended")).exists())
     shutil.rmtree(cd, ignore_errors=True)  # the retention case below counts every agent's records
     s.run("claude", json.dumps({"session_id": "s:1", "cwd": "/w", "hook_event_name": "UserPromptSubmit", "prompt": "x"}), env)
     name = hashlib.sha256(b"s:1").hexdigest()[:32]

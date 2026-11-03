@@ -2393,6 +2393,9 @@ function Start-Sess {
 # event (it was resumed meanwhile: a late end must not mark it ended).
 function Stop-Sess([DateTime]$since) {
     if (-not (Test-SessOk)) { return }
+    # Not for a session without a record (Codex quit before any prompt): the
+    # keep counts records, and a lone mark would stay.
+    if (-not [IO.File]::Exists($Script:Sess + '.json') -and -not [IO.File]::Exists($Script:Sess + '.beat')) { return }
     try {
         if ([IO.File]::Exists($Script:Sess + '.beat') -and [IO.File]::GetLastWriteTimeUtc($Script:Sess + '.beat') -gt $since) { return }
     } catch { }
@@ -4125,7 +4128,7 @@ function Step-RqPoll($L, [int64]$deadline, [int64]$pollWait) {
 # (statusUpdatedAt unchanged), and no other permission hook of this session
 # waits on that same window (Get-RqAlone) (rq_window).
 function Get-RqWindow([int]$agentPid) {
-    if ($Script:Agent -cne 'claude' -or $agentPid -le 0) { return 1 }
+    if ($Script:Agent -cne 'claude' -or $agentPid -le 0 -or -not $Script:RqMark) { return 1 }
     $dir = $env:CLAUDE_CONFIG_DIR
     if (-not $dir) { $dir = Join-Path $HOME '.claude' }
     $kv = Get-JsonKV (Read-HeadB (Join-Path (Join-Path $dir 'sessions') ([string]$agentPid + '.json')) 8192) @('sessionId', 'status', 'waitingFor', 'statusUpdatedAt')
@@ -4139,6 +4142,10 @@ function Get-RqWindow([int]$agentPid) {
     $open = ($Script:RawSid -and $wsid -ceq $Script:RawSid -and $wst -ceq 'waiting' -and $wfor -ceq 'permission prompt')
     if (-not $Script:RqWat) {
         if (-not $open) { return 2 }
+        # The window shown when the hook started (it starts 5 to 45 ms after
+        # Claude records it, 3 ms before at the earliest [measured 2.1.316]): a
+        # later one may come after the user answered this request.
+        if ([int64]$wat -gt ($Script:RqStart + 2) * 1000) { return 1 }
         $Script:RqWat = $wat
         if ($Script:RqMark) { [void](Write-FileB $Script:RqMark ($wat + "`n")) }
     }
@@ -4166,7 +4173,7 @@ function Get-RqAlone {
             if (-not $mv) { $ra = 2; continue }
             if ($mv -ceq $Script:RqWat) { return 1 }
         }
-    } catch { }
+    } catch { return 2 }
     return $ra
 }
 
@@ -4180,6 +4187,11 @@ function Get-RqAlone {
 function Test-RqHeld($links, [int64]$start, [int]$agentPid) {
     $held = @($links | Where-Object { $_.held })
     if ($held.Count -eq 0) { return $false }
+    if ($Script:Agent -cne 'claude') {
+        Write-Log ('held: no record of ' + $Script:Agent + "'s window to tell it by (stop)")
+        foreach ($L in $held) { $L.held = $false }
+        return $false
+    }
     if ([DateTime]::UtcNow -lt $Script:RqHeldNext) { return $true }
     $Script:RqHeldNext = [DateTime]::UtcNow.AddSeconds(1)
     $hw = Get-RqWindow $agentPid
@@ -4203,9 +4215,52 @@ function Test-RqHeld($links, [int64]$start, [int]$agentPid) {
     Update-Spec ($Script:V2X + '@.tms' + $Tab + 's' + $Tab + (Get-Tms) + $Nl)
     $nr = New-RandomHex 8
     if (-not (Test-Hex $nr 16)) { return $true }
-    foreach ($L in $held) { Write-Log ('held link-' + $L.i + ': again') }
-    Send-RqPass $held 'tunnel' $true '' $Script:RqEv 5 $nr
-    foreach ($L in $held) { Start-RqPoll $L }
+    # Every tunnel's event is sealed first, so that the check below comes right
+    # before the sends (section 4.6, the delta's grounds).
+    $preps = New-Object 'System.Collections.Generic.List[object]'
+    $Script:WaitOv = ''
+    $Script:IngMt = '5'
+    foreach ($L in $held) {
+        $link = Read-Link $L.f
+        if ($null -eq $link) { $L.held = $false; continue }
+        $rn = New-RandomHex 16
+        if ($env:SIMPLETERM_HOOK_TEST -eq '1' -and $env:SIMPLETERM_HOOK_TEST_NONCE) { $rn = $env:SIMPLETERM_HOOK_TEST_NONCE }
+        if (-not (Test-Hex $rn 32)) { continue }
+        $prep = New-Ingest $link $nr $Script:RqEv $rn
+        if ($prep.seal) { continue }
+        $preps.Add(@{ L = $L; link = $link; prep = $prep; rn = $rn })
+    }
+    $Script:IngMt = ''
+    if ($preps.Count -eq 0) { return $true }
+    # Answered at the terminal, or the agent gone: not sent; the main loop ends
+    # the request with what it finds. Then the window, at once before the sends.
+    if (Test-AnsweredLocally $start $Script:Fp) { return $true }
+    if ($agentPid -gt 0 -and $null -eq (Get-Process -Id $agentPid -ErrorAction SilentlyContinue)) { return $true }
+    $hw = Get-RqWindow $agentPid
+    if ($hw -eq 2) { return $true }
+    if ($hw -ne 0) {
+        Write-Log 'held: the window is not open (stop)'
+        foreach ($L in $held) { $L.held = $false }
+        return $false
+    }
+    # One round, one rid, to every tunnel at once: the app judges the first
+    # copy that comes.
+    $ops = @()
+    foreach ($p in $preps) {
+        Write-Log ('held link-' + $p.L.i + ': again')
+        $ops += @{ p = $p; op = (Start-IngestOp $p.prep) }
+    }
+    foreach ($o in $ops) {
+        $r = Complete-Ingest $o.op
+        $L = $o.p.L
+        $fmt = '1'
+        if ($o.p.link.fmt -ceq '2') { $fmt = '2' }
+        $L.st = @{ push = $r.push; nonce = $o.p.rn; rid = $nr; dec = $true; kind = 'tunnel'; code = $r.code; fmt = $fmt }
+        $L.meta = $o.p.prep.meta
+        $L.link = $o.p.link
+        $L.held = ($r.code -ceq '200' -and $r.held -and $r.push -ceq 'suppressed' -and $fmt -ceq '2')
+        Start-RqPoll $L
+    }
     return $true
 }
 
@@ -4279,6 +4334,7 @@ function Invoke-RequestFlow([string]$ev, [string]$mode) {
         $links += @{ i = $n; f = $f; st = $null; meta = $null; link = $null; n = 0; waiting = $false; poll = $null; held = $false }
     }
     $Script:RqAgain = $start + 5
+    $Script:RqStart = $start
     $Script:RqWat = ''
     $Script:RqMiss = 0
     $Script:RqHeldNext = [DateTime]::MinValue
@@ -5543,6 +5599,12 @@ function Invoke-Event {
         # The record first: Codex gives this hook 3 seconds at most and then
         # ends it (0.165.0, measured).
         Stop-Sess $since
+        if ($Script:Agent -ceq 'codex') {
+            # Codex ends a SessionEnd hook past 3 seconds and keeps the children of
+            # one that ended in time (0.165.0, measured): the send goes to a child.
+            Send-State 'ended' ''
+            return
+        }
         # The agent is exiting and may take its hooks' children with it: the
         # send finishes first (here, not in a child).
         Send-State 'ended' '' -Sync
