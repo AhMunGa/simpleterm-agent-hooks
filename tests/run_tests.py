@@ -1630,7 +1630,7 @@ COMPACT_LINE = json.dumps({"parentUuid": None, "isSidechain": False, "type": "sy
                                                                                      "postTokens": 42000}}, separators=(",", ":"))
 
 
-def codex_token_line(total=15159, window=258400, rl=True, reached=None):
+def codex_token_line(total=15159, window=258400, rl=True, reached=None, ts="2026-11-03T01:02:03.456Z"):
     rate = None
     if rl:
         rate = {"limit_id": "codex", "limit_name": None,
@@ -1641,7 +1641,7 @@ def codex_token_line(total=15159, window=258400, rl=True, reached=None):
                                        "last_token_usage": {"input_tokens": total - 159, "cached_input_tokens": 0,
                                                             "output_tokens": 159, "total_tokens": total},
                                        "model_context_window": window}
-    return json.dumps({"timestamp": "t", "ordinal": 1, "type": "event_msg",
+    return json.dumps({"timestamp": ts, "ordinal": 1, "type": "event_msg",
                        "payload": {"type": "token_count", "info": info, "rate_limits": rate}}, separators=(",", ":"))
 
 
@@ -1910,8 +1910,8 @@ def t_usage_statusline(s):
                                " lim=five_hour:23.5:300:4102444800 lim=seven_day:41.2:10080:4102444800\x07"), repr(out))
     rec = wait_for(lambda: ingests(s, "usage"), 20)
     s.check("statusline: limits in the event", rec and rec[0]["plain_json"].get("lims") == [
-        {"id": "five_hour", "pct": 23.5, "win_min": 300, "resets_at": 4102444800},
-        {"id": "seven_day", "pct": 41.2, "win_min": 10080, "resets_at": 4102444800}], str(rec[0].get("plain_json") if rec else None))
+        {"id": "five_hour", "pct": 23.5, "win_min": 300, "resets_at": 4102444800, "src": "statusline"},
+        {"id": "seven_day", "pct": 41.2, "win_min": 10080, "resets_at": 4102444800, "src": "statusline"}], str(rec[0].get("plain_json") if rec else None))
     old = "1000\n" + json.dumps(STATUSLINE) + "\n"
     saved.write_text(old)
     rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-claude", "transcript_path": str(tr), "hook_event_name": "PostCompact"}),
@@ -2007,9 +2007,11 @@ def t_usage_codex(s):
     p = rec[0].get("plain_json", {}) if rec else {}
     s.check("usage codex: rollout context, window, baseline",
             p.get("ctx") == {"used": 15159, "win": 258400, "baseline": 12000, "src": "rollout"} and p.get("app") == "codex", str(p))
+    # Section 9.1: the rollout is a file source; at is the token_count record's time.
     s.check("usage codex: limits and plan", p.get("lims") == [
-        {"id": "codex.primary", "pct": 4.0, "win_min": 300, "resets_at": 1795746291},
-        {"id": "codex.secondary", "pct": 12.5, "win_min": 10080, "resets_at": 1796000000}] and p.get("plan") == "plus", str(p))
+        {"id": "codex.primary", "pct": 4.0, "win_min": 300, "resets_at": 1795746291, "src": "file", "at": 1793667723},
+        {"id": "codex.secondary", "pct": 12.5, "win_min": 10080, "resets_at": 1796000000, "src": "file", "at": 1793667723}]
+            and p.get("plan") == "plus", str(p))
     s.check("usage codex: done still sent", wait_for(lambda: ingests(s, "done"), 20))
     tun, tctl = s.spawn_mock()
     try:
@@ -2655,7 +2657,8 @@ def replies(calls):
 
 V2_DIR = HERE / "fixtures" / "v2"
 V2_RID = "0123456789abcdef"
-V2_PIN = {"SIMPLETERM_HOOK_TEST": "1", "SIMPLETERM_HOOK_TEST_RID": V2_RID, "SIMPLETERM_HOOK_TEST_NONCE": V_NONCE,
+V2_URID = "a1b2c3d4e5f60718"
+V2_PIN = {"SIMPLETERM_HOOK_TEST": "1", "SIMPLETERM_HOOK_TEST_RID": V2_RID, "SIMPLETERM_HOOK_TEST_URID": V2_URID, "SIMPLETERM_HOOK_TEST_NONCE": V_NONCE,
           "SIMPLETERM_HOOK_TEST_TS": V_TS, "SIMPLETERM_HOOK_TEST_TMS": V_TS + "123", "SIMPLETERM_HOOK_TEST_IV": V_IV}
 V2_LINK_NAMES = {LINK_A["id"][:8]: "relay1", LINK_B["id"][:8]: "relay2", LINK_T["id"][:8]: "tunnel"}
 # The agents each runtime serves (the PowerShell hook: Claude Code, Grok Build, Codex).
@@ -2690,7 +2693,13 @@ def v2_run_case(s, case, conf=None, want_n=0):
             tctl("/_ctl/reset", {})
             tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, push="suppressed", unknown_error="unknown", max_body=65536)}})
         for name, text in case.get("files", {}).items():
-            (s.home / name).write_text(text)
+            # NOWEPOCH: the time of the run (a tunnel's last answer that must be recent).
+            write(s.home / name, text.replace("HOMEP", str(s.home)).replace("NOWEPOCH", str(int(time.time()))))
+        for name, text in case.get("bins", {}).items():
+            # Stand-in agents for usage asks, in the hook's PATH.
+            b = s.bin / name
+            b.write_text(text)
+            b.chmod(0o755)
         dump = s.tmp / "plain"
         shutil.rmtree(dump, ignore_errors=True)
         dump.mkdir()
@@ -2706,8 +2715,8 @@ def v2_run_case(s, case, conf=None, want_n=0):
             env.update(st.get("env", {}))
             rc, out, err, el = s.run(st["args"][0], inp, env, args=st["args"][1:])
             outs.append(out)
-        quiet = 4 if s.kind == "ps1" else 1.5
-        wait_for(lambda: len([f for f in dump.iterdir() if f.name.split(".")[2:3] == [V2_RID]]) >= want_n, 30, 0.2)
+        quiet = max(case.get("quiet", 0), 4 if s.kind == "ps1" else 1.5)
+        wait_for(lambda: len([f for f in dump.iterdir() if f.name.split(".")[2] in (V2_RID, V2_URID)]) >= want_n, 30, 0.2)
         last = [-1, time.time()]
 
         def settled():
@@ -2723,7 +2732,7 @@ def v2_run_case(s, case, conf=None, want_n=0):
         pv = '"pv":"%s"' % re.search(r"^HOOK_VERSION=([0-9.]+)$", HOOK_SH.read_text(), re.M).group(1)
         for f in dump.iterdir():
             link, ev, rid = f.name.split(".")[:3]
-            if rid == V2_RID:
+            if rid in (V2_RID, V2_URID):
                 text = f.read_bytes().decode("utf-8", "replace").replace(pv, '"pv":"@PV@"')
                 got.append("%s %s %s" % (V2_LINK_NAMES.get(link, link), ev, text))
         return sorted(got), outs
@@ -2894,6 +2903,224 @@ def t_v2_input_drain(s):
         p.stdin = None
         out, err = p.communicate(timeout=90)
         s.check("input drain %s: 1 MiB written to the end, exit 0" % agent, not broken and p.returncode == 0, "broken=%s rc=%s" % (broken, p.returncode))
+
+
+COPILOT_QUOTA_LINE = json.dumps({"type": "model.model_call_success", "id": "e9", "timestamp": "2026-11-03T01:02:03.456Z", "parentId": None, "data": {
+    "model": "gpt-x", "quotaSnapshots": {
+        "chat": {"isUnlimitedEntitlement": False, "entitlementRequests": 200, "usedRequests": 4, "remainingPercentage": 97.9, "resetDate": "2026-12-01T00:00:00Z"},
+        "completions": {"isUnlimitedEntitlement": False, "entitlementRequests": 2000, "usedRequests": 0, "remainingPercentage": 100, "resetDate": "2026-12-01T00:00:00Z"},
+        "premium_interactions": {"isUnlimitedEntitlement": False, "entitlementRequests": 0, "usedRequests": 0, "remainingPercentage": 0, "resetDate": "2026-12-01T00:00:00Z"},
+        "unlimited_thing": {"isUnlimitedEntitlement": True, "entitlementRequests": 50, "remainingPercentage": 10, "resetDate": "2026-12-01T00:00:00Z"}}}},
+    separators=(",", ":"))
+
+
+def t_v2_usage(s):
+    """Section 9.1 and 9.3: the usage event's v2 fields from the file sources (Codex rollout src/at, Copilot
+    events.jsonl quotaSnapshots, Grok usage.json and OpenCode cost), to the tunnel only."""
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2}), (LINK_A, {"fmt": 2, "push": "disabled"})])
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown")}})
+
+        def usage():
+            tctl("/_ctl/reset", {})
+            return lambda: [r.get("plain") for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and r["body"]["ev"] == "usage"]
+        if s.kind == "sh":
+            # Copilot (sh only): the newest model call's quota; items unlimited or without requests are left out.
+            ev = write(s.tmp / "cop" / "events.jsonl", COPILOT_QUOTA_LINE + "\n")
+            got = usage()
+            s.run("copilot", json.dumps({"hookName": "agentStop", "sessionId": "cp1", "cwd": "/w/c", "transcriptPath": str(ev)}))
+            u = wait_for(got, 20)
+            p = json.loads(u[0]) if u else {}
+            s.check("usage copilot: chat and completions, pct 100 less remaining, a month's window, file, at",
+                    p.get("lims") == [{"id": "copilot.chat", "pct": 2.1, "win_min": 43200, "resets_at": 1796083200, "src": "file", "at": 1793667723},
+                                      {"id": "copilot.completions", "pct": 0, "win_min": 43200, "resets_at": 1796083200, "src": "file", "at": 1793667723}]
+                    and "ctx" not in p and p.get("fmt") == 2, str(p)[:400])
+            # OpenCode (sh only): the session's tokens and cost from the bridge.
+            got = usage()
+            s.run("opencode", json.dumps({"hook_event_name": "Stop", "session_id": "ses_c", "cwd": "/w/o", "oc": "2", "last_assistant_message": "t",
+                                          "cost": 0.0123456789, "tokens_in": 12800, "tokens_out": 3400}))
+            u = wait_for(got, 20)
+            s.check("usage opencode: cost (micro-USD, cut), tokens, session", u and u[0].endswith(
+                ',"cost":{"usd":0.012345,"tok_in":12800,"tok_out":3400,"scope":"session"},"ts":%s}' % json.loads(u[0])["ts"]), str(u)[:400])
+        # Grok: usage.json of its session (costUsdTicks 10^-10 USD each).
+        sd = s.home / ".grok" / "sessions" / "%2Fw%2Fgrokproj" / "gk-1"
+        write(sd / "usage.json", json.dumps({"sessionId": "gk-1", "session": {"inputTokens": 34380, "outputTokens": 93, "costUsdTicks": 303420000}}))
+        got = usage()
+        inp, env = grok_input("Stop", reason="end_turn", promptId="p1", stopHookActive=False, lastAssistantMessage="Grok done.")
+        s.run("claude", inp, env)
+        u = wait_for(got, 20)
+        p = json.loads(u[0]) if u else {}
+        s.check("usage grok: cost from usage.json, no limits", p.get("cost") == {"usd": 0.030342, "tok_in": 34380, "tok_out": 93, "scope": "session"}
+                and "lims" not in p and "ctx" not in p, str(p)[:300])
+        s.check("usage: not to the relay", not [r for r in s.records("/v1/ingest") if r["body"]["ev"] == "usage"])
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+
+# A stand-in Claude Code for the usage ask: answers get_usage with the reply in $ST_REPLY (or none), counts its
+# runs, notes its environment and folder, and waits for its input to end, as the real one does.
+FAKE_ASKER = """#!/bin/sh
+d=${0%/*}/..
+n=$(cat "$d/asks" 2>/dev/null || echo 0)
+echo $((n + 1)) >"$d/asks"
+echo "probe=${SIMPLETERM_PROBE:-} simpleterm=${SIMPLETERM:-} pwd=$(pwd)" >"$d/ask.env"
+read -r l
+[ -f "$d/reply" ] && cat "$d/reply"
+[ -f "$d/reply2" ] && { read -r l2; read -r l3; cat "$d/reply2"; }
+cat >/dev/null
+"""
+
+
+def t_v2_usage_ask(s):
+    """Section 9.2: the usage ask — only while the app is connected (a tunnel's last event an HTTP 200 within 10
+    minutes), after a turn, every 5 minutes at most, SIMPLETERM_PROBE=1 and ~/.simpleterm/probe, the answer to the
+    tunnel as src ask with uq, no ask again after a failed sign-in until the credentials change, usage_ask=off, and
+    only for the measured agent versions."""
+    tun, tctl = s.spawn_mock()
+    try:
+        tr = write(s.tmp / "tr.jsonl", json.dumps({"type": "user", "version": "2.1.316", "message": {"role": "user", "content": "x"}}) + "\n")
+        stop = cc_event("sk1", "Stop", stop_hook_active=False, last_assistant_message="Done.", background_tasks=[], session_crons=[], transcript_path=str(tr))
+        run = s.home / ".simpleterm" / "run"
+        fake = s.bin / "claude"
+        # The session of every measured ask: no model spend (section 9.2 gate).
+        sess = {"total_cost_usd": 0, "total_api_duration_ms": 0, "total_duration_ms": 0, "total_lines_added": 0, "total_lines_removed": 0, "model_usage": {}}
+        ok = {"type": "control_response", "response": {"subtype": "success", "request_id": "1", "response": {"session": sess,
+            "subscription_type": "max", "rate_limits_available": True, "rate_limits": {
+                "five_hour": None, "seven_day": {"utilization": 12.5, "resets_at": "2026-11-10T00:00:00.000Z"},
+                "model_scoped": [{"display_name": "Opus 5", "utilization": 40, "resets_at": "2026-11-10T00:00:00Z"}]}}}}
+
+        def setup(reply=None, live=True, code=200, age=0, conf=None):
+            s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2}), (LINK_A, {"fmt": 2, "push": "disabled"})], conf=conf)
+            tctl("/_ctl/reset", {})
+            tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown")}})
+            for f in ("asks", "ask.env", "reply"):
+                (s.tmp / f).unlink() if (s.tmp / f).exists() else None
+            for f in run.glob("ask.*"):
+                f.unlink()
+            if reply is not None:
+                (s.tmp / "reply").write_text(json.dumps(reply, separators=(",", ":")) + "\n")
+            run.mkdir(parents=True, exist_ok=True)
+            last = run / ("tun.%s.last" % LINK_T["id"][:8])
+            if live:
+                last.write_text("%d %d\n" % (int(time.time()) - age, code))
+            elif last.exists():
+                last.unlink()
+            fake.write_text(FAKE_ASKER)
+            fake.chmod(0o755)
+
+        def asks():
+            return int((s.tmp / "asks").read_text()) if (s.tmp / "asks").exists() else 0
+
+        def ask_events():
+            return [json.loads(r["plain"]) for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and r["body"]["ev"] == "usage"]
+        setup(ok)
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        u = wait_for(ask_events, 25)
+        p = u[0] if u else {}
+        s.check("ask claude: src ask with its time, the model window, plan, uq ok",
+                [(x["id"], x.get("src"), x.get("at") == p.get("ts")) for x in p.get("lims", [])] == [("seven_day", "ask", True), ("seven_day.Opus-5", "ask", True)]
+                and p.get("plan") == "max" and p.get("uq") == {"src": "ask", "at": p.get("ts"), "ok": True}, str(p)[:500])
+        s.check("ask: not to the relay", not [r for r in s.records("/v1/ingest") if r["body"]["ev"] == "usage"])
+        env = (s.tmp / "ask.env").read_text() if (s.tmp / "ask.env").exists() else ""
+        probe = s.home / ".simpleterm" / "probe"
+        s.check("ask: SIMPLETERM_PROBE=1, not a SimpleTerm session, in ~/.simpleterm/probe (700)",
+                "probe=1 simpleterm= " in env and env.strip().endswith("/.simpleterm/probe")
+                and (s.kind != "sh" or oct(probe.stat().st_mode & 0o777) == "0o700"), env)
+        # Five minutes at most per agent and settings folder.
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        time.sleep(3)
+        s.check("ask: not again within 5 minutes", asks() == 1, str(asks()))
+        # The hook run by an ask does nothing.
+        rc, out, err, el = s.run("claude", stop, {"SIMPLETERM": "1", "SIMPLETERM_PROBE": "1"})
+        s.check("ask: a hook with SIMPLETERM_PROBE=1 does nothing", rc == 0 and out == "" and "probe" not in s.log_text()[-200:], out)
+        # Only while the app is connected.
+        for name, kw in (("no tunnel event", {"live": False}), ("the last one 11 minutes ago", {"age": 660}), ("the last one failed", {"code": 0})):
+            setup(ok, **kw)
+            s.run("claude", stop, {"SIMPLETERM": "1"})
+            time.sleep(2.5)
+            s.check("ask: not asked, app not connected (%s)" % name, asks() == 0, str(asks()))
+        setup(ok, conf={"usage_ask": "off"})
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        time.sleep(2.5)
+        s.check("ask: usage_ask=off", asks() == 0, str(asks()))
+        # Only the measured versions.
+        for v in ("2.2.0", "2.1.315"):
+            tr.write_text(json.dumps({"type": "user", "version": v, "message": {"role": "user", "content": "x"}}) + "\n")
+            setup(ok)
+            s.run("claude", stop, {"SIMPLETERM": "1"})
+            time.sleep(2.5)
+            s.check("ask: version %s is not asked" % v, asks() == 0, str(asks()))
+        tr.write_text(json.dumps({"type": "user", "version": "2.1.316", "message": {"role": "user", "content": "x"}}) + "\n")
+        # No subscriber limits (API key): uq not-subscriber, no windows.
+        setup({"type": "control_response", "response": {"subtype": "success", "request_id": "1", "response": {"session": sess, "rate_limits_available": False}}})
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        u = wait_for(ask_events, 25)
+        p = u[0] if u else {}
+        s.check("ask: rate_limits_available false -> uq not-subscriber, no lims",
+                p.get("uq", {}).get("err") == "not-subscriber" and p["uq"].get("ok") is False and "lims" not in p, str(p)[:300])
+        # An answer showing model spend: uq failed, and that version is not asked again.
+        spent = json.loads(json.dumps(ok))
+        spent["response"]["response"]["session"]["total_cost_usd"] = 0.0012
+        setup(spent)
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        u = wait_for(ask_events, 25)
+        s.check("ask: an answer with model spend -> uq failed, no windows", u and u[0].get("uq", {}).get("err") == "failed" and "lims" not in u[0], str(u)[:300])
+        for f in [f for f in run.glob("ask.claude.*") if not f.name.endswith((".auth", ".off"))]:
+            f.write_text("%d\n" % (int(time.time()) - 400))
+        (s.tmp / "reply").write_text(json.dumps(ok, separators=(",", ":")) + "\n")
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        time.sleep(2.5)
+        s.check("ask: after model spend, this version is not asked again", asks() == 1, str(asks()))
+        (run / "ask.claude.off").unlink() if (run / "ask.claude.off").exists() else None
+        # A failed sign-in: no ask again until the credentials file changes.
+        setup({"type": "control_response", "response": {"subtype": "error", "request_id": "1", "error": "Not logged in · Please run /login"}})
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        u = wait_for(ask_events, 25)
+        s.check("ask: a failed sign-in -> uq auth", u and u[0].get("uq", {}).get("err") == "auth", str(u)[:300])
+        af = [f for f in run.glob("ask.claude.*") if not f.name.endswith(".auth")]
+        for f in af:
+            f.write_text("%d\n" % (int(time.time()) - 400))
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        time.sleep(2.5)
+        s.check("ask: after a failed sign-in, not again (5 minutes past)", asks() == 1, str(asks()))
+        cred = s.home / ".claude" / ".credentials.json"
+        write(cred, "{}")
+        future = time.time() + 5
+        os.utime(cred, (future, future))
+        for f in af:
+            f.write_text("%d\n" % (int(time.time()) - 400))
+        (s.tmp / "reply").write_text(json.dumps(ok, separators=(",", ":")) + "\n")
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        wait_for(lambda: asks() >= 2, 15)
+        s.check("ask: asked again once the credentials changed", asks() == 2, str(asks()))
+        wait_for(lambda: len(ask_events()) >= 2, 25)
+        # Codex app-server: initialize, initialized, account/rateLimits/read; every limit id, as the rollout makes them.
+        if s.kind == "sh":
+            ro = write(s.tmp / "codex" / "ro.jsonl", json.dumps({"type": "session_meta", "payload": {"cli_version": "0.165.0"}}) + "\n")
+            cfake = s.bin / "codex"
+            cfake.write_text(FAKE_ASKER)
+            cfake.chmod(0o755)
+            snap = lambda lid, p1: {"limitId": lid, "primary": {"usedPercent": p1, "windowDurationMins": 300, "resetsAt": 1795746291},
+                                    "secondary": {"usedPercent": 3, "windowDurationMins": 10080, "resetsAt": 1796000000}, "planType": "plus",
+                                    "rateLimitReachedType": None}
+            setup({"id": 1, "result": {"userAgent": "x"}})
+            (s.tmp / "reply2").write_text(json.dumps({"id": 2, "result": {"rateLimits": snap("codex", 4), "rateLimitsByLimitId": {
+                "codex": snap("codex", 4), "codex_bengalfox": snap("codex_bengalfox", 17)}}}, separators=(",", ":")) + "\n")
+            cstop = json.dumps({"session_id": "cx9", "turn_id": "t", "transcript_path": str(ro), "cwd": "/w/repo", "hook_event_name": "Stop",
+                                "model": "gpt-5.5", "stop_hook_active": False, "last_assistant_message": "Done."})
+            s.run("codex", cstop, {"SIMPLETERM": "1"})
+            u = wait_for(lambda: [x for x in ask_events() if x.get("app") == "codex"], 25)
+            p = u[0] if u else {}
+            s.check("ask codex: each limit id's primary and secondary, src ask, plan",
+                    [(x["id"], x["pct"], x.get("src")) for x in p.get("lims", [])] == [
+                        ("codex.primary", 4, "ask"), ("codex.secondary", 3, "ask"), ("codex_bengalfox.primary", 17, "ask"), ("codex_bengalfox.secondary", 3, "ask")]
+                    and p.get("plan") == "plus" and p.get("uq", {}).get("ok") is True, str(p)[:500])
+            (s.tmp / "reply2").unlink()
+    finally:
+        tun.terminate()
+        tun.wait(5)
 
 
 def t_v2_param_keys(s):
@@ -3720,7 +3947,7 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js,
-         t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_not_sent,
+         t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_not_sent,
          t_v2_state, t_v2_sessions, t_v2_opencode_js, t_copilot_hooks, t_copilot,
          t_v2_versions, t_v2_claude_question_once]
 
