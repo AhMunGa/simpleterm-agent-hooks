@@ -533,5 +533,15 @@
   "stdout": [
    ""
   ]
+ },
+ "claude_bad_utf8": {
+  "plain": [
+   "relay1 permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"claude-code\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"approve Bash: echo   /   /    /   /  가 ok\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"872e63d5-f55f-46fa-93db-a0062d1259fb\",\"req\":{\"id\":\"st-0123456789abcdef\",\"win\":\"shell\",\"tool\":\"Bash\",\"wait\":\"shared\",\"ask\":{\"cmd\":\"echo   /   /    /   /  가 ok\",\"desc\":\"bytes    and    \\nnext line\"},\"can\":[\"allow\",\"deny\"]},\"ts\":1793232000}",
+   "relay2 permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"claude-code\",\"host\":\"box-b\",\"cwd\":\"api\",\"msg\":\"approve Bash: echo   /   /    /   /  가 ok\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"872e63d5-f55f-46fa-93db-a0062d1259fb\",\"req\":{\"id\":\"st-0123456789abcdef\",\"win\":\"shell\",\"tool\":\"Bash\",\"wait\":\"shared\",\"ask\":{\"cmd\":\"echo   /   /    /   /  가 ok\",\"desc\":\"bytes    and    \\nnext line\"},\"can\":[\"allow\",\"allow_scope\",\"deny\",\"deny_reason\"],\"scopes\":[{\"label\":\"Bash(npm test *)\",\"kind\":\"rule\",\"dest\":\"localSettings\"},{\"label\":\"acceptEdits\",\"kind\":\"mode\",\"dest\":\"session\"}]},\"ts\":1793232000}",
+   "tunnel permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"claude-code\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"approve Bash: echo   /   /    /   /  가 ok\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"872e63d5-f55f-46fa-93db-a0062d1259fb\",\"tid\":\"1a533fe1-0f09-4d71-838d-6ff2442e77c3\",\"dir\":\"/home/me/work/api\",\"pm\":\"default\",\"tms\":1793232000123,\"req\":{\"id\":\"st-0123456789abcdef\",\"win\":\"shell\",\"tool\":\"Bash\",\"wait\":\"shared\",\"ask\":{\"cmd\":\"echo   /   /    /   /  가 ok\",\"desc\":\"bytes    and    \\nnext line\"},\"can\":[\"allow\",\"allow_scope\",\"deny\",\"deny_reason\"],\"scopes\":[{\"label\":\"Bash(npm test *)\",\"kind\":\"rule\",\"dest\":\"localSettings\"},{\"label\":\"acceptEdits\",\"kind\":\"mode\",\"dest\":\"session\"}]},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   ""
+  ]
  }
 }

@@ -2877,6 +2877,73 @@
    "conf": {},
    "files": {},
    "note": "1.19.5 with no other request open: affects and others [] all the same (section 4.5)"
+  },
+  {
+   "name": "claude_bad_utf8",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo @@B1@@/@@B2@@/@@B3@@/@@B4@@/@@B5@@ 가 ok",
+       "description": "bytes @@B1@@ and @@B2@@\nnext line"
+      },
+      "permission_suggestions": [
+       {
+        "type": "addRules",
+        "rules": [
+         {
+          "toolName": "Bash",
+          "ruleContent": "npm test *"
+         }
+        ],
+        "behavior": "allow",
+        "destination": "localSettings"
+       },
+       {
+        "type": "addDirectories",
+        "directories": [
+         "/home/me/other"
+        ],
+        "destination": "session"
+       },
+       {
+        "type": "setMode",
+        "mode": "acceptEdits",
+        "destination": "session"
+       }
+      ]
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": "bytes that are not well-formed UTF-8 (overlong, encoded surrogate, past U+10FFFF, bad lead) become spaces, the same in sh and PowerShell",
+   "raw": {
+    "@@B1@@": "c0af",
+    "@@B2@@": "eda080",
+    "@@B3@@": "f4908080",
+    "@@B4@@": "e080af",
+    "@@B5@@": "f8"
+   }
   }
  ]
 }

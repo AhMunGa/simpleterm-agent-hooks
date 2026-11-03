@@ -222,14 +222,14 @@ function hexv(h,   k, v, c) {
       } else if (e == "\"" || e == "\\" || e == "/") unit = c e
       else if (e == "") break
       else unit = " "
-    } else if (c >= "\300") {
-      w = 0
-      if (c < "\340") w = 2; else if (c < "\360") w = 3; else if (c < "\370") w = 4
-      ok = (w > 0)
-      for (j = 1; ok && j < w; j++) {
-        x = substr(s, i + j, 1)
-        if (x < "\200" || x >= "\300") ok = 0
-      }
+    } else if (c >= "\302" && c <= "\364") {
+      # Well-formed UTF-8 only (as NOTIFY_TEXT and jnorm).
+      w = c < "\340" ? 2 : (c < "\360" ? 3 : 4)
+      lo = "\200"; hi = "\277"
+      if (c == "\340") lo = "\240"; else if (c == "\355") hi = "\237"
+      else if (c == "\360") lo = "\220"; else if (c == "\364") hi = "\217"
+      x = substr(s, i + 1, 1); ok = (x >= lo && x <= hi)
+      for (j = 2; ok && j < w; j++) { x = substr(s, i + j, 1); if (x < "\200" || x > "\277") ok = 0 }
       if (ok) {
         unit = substr(s, i, w); step = w
         if (c == "\302" && substr(unit, 2, 1) < "\240") unit = " "
@@ -574,10 +574,11 @@ function nhex(h,   k, v, c) {
 # JSON-escaped string content s, normalized (TDS_AGENT_EVENTS_V2 section
 # 2.2): escapes stay as received; control characters and the escapes that
 # stand for them become a space (keepnl keeps \n, \t, \u000a and \u0009);
-# lone surrogates and bytes that are not UTF-8 become a space; a broken
+# lone surrogates and bytes that are not well-formed UTF-8 (overlong forms,
+# encoded surrogates included) become a space, one per byte; a broken
 # escape ends the text. In 512-byte pieces, so that long values stay linear
 # in awks that measure a string on every substr().
-function jnorm(s, keepnl,   n, pos, buf, out, co, i, bl, lim, c, e, v, v2, unit, step, w, ok, j, x, stop) {
+function jnorm(s, keepnl,   n, pos, buf, out, co, i, bl, lim, c, e, v, v2, unit, step, w, ok, j, x, stop, lo, hi) {
   n = length(s)
   if (n == 0) return ""
   pos = 1; buf = ""; out = ""; stop = 0
@@ -605,14 +606,15 @@ function jnorm(s, keepnl,   n, pos, buf, out, co, i, bl, lim, c, e, v, v2, unit,
         else if (keepnl && (e == "n" || e == "t")) unit = c e
         else if (e == "") { stop = 1; break }
         else unit = " "
-      } else if (c >= "\300") {
-        w = 0
-        if (c < "\340") w = 2; else if (c < "\360") w = 3; else if (c < "\370") w = 4
-        ok = (w > 0)
-        for (j = 1; ok && j < w; j++) {
-          x = substr(buf, i + j, 1)
-          if (x < "\200" || x >= "\300") ok = 0
-        }
+      } else if (c >= "\302" && c <= "\364") {
+        # Well-formed UTF-8 only (as NOTIFY_TEXT): no overlong forms, no
+        # encoded surrogates, nothing past U+10FFFF.
+        w = c < "\340" ? 2 : (c < "\360" ? 3 : 4)
+        lo = "\200"; hi = "\277"
+        if (c == "\340") lo = "\240"; else if (c == "\355") hi = "\237"
+        else if (c == "\360") lo = "\220"; else if (c == "\364") hi = "\217"
+        x = substr(buf, i + 1, 1); ok = (x >= lo && x <= hi)
+        for (j = 2; ok && j < w; j++) { x = substr(buf, i + j, 1); if (x < "\200" || x > "\277") ok = 0 }
         if (ok) {
           unit = substr(buf, i, w); step = w
           if (c == "\302" && substr(unit, 2, 1) < "\240") unit = " "

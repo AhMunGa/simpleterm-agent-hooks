@@ -219,7 +219,7 @@ class Suite:
         p.t0 = time.time()
         if stdin:
             try:
-                p.stdin.write(stdin.encode())
+                p.stdin.write(stdin if isinstance(stdin, bytes) else stdin.encode())
             except BrokenPipeError:
                 pass
         p.stdin.close()
@@ -2697,6 +2697,11 @@ def v2_run_case(s, case, conf=None, want_n=0):
         outs = []
         for st in case["steps"]:
             inp = json.dumps(st["input"], ensure_ascii=bool(case.get("ascii"))).replace("HOMEP", str(s.home))
+            if case.get("raw"):
+                # Bytes JSON cannot carry (not UTF-8): placeholders in the input, replaced here.
+                inp = inp.encode()
+                for mark, hexbytes in case["raw"].items():
+                    inp = inp.replace(mark.encode(), bytes.fromhex(hexbytes))
             env = dict(V2_PIN, SIMPLETERM_HOOK_TEST_PLAIN=str(dump), **case.get("env", {}))
             env.update(st.get("env", {}))
             rc, out, err, el = s.run(st["args"][0], inp, env, args=st["args"][1:])

@@ -360,12 +360,19 @@ function ConvertTo-Norm([string]$s, [bool]$keepnl) {
                 elseif ($v -lt 32 -or ($v -ge 127 -and $v -le 159) -or $v -eq 8232 -or $v -eq 8233) { $unit = ' ' }
             } elseif ($e -eq 34 -or $e -eq 92 -or $e -eq 47) { $unit = $s.Substring($i, 2) }
             elseif ($keepnl -and ($e -eq 110 -or $e -eq 116)) { $unit = $s.Substring($i, 2) }
-        } elseif ($c -ge 192) {
-            $w = 0
-            if ($c -lt 224) { $w = 2 } elseif ($c -lt 240) { $w = 3 } elseif ($c -lt 248) { $w = 4 }
-            $ok = ($w -gt 0)
+        } elseif ($c -ge 194 -and $c -le 244) {
+            # Well-formed UTF-8 only (sh: as NOTIFY_TEXT): no overlong forms, no
+            # encoded surrogates, nothing past U+10FFFF.
+            if ($c -lt 224) { $w = 2 } elseif ($c -lt 240) { $w = 3 } else { $w = 4 }
+            $lo = 128; $hi = 191
+            if ($c -eq 224) { $lo = 160 } elseif ($c -eq 237) { $hi = 159 } elseif ($c -eq 240) { $lo = 144 } elseif ($c -eq 244) { $hi = 143 }
+            $ok = $true
             for ($j = 1; $ok -and $j -lt $w; $j++) {
-                if ($i + $j -ge $n) { $ok = $false } else { $x = [int]$s[$i + $j]; if ($x -lt 128 -or $x -ge 192) { $ok = $false } }
+                if ($i + $j -ge $n) { $ok = $false } else {
+                    $x = [int]$s[$i + $j]
+                    if ($j -eq 1) { if ($x -lt $lo -or $x -gt $hi) { $ok = $false } }
+                    elseif ($x -lt 128 -or $x -gt 191) { $ok = $false }
+                }
             }
             if ($ok) {
                 $unit = $s.Substring($i, $w)
@@ -463,12 +470,19 @@ function Limit-Json([string]$s, [int64]$maxU, [int64]$maxB, [switch]$Base) {
                 elseif ($v -lt 32 -or ($v -ge 127 -and $v -le 159) -or $v -eq 8232 -or $v -eq 8233) { $unit = ' ' }
             } elseif ($e -eq 34 -or $e -eq 92 -or $e -eq 47) { $unit = $s.Substring($i, 2) }
             else { $unit = ' ' }
-        } elseif ($c -ge 192) {
-            $w = 0
-            if ($c -lt 224) { $w = 2 } elseif ($c -lt 240) { $w = 3 } elseif ($c -lt 248) { $w = 4 }
-            $ok = ($w -gt 0)
+        } elseif ($c -ge 194 -and $c -le 244) {
+            # Well-formed UTF-8 only (sh: as NOTIFY_TEXT): no overlong forms, no
+            # encoded surrogates, nothing past U+10FFFF.
+            if ($c -lt 224) { $w = 2 } elseif ($c -lt 240) { $w = 3 } else { $w = 4 }
+            $lo = 128; $hi = 191
+            if ($c -eq 224) { $lo = 160 } elseif ($c -eq 237) { $hi = 159 } elseif ($c -eq 240) { $lo = 144 } elseif ($c -eq 244) { $hi = 143 }
+            $ok = $true
             for ($j = 1; $ok -and $j -lt $w; $j++) {
-                if ($i + $j -ge $n) { $ok = $false } else { $x = [int]$s[$i + $j]; if ($x -lt 128 -or $x -ge 192) { $ok = $false } }
+                if ($i + $j -ge $n) { $ok = $false } else {
+                    $x = [int]$s[$i + $j]
+                    if ($j -eq 1) { if ($x -lt $lo -or $x -gt $hi) { $ok = $false } }
+                    elseif ($x -lt 128 -or $x -gt 191) { $ok = $false }
+                }
             }
             if ($ok) {
                 $unit = $s.Substring($i, $w)
