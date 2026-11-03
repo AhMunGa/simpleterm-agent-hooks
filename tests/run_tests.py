@@ -39,6 +39,8 @@ HOOK_SH = ROOT / "plugins" / "simpleterm" / "scripts" / "agent-hook.sh"
 SCRIPTS = HOOK_SH.parent
 HOOK_PS1 = ROOT / "plugins" / "simpleterm" / "scripts" / "agent-hook.ps1"
 MOCK = HERE / "mock_relay.py"
+# Every process group a suite started (Suite.popen), for the check that a run leaves nothing.
+ALL_GROUPS = set()
 
 # Relay protocol v1 test vectors (envelope: AES-256-CBC + HMAC-SHA256).
 V_ENC = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
@@ -112,6 +114,7 @@ class Suite:
             os.symlink(argv[0], self.bin / "sh")
             os.symlink(argv[0], self.bare / "sh")
         self.relay = None
+        self.groups = set()  # process groups of the hooks this suite started (reaped after each case)
         self.start_relay()
 
     def start_relay(self):
@@ -128,6 +131,7 @@ class Suite:
         self.url = "http://127.0.0.1:%d" % self.port
 
     def close(self):
+        self.reap()
         self.relay.terminate()
         self.relay.wait(5)
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -212,9 +216,51 @@ class Suite:
         env.update(extra or {})
         return env
 
+    def popen(self, argv, **kw):
+        """subprocess.Popen in a session (and process group) of its own, kept for reap(): what a
+        hook leaves running in the background (a send, a done that waits up to 600 s, an ask) is
+        in that group."""
+        p = subprocess.Popen(argv, start_new_session=True, **kw)
+        self.groups.add(p.pid)
+        ALL_GROUPS.add(p.pid)
+        return p
+
+    def proc_run(self, argv, input=None, timeout=60, **kw):
+        """subprocess.run with capture_output, by popen()."""
+        kw.pop("capture_output", None)
+        kw.pop("start_new_session", None)
+        p = self.popen(argv, stdin=subprocess.PIPE if input is not None else kw.pop("stdin", None),
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
+        try:
+            out, err = p.communicate(input, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            out, err = p.communicate()
+            raise
+        return subprocess.CompletedProcess(argv, p.returncode, out, err)
+
+    def reap(self):
+        """Ends what is left of the process groups this case started (TERM, then KILL a second
+        later): nothing a case leaves in the background outlives it. Only processes of this run
+        are touched, by id: a group id is reused once its processes are gone, so a group may
+        belong to someone else by now."""
+        groups, self.groups = self.groups, set()
+        if not groups:
+            return
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            pids = ours(groups, (str(ROOT), str(self.tmp)))
+            for pid in pids:
+                try:
+                    os.kill(pid, sig)
+                except OSError:
+                    pass
+            if not pids or sig == signal.SIGKILL:
+                break
+            time.sleep(1)
+
     def start(self, agent, stdin="", extra=None, bare=False, args=()):
         cmd = list(self.argv) + [agent] + list(args)
-        p = subprocess.Popen(
+        p = self.popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=self.env(extra, bare), cwd=str(self.tmp),
         )
@@ -1443,7 +1489,7 @@ def t_agent_gone(s):
     """The agent process exits while the hook waits: stop polling, print nothing."""
     s.setup([(LINK_A, {})], conf={"claude_wait": 60})
     cmd = [sys.executable, "-I", "-c", AGENT_PY, perm_input(session="gone")] + list(s.argv) + ["claude"]
-    agent = subprocess.Popen(cmd, stdout=subprocess.PIPE, env=s.env(), cwd=str(s.tmp))
+    agent = s.popen(cmd, stdout=subprocess.PIPE, env=s.env(), cwd=str(s.tmp))
     hook_pid = int(agent.stdout.readline())
     wait_for(lambda: s.records("/v1/decision"), 15)
     agent.kill()
@@ -1889,19 +1935,19 @@ def t_usage_statusline(s):
     """The optional status line tap adds the window size and the 5-hour/7-day limits."""
     s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})])
     tap = SCRIPTS / "statusline-tap.sh"
-    p = subprocess.run([s.argv[0], str(tap), "cat"], input=json.dumps(STATUSLINE).encode(), capture_output=True,
+    p = s.proc_run([s.argv[0], str(tap), "cat"], input=json.dumps(STATUSLINE).encode(), capture_output=True,
                        env=s.env(), timeout=20)
     s.check("statusline: passes the input to the user's command", p.stdout.decode() == json.dumps(STATUSLINE), p.stdout[:200])
     saved = s.home / ".simpleterm" / "run" / "usage.u-claude.json"
     s.check("statusline: saved for the hooks", saved.exists() and saved.read_text().split("\n", 1)[1].strip() == json.dumps(STATUSLINE))
     # Claude Code runs a status line command with /bin/sh -c (spawn shell: true), not $SHELL or
     # the first sh on PATH: the user's command must see the same interpreter behind the tap.
-    p = subprocess.run([s.argv[0], str(tap), 'echo "$0"'], input=b"{}", capture_output=True,
+    p = s.proc_run([s.argv[0], str(tap), 'echo "$0"'], input=b"{}", capture_output=True,
                        env=s.env({"SHELL": "/bin/zsh"}), timeout=20)
     s.check("statusline: the user's command runs with /bin/sh, as in Claude Code", p.stdout == b"/bin/sh\n", p.stdout)
-    p = subprocess.run([s.argv[0], str(tap)], input=b"{}", capture_output=True, env=s.env(), timeout=20)
+    p = s.proc_run([s.argv[0], str(tap)], input=b"{}", capture_output=True, env=s.env(), timeout=20)
     s.check("statusline: no command and no data prints nothing", p.stdout == b"" and p.returncode == 0, p.stdout)
-    p = subprocess.run([s.argv[0], str(tap)], input=json.dumps(STATUSLINE).encode(), capture_output=True, env=s.env(), timeout=20)
+    p = s.proc_run([s.argv[0], str(tap)], input=json.dumps(STATUSLINE).encode(), capture_output=True, env=s.env(), timeout=20)
     s.check("statusline: no command prints a short line of its own",
             p.stdout.decode() == "Opus · context 8% · 5h 23% · 7d 41%\n", p.stdout)
     tr = write(s.tmp / "claude" / "sl.jsonl", claude_line() + "\n")
@@ -2053,7 +2099,7 @@ def t_codex_hooks(s):
     write(noisy / "scripts" / "agent-hook.sh", "echo noise\n")
     for ev in ("SessionStart", "PostCompact", "Stop"):
         cmd = hooks[ev][0]["hooks"][0]["command"].replace("${PLUGIN_ROOT}", str(noisy))
-        p = subprocess.run([s.argv[0], "-c", cmd], input=b"{}", capture_output=True, env=s.env(), timeout=20)
+        p = s.proc_run([s.argv[0], "-c", cmd], input=b"{}", capture_output=True, env=s.env(), timeout=20)
         s.check("codex hooks: %s command prints nothing, whatever the script writes" % ev,
                 p.returncode == 0 and p.stdout == b"", p.stdout)
     s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})])
@@ -2061,7 +2107,7 @@ def t_codex_hooks(s):
     cmd = hooks["SessionStart"][0]["hooks"][0]["command"].replace("${PLUGIN_ROOT}", str(SCRIPTS.parent))
     inp = json.dumps({"session_id": "cx-ss", "transcript_path": str(ro), "cwd": "/w/repo", "hook_event_name": "SessionStart",
                       "source": "resume", "model": "gpt-5.5"})
-    p = subprocess.run([s.argv[0], "-c", cmd], input=inp.encode(), capture_output=True, env=s.env({"SIMPLETERM": "1"}), timeout=30)
+    p = s.proc_run([s.argv[0], "-c", cmd], input=inp.encode(), capture_output=True, env=s.env({"SIMPLETERM": "1"}), timeout=30)
     rec = wait_for(lambda: ingests(s, "usage"), 20)
     s.check("codex hooks: SessionStart through its command still reports usage",
             p.stdout == b"" and rec and rec[0]["plain_json"]["ctx"].get("used") == 15159, "%r %s" % (p.stdout, str(rec)[:200]))
@@ -2127,6 +2173,10 @@ def notify_pty(s, args, extra=None):
     """Runs `simpleterm-notify.sh` on a terminal; returns (exit code, terminal output)."""
     env = s.env(extra)
     pid, fd = pty.fork()
+    if pid > 0:
+        # (Its own session: reaped with the case.)
+        s.groups.add(pid)
+        ALL_GROUPS.add(pid)
     if pid == 0:
         try:
             os.chdir(str(s.tmp))
@@ -2161,7 +2211,7 @@ def t_notify_no_tty(s):
     """`simpleterm notify` with SIMPLETERM=1 and no controlling terminal still sends its event (the probe of
     /dev/tty used a special builtin: dash ended the whole script when it could not open it)."""
     s.setup([(LINK_A, {"push": "disabled"})])
-    p = subprocess.run([s.argv[0], str(SCRIPTS / "simpleterm-notify.sh"), "notify", "no tty title", "body"], capture_output=True,
+    p = s.proc_run([s.argv[0], str(SCRIPTS / "simpleterm-notify.sh"), "notify", "no tty title", "body"], capture_output=True,
                        env=s.env({"SIMPLETERM": "1"}), cwd=str(s.tmp), timeout=30, start_new_session=True, stdin=subprocess.DEVNULL)
     rec = wait_for(lambda: ingests(s, "notify"), 20)
     s.check("notify without a terminal: exit 0 and the event is sent", p.returncode == 0 and rec and rec[0]["plain_json"].get("title") == "no tty title",
@@ -2240,10 +2290,10 @@ def t_cli_wrapper(s):
     text = w.read_text() if w.exists() else ""
     s.check("cli: written on Stop", "s='%s'" % (SCRIPTS / "simpleterm-notify.sh") in text and os.access(w, os.X_OK), text)
     s.ctl("/_ctl/reset", {})
-    p = subprocess.run([str(w), "notify", "via wrapper"], capture_output=True, env=s.env(), timeout=20)
+    p = s.proc_run([str(w), "notify", "via wrapper"], capture_output=True, env=s.env(), timeout=20)
     s.check("cli: wrapper runs notify", p.returncode == 0 and wait_for(lambda: ingests(s, "notify"), 20), p.stderr)
     w.write_text(text.replace(str(SCRIPTS), "/nonexistent/old-version"))
-    p = subprocess.run([str(w), "notify", "x"], capture_output=True, env=s.env(), timeout=20)
+    p = s.proc_run([str(w), "notify", "x"], capture_output=True, env=s.env(), timeout=20)
     s.check("cli: a moved plugin is reported", p.returncode == 1 and b"is gone" in p.stderr, p.stderr)
     s.run("claude", json.dumps({"session_id": "w", "hook_event_name": "SessionStart", "source": "startup"}))
     s.check("cli: rewritten when its script is gone", str(SCRIPTS) in w.read_text())
@@ -2329,7 +2379,7 @@ def t_copilot_hooks(s):
 
     def run(event, env):
         cmd = h["hooks"][event][0]["bash"]
-        p = subprocess.run(["/bin/bash", "-c", cmd], input=b"{}", capture_output=True, cwd=str(proj), env=s.env(dict({"COPILOT_HOME": str(cop)}, **env)), timeout=60)
+        p = s.proc_run(["/bin/bash", "-c", cmd], input=b"{}", capture_output=True, cwd=str(proj), env=s.env(dict({"COPILOT_HOME": str(cop)}, **env)), timeout=60)
         return p.returncode, p.stdout.decode()
     rc, out = run("notification", {"PLUGIN_ROOT": str(root)})
     s.check("copilot paths: PLUGIN_ROOT", rc == 0 and out.strip() == "root copilot notification", "%d %r" % (rc, out))
@@ -2466,7 +2516,7 @@ def t_agy_paths(s):
         cmd = agy_command(event)
         if substitute:  # agy replacing ${PLUGIN_ROOT} itself
             cmd = cmd.replace("${PLUGIN_ROOT}", str(root))
-        p = subprocess.run([s.argv[0], "-c", cmd], input=stdin, capture_output=True, cwd=str(where),
+        p = s.proc_run([s.argv[0], "-c", cmd], input=stdin, capture_output=True, cwd=str(where),
                            env=s.env(env), timeout=60)
         return p.returncode, p.stdout.decode()
 
@@ -2643,8 +2693,10 @@ NODE = shutil.which("node")
 
 def node_plugin(s, kind, scenario, timeout=90):
     plugin = {"v1": ROOT / "plugins" / "opencode-v1" / "simpleterm.js", "v2": ROOT / "plugins" / "opencode" / "index.js"}[kind]
-    p = subprocess.run([NODE, str(HERE / "opencode_harness.mjs"), kind, str(plugin), json.dumps(scenario)],
-                       capture_output=True, text=True, env=s.env(), timeout=timeout, cwd=str(s.tmp))
+    p = s.proc_run([NODE, str(HERE / "opencode_harness.mjs"), kind, str(plugin), json.dumps(scenario)],
+                   env=s.env(), timeout=timeout, cwd=str(s.tmp))
+    p.stdout = p.stdout.decode("utf-8", "replace")
+    p.stderr = p.stderr.decode("utf-8", "replace")
     try:
         return json.loads(p.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
@@ -2897,7 +2949,7 @@ def t_v2_input_drain(s):
     big = json.dumps({"session_id": "s1", "turn_id": "t1", "cwd": "/w", "hook_event_name": "PostToolUse", "tool_name": "Bash",
                       "tool_input": {"command": "cat big"}, "tool_response": "x" * (1 << 20)}).encode()
     for agent in ("codex", "claude"):
-        p = subprocess.Popen(list(s.argv) + [agent], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        p = s.popen(list(s.argv) + [agent], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              env=s.env(), cwd=str(s.tmp))
         broken = False
         try:
@@ -4312,6 +4364,38 @@ def ps_parse_check(pwsh):
 HEAVY = {"t_service_shells": threading.Semaphore(2)}
 
 
+def ours(groups, marks):
+    """Processes (not zombies) of the process groups `groups` that are this run's: their command
+    names one of `marks` (this checkout: the hooks, mock relay, node harness; a suite's folder: the
+    stand-in agents), or they were started by one that is (a hook's sleep, curl). Group ids are
+    reused, so the group alone does not say whose a process is."""
+    out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid=,stat=,command="], capture_output=True).stdout.decode("utf-8", "replace")
+    rows = []
+    for line in out.splitlines():
+        f = line.split(None, 4)
+        if len(f) == 5 and f[0].isdigit() and f[1].isdigit() and f[2].isdigit() and not f[3].startswith("Z"):
+            rows.append((int(f[0]), int(f[1]), int(f[2]), f[4]))
+    me = os.getpid()
+    inside = {pid: (ppid, cmd) for pid, ppid, pgid, cmd in rows if pgid in groups and pid != me}
+    mine = {pid for pid, (ppid, cmd) in inside.items() if any(m in cmd for m in marks) and not cmd.startswith("ps -A")}
+    grew = True
+    while grew:
+        grew = False
+        for pid, (ppid, cmd) in inside.items():
+            if pid not in mine and ppid in mine:
+                mine.add(pid)
+                grew = True
+    return sorted(mine)
+
+
+def leftovers():
+    """What the run left running: this run's processes (ours()) in a process group a suite
+    started, or in this run's own group but for this process."""
+    pids = ours(ALL_GROUPS | {os.getpgrp()}, (str(ROOT), "st-hooktest-"))
+    out = subprocess.run(["ps", "-o", "pid=,command=", "-p", ",".join(map(str, pids))], capture_output=True).stdout.decode("utf-8", "replace") if pids else ""
+    return [l.strip()[:140] for l in out.splitlines() if l.strip()]
+
+
 def run_suite(suite, only):
     for t in TESTS:
         if only and t.__name__ not in only:
@@ -4326,6 +4410,7 @@ def run_suite(suite, only):
         except Exception as e:  # report and continue with the next case
             suite.check("%s raised" % t.__name__, False, repr(e))
         finally:
+            suite.reap()
             if sem:
                 sem.release()
 
@@ -4371,6 +4456,9 @@ def run_in_own_group(run):
         old = signal.signal(signal.SIGTERM, signal.SIG_IGN)
         try:
             os.killpg(pid, signal.SIGTERM)
+            # (A hook's background wait ignores TERM: then KILL.)
+            time.sleep(1)
+            os.killpg(pid, signal.SIGKILL)
         except OSError:
             pass
         finally:
@@ -4449,6 +4537,12 @@ def main():
             print("   FAIL %s :: %s" % (name, detail[:400]))
         failed += len(bad)
         s.close()
+    # Nothing the cases started may outlive the run (each case's groups are reaped after it).
+    left = leftovers()
+    print("== leftover processes: %d" % len(left))
+    for p in left[:20]:
+        print("   FAIL left running: " + p)
+    failed += len(left)
     print("TOTAL FAILURES:", failed)
     sys.exit(1 if failed else 0)
 
