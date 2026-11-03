@@ -3089,7 +3089,9 @@
     "tunnel"
    ],
    "env": {},
-   "conf": {},
+   "conf": {
+    "usage_ask_codex": "on"
+   },
    "bins": {
     "codex": "#!/bin/sh\nread -r l\n[ -f \"$HOME/fake.reply\" ] && cat \"$HOME/fake.reply\"\n[ -f \"$HOME/fake.reply2\" ] && { read -r l2; read -r l3; cat \"$HOME/fake.reply2\"; }\ncat >/dev/null\n"
    },

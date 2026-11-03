@@ -3027,7 +3027,10 @@ EOF
 # per agent and settings folder: asks the agent for its limits in the
 # background (stdio closed, 20 seconds at most). After a failed sign-in it
 # asks again only once the agent's credentials file changed. usage_ask=off
-# in agent-hook.conf turns it off.
+# in agent-hook.conf turns it off. Codex only with usage_ask_codex=on: its
+# app-server writes its own state, syncs its plugins over the network and
+# may refresh an expired sign-in (2026-11-03 decision), and its rollout
+# gives the limits already.
 usage_ask() {
   case $(conf_word usage_ask on) in off | 0 | no | false) return 0 ;; esac
   case $EVENT in Stop | StopFailure) ;; *) return 0 ;; esac
@@ -3037,6 +3040,7 @@ usage_ask() {
       ind=$cfg/.credentials.json
       ;;
     codex)
+      case $(conf_word usage_ask_codex off) in on | 1 | yes | true) ;; *) return 0 ;; esac
       ab=codex cfg=${CODEX_HOME:-$HOME/.codex} amin=$ASK_CODEX_MIN abelow=$ASK_CODEX_BELOW
       ind=$cfg/auth.json
       ;;

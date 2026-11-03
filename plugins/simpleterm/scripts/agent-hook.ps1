@@ -3008,7 +3008,9 @@ function Find-AskAgent([string]$name) {
 # per agent and settings folder: asks the agent for its limits in a detached
 # child (stdio closed, 20 seconds at most). After a failed sign-in it asks
 # again only once the agent's credentials file changed. usage_ask=off in
-# agent-hook.conf turns it off. As usage_ask in agent-hook.sh.
+# agent-hook.conf turns it off; Codex only with usage_ask_codex=on (its
+# app-server writes its own state, syncs its plugins and may refresh an
+# expired sign-in). As usage_ask in agent-hook.sh.
 function Invoke-UsageAsk {
     if (@('off', '0', 'no', 'false') -ccontains (Get-ConfWord 'usage_ask' 'on')) { return }
     if ($Script:HookEvent -cne 'Stop' -and $Script:HookEvent -cne 'StopFailure') { return }
@@ -3020,6 +3022,7 @@ function Invoke-UsageAsk {
         $abelow = $AskClaudeBelow
         $ind = Join-Path $cfg '.credentials.json'
     } elseif ($Script:Agent -ceq 'codex') {
+        if (-not (@('on', '1', 'yes', 'true') -ccontains (Get-ConfWord 'usage_ask_codex' 'off'))) { return }
         $ab = 'codex'
         $cfg = [string]$env:CODEX_HOME
         if (-not $cfg) { $cfg = Join-Path $HOME '.codex' }

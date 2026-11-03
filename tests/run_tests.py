@@ -3119,11 +3119,19 @@ def t_v2_usage_ask(s):
             snap = lambda lid, p1: {"limitId": lid, "primary": {"usedPercent": p1, "windowDurationMins": 300, "resetsAt": 1795746291},
                                     "secondary": {"usedPercent": 3, "windowDurationMins": 10080, "resetsAt": 1796000000}, "planType": "plus",
                                     "rateLimitReachedType": None}
-            setup({"id": 1, "result": {"userAgent": "x"}})
-            (s.tmp / "reply2").write_text(json.dumps({"id": 2, "result": {"rateLimits": snap("codex", 4), "rateLimitsByLimitId": {
-                "codex": snap("codex", 4), "codex_bengalfox": snap("codex_bengalfox", 17)}}}, separators=(",", ":")) + "\n")
+            reply2 = json.dumps({"id": 2, "result": {"rateLimits": snap("codex", 4), "rateLimitsByLimitId": {
+                "codex": snap("codex", 4), "codex_bengalfox": snap("codex_bengalfox", 17)}}}, separators=(",", ":")) + "\n"
             cstop = json.dumps({"session_id": "cx9", "turn_id": "t", "transcript_path": str(ro), "cwd": "/w/repo", "hook_event_name": "Stop",
                                 "model": "gpt-5.5", "stop_hook_active": False, "last_assistant_message": "Done."})
+            # Off by default (2026-11-03 decision: the app-server's own writes, plugin sync and sign-in
+            # refresh); the rollout gives the limits.
+            setup({"id": 1, "result": {"userAgent": "x"}})
+            (s.tmp / "reply2").write_text(reply2)
+            s.run("codex", cstop, {"SIMPLETERM": "1"})
+            time.sleep(2.5)
+            s.check("ask codex: not asked by default", asks() == 0, str(asks()))
+            setup({"id": 1, "result": {"userAgent": "x"}}, conf={"usage_ask_codex": "on"})
+            (s.tmp / "reply2").write_text(reply2)
             s.run("codex", cstop, {"SIMPLETERM": "1"})
             u = wait_for(lambda: [x for x in ask_events() if x.get("app") == "codex"], 25)
             p = u[0] if u else {}
