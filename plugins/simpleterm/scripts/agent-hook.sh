@@ -2633,13 +2633,14 @@ END {
       at = isoepoch(GOT["timestamp"])
       id = GOT["payload.rate_limits.limit_id"]
       gsub(/[^A-Za-z0-9_.-]/, "", id)
-      if (id == "") id = "codex"
+      # (A null limit_id: the ask names that limit codex too.)
+      if (id == "" || id == "null") id = "codex"
       lim(id ".primary", GOT["payload.rate_limits.primary.used_percent"], GOT["payload.rate_limits.primary.window_minutes"], GOT["payload.rate_limits.primary.resets_at"])
       lim(id ".secondary", GOT["payload.rate_limits.secondary.used_percent"], GOT["payload.rate_limits.secondary.window_minutes"], GOT["payload.rate_limits.secondary.resets_at"])
       p = GOT["payload.rate_limits.plan_type"]
       if (p ~ /^[A-Za-z0-9_-]+$/ && p != "null") plan = p
       r = GOT["payload.rate_limits.rate_limit_reached_type"]
-      if (r != "" && r != "null") reached = 1
+      if (r != "" && r != "null" && r != "false") reached = 1
     }
     if (ctx != "" && rl) break
   }

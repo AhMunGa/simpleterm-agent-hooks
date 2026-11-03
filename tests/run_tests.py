@@ -204,7 +204,9 @@ class Suite:
         if self.kind == "ps1":
             # pwsh is run by its path; the hook needs nothing from PATH, and no agent the user has
             # installed (grok, opencode, agy: the version cache runs `--version`) may be found.
-            env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+            # The suite's bin first: stand-in agents for usage asks are there (and nothing else the
+            # user has installed).
+            env["PATH"] = str(self.bin) + ":/usr/bin:/bin:/usr/sbin:/sbin"
             env["POWERSHELL_TELEMETRY_OPTOUT"] = "1"
             env["POWERSHELL_UPDATECHECK"] = "Off"
         env.update(extra or {})
@@ -2943,6 +2945,18 @@ def t_v2_usage(s):
             u = wait_for(got, 20)
             s.check("usage opencode: cost (micro-USD, cut), tokens, session", u and u[0].endswith(
                 ',"cost":{"usd":0.012345,"tok_in":12800,"tok_out":3400,"scope":"session"},"ts":%s}' % json.loads(u[0])["ts"]), str(u)[:400])
+        # Codex rollout with a null limit_id (Codex's own limit) and reached false: the ids the ask makes too.
+        line = json.loads(codex_token_line())
+        line["payload"]["rate_limits"]["limit_id"] = None
+        line["payload"]["rate_limits"]["rate_limit_reached_type"] = False
+        ro = write(s.tmp / "cx" / "ro.jsonl", json.dumps(line, separators=(",", ":")) + "\n")
+        got = usage()
+        s.run("codex", json.dumps({"session_id": "cxn", "turn_id": "t", "transcript_path": str(ro), "cwd": "/w/repo", "hook_event_name": "Stop",
+                                   "stop_hook_active": False, "last_assistant_message": "Done."}), {"SIMPLETERM": "1"})
+        u = wait_for(got, 20)
+        p = json.loads(u[0]) if u else {}
+        s.check("usage codex: a null limit_id is codex, reached false is not reached",
+                [x["id"] for x in p.get("lims", [])] == ["codex.primary", "codex.secondary"], str(p)[:300])
         # Grok: usage.json of its session (costUsdTicks 10^-10 USD each).
         sd = s.home / ".grok" / "sessions" / "%2Fw%2Fgrokproj" / "gk-1"
         write(sd / "usage.json", json.dumps({"sessionId": "gk-1", "session": {"inputTokens": 34380, "outputTokens": 93, "costUsdTicks": 303420000}}))
