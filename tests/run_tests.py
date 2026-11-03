@@ -3049,6 +3049,24 @@ if [ -f "$d/linger" ]; then sleep 600 & echo $! >"$d/child"; wait; fi
 """
 
 
+def t_conf_vectors(s):
+    """TDS_AGENT_ALERTS section 6.7 read vectors R1-R46 (tests/fixtures/conf/read-vectors.json): what the hook does
+    with each key of agent-hook.conf as the app reads it (caps 540 and 110, poll_wait 1-25, usage, the word keys,
+    done_delay per agent). The PowerShell hook has no agy_wait nor opencode_wait (no Antigravity, no OpenCode)."""
+    vec = json.loads((HERE / "fixtures" / "conf" / "read-vectors.json").read_text(encoding="utf-8"))["vectors"]
+    s.setup([])
+    conf = s.home / ".simpleterm" / "agent-hook.conf"
+    for v in vec:
+        if s.kind == "ps1" and v["key"] in ("agy_wait", "opencode_wait"):
+            continue
+        conf.write_bytes(bytes.fromhex(v["file_hex"]))
+        wants = v["want"] if isinstance(v["want"], dict) else {"claude": v["want"]}
+        for agent, want in sorted(wants.items()):
+            rc, out, err, el = s.run(agent, "", {"SIMPLETERM_HOOK_TEST": "1"}, args=("__conf", v["key"]))
+            s.check("conf %s %s (%s, %s): %s" % (v["id"], v["key"], agent, v["what"], want), out.strip() == want,
+                    "got %r rc=%s %s" % (out, rc, err[-200:]))
+
+
 def t_v2_usage_ask_gate(s):
     """Section 9.2 D21/D22: every version is asked, by the version of the executable that the ask runs (a native
     install links it to versions/<v> and the ask runs that file; else the file's --version, cached, `unknown` if it
@@ -4312,7 +4330,7 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js,
-         t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_usage_ask_gate, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_not_sent,
+         t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_usage_ask_gate, t_conf_vectors, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_not_sent,
          t_v2_state, t_v2_sessions, t_v2_opencode_js, t_copilot_hooks, t_copilot,
          t_v2_versions, t_v2_claude_question_once]
 
