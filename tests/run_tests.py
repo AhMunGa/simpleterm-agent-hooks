@@ -3661,6 +3661,16 @@ def t_opencode_js(s):
     time.sleep(1)
     s.check("opencode 1.x: session.idle -> done with the session title, subagents skipped",
             len(ingests(s, "done")) == 1 and rec[0]["plain_json"].get("msg") == "Fix the tests", str(ingests(s))[:300])
+    # The session's tokens and cost (session info) reach the usage event (TDS_AGENT_EVENTS_V2 section 9.3).
+    info = {"title": "Fix the tests", "cost": 0.25, "tokens": {"input": 100, "output": 20, "reasoning": 5, "cache": {"read": 50, "write": 10}}}
+    want = {"usd": 0.25, "tok_in": 160, "tok_out": 25, "scope": "session"}
+    for kind, steps in (("v1", [{"event": {"type": "session.idle", "properties": {"sessionID": "ses_1"}}}]),
+                        ("v2", [{"event": {"id": "evt_c", "type": "session.execution.succeeded", "location": {"directory": d}, "data": {"sessionID": "ses_1"}}}])):
+        s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})])
+        node_plugin(s, kind, {"directory": d, "sessions": {"ses_1": info}, "steps": steps, "wait": 3000})
+        u = wait_for(lambda: ingests(s, "usage"), 20)
+        s.check("opencode %s: the session's tokens and cost in the usage event" % kind,
+                u and u[0]["plain_json"].get("cost") == want, str(u[0].get("plain_json") if u else None)[:300])
     # 1.19.5 with OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS (measured with a
     # local model stub): the parent goes idle while its background child is
     # busy; the child's report wakes the parent, which goes idle again.
