@@ -2766,8 +2766,9 @@ function Get-Answers([string]$factsE, [string]$factsX, [string]$qp, [string]$fq,
     $E = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     $X = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     $XT = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
-    foreach ($line in $factsE.Split([char]10)) { $f = Split-Fact $line; $E[$f[0]] = $f[2] }
-    foreach ($line in $factsX.Split([char]10)) { $f = Split-Fact $line; $X[$f[0]] = $f[2]; $XT[$f[0]] = $f[1] }
+    # (a key given twice counts with its first value, section 5.5; sh: ANSWER_AWK)
+    foreach ($line in $factsE.Split([char]10)) { $f = Split-Fact $line; if (-not $E.ContainsKey($f[0])) { $E[$f[0]] = $f[2] } }
+    foreach ($line in $factsX.Split([char]10)) { $f = Split-Fact $line; if (-not $X.ContainsKey($f[0])) { $X[$f[0]] = $f[2]; $XT[$f[0]] = $f[1] } }
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     $PL = @{}
     $NP = @{}
@@ -2865,10 +2866,13 @@ function Invoke-Judge($L) {
     # The extension (section 5.2).
     $xv = ''; $xr = ''; $xn = ''; $xd = ''; $xq = ''; $xa = ''; $xs = ''; $xm = ''; $xseen = ''
     $xfacts = (Get-Facts $jp '') -join "`n"
+    $xks = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     foreach ($line in $xfacts.Split([char]10)) {
         if (-not $line) { continue }
         $f = Split-Fact $line
         $xk = $f[0]
+        # A key given twice counts with its first value (section 5.5).
+        if (-not $xks.Add($xk)) { continue }
         if ($xk -ceq 'v') { $xv = $f[2] }
         elseif ($xk -ceq 'rid') { $xr = $f[2] }
         elseif ($xk -ceq 'nonce') { $xn = $f[2] }
@@ -2892,8 +2896,10 @@ function Invoke-Judge($L) {
     if ($xa -ceq 'allow_scope') {
         if (-not (Test-UInt $xs) -or [int64]$xs -ge [int64]$jns) { $Script:JV = 'bad'; return }
         $w = Split-Words $jsmap
-        if ([int64]$xs -gt $w.Count) { $Script:JV = 'bad'; return }
-        if ([int64]$xs -lt $w.Count) { $Script:XOrig = $w[[int]$xs] }
+        if ($w.Count -gt 0) {
+            if ([int64]$xs -ge $w.Count) { $Script:JV = 'bad'; return }
+            $Script:XOrig = $w[[int]$xs]
+        }
     } elseif ($xa -ceq 'plan_approve') {
         if ($xm) {
             if ((',' + $jmodes + ',').Contains(',' + $xm + ',')) { $Script:XMode = $xm } else { $Script:JV = 'bad'; return }

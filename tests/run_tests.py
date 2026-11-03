@@ -2842,6 +2842,23 @@ def t_v2_decisions(s):
     out, el = run({"act": "deny_reason", "reason": "keep build"}, "deny", inp=codex, agent="codex")
     b = behavior(out)
     s.check("decision codex deny_reason: message as given, nothing else", b == {"behavior": "deny", "message": "keep build"}, out)
+    # A key given twice counts with its first value: in the agent's input (the label the user saw is
+    # the one answered) and in the extension (section 5.5).
+    pin = {"SIMPLETERM_HOOK_TEST": "1", "SIMPLETERM_HOOK_TEST_NONCE": V_NONCE, "SIMPLETERM_HOOK_TEST_RID": V_RID}
+    dq = ('{"session_id":"sdq","cwd":"/w","hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":'
+          '{"questions":[{"question":"Which DB?","header":"DB","multiSelect":false,"options":[{"label":"SQLite","label":"Other"},{"label":"Postgres"}]}]}}')
+    s.setup([(LINK_A, {"fmt": 2, "decision": "allow", "after": 1, "dext": {"act": "answer", "answers": [{"q": 0, "pick": [0]}]}})],
+            conf={"claude_wait": 20})
+    rc, out, err, el = s.run("claude", dq, pin)
+    sent = (((s.records("/v1/ingest") or [{}])[0].get("plain_json") or {}).get("req") or {}).get("ask") or {}
+    s.check("first value: the label sent is the label answered",
+            ((sent.get("qs") or [{}])[0].get("opts") or [{}])[0].get("l") == "SQLite"
+            and (behavior(out).get("updatedInput") or {}).get("answers") == {"Which DB?": "SQLite"}, str(sent)[:200] + " | " + out)
+    raw = ('{"v":1,"fmt":2,"rid":"%s","nonce":"%s","decision":"allow","req":"st-%s","act":"allow","act":"deny","ts":1793232000}'
+           % (V_RID, V_NONCE, V_RID))
+    s.setup([(LINK_A, {"fmt": 2, "decision": "allow", "after": 1, "dext": {"raw": raw, "iv": V2_DEXT_IV}})], conf={"claude_wait": 20})
+    rc, out, err, el = s.run("claude", v2_perm(session="sdx"), pin)
+    s.check("first value: an extension's act given twice is its first", behavior(out).get("behavior") == "allow", out + s.log_text()[-200:])
     # Section 5.5: dropped decisions print nothing.
     for name, dext, dec in (("bad MAC", {"act": "allow", "bad_mac": True}, "allow"),
                             ("another request (N10)", {"act": "allow", "req": "st-ffffffffffffffff"}, "allow"),

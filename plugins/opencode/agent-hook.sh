@@ -1960,8 +1960,9 @@ emit_decision() {
 # typed text only where the question takes it.
 ANSWER_AWK='
 BEGIN { FS = "\t" }
-$1 == "E" { E[$2] = substr($0, length($1) + length($2) + length($3) + 4); next }
-$1 == "X" { X[$2] = substr($0, length($1) + length($2) + length($3) + 4); XT[$2] = $3; next }
+# (a key given twice counts with its first value, section 5.5)
+$1 == "E" { if (!($2 in E)) E[$2] = substr($0, length($1) + length($2) + length($3) + 4); next }
+$1 == "X" { if (!($2 in X)) { X[$2] = substr($0, length($1) + length($2) + length($3) + 4); XT[$2] = $3 }; next }
 function lab(q, v,   b) { b = qp "." q ".options." v; return ((b "." fl) in E) ? E[b "." fl] : E[b] }
 END {
   n = 0; bad = 0
@@ -2104,9 +2105,12 @@ rq_judge() { # i
     return 0
   fi
   # The extension (section 5.2).
-  xv='' xf='' xr='' xn='' xd='' xq='' xa='' xs='' xm='' xseen=''
+  xv='' xf='' xr='' xn='' xd='' xq='' xa='' xs='' xm='' xseen='' xks=' '
   xfacts=$(printf '%s' "$jp" | awk "$NORM_FN$JSON_FACTS" 2>/dev/null)
   while IFS="$TAB" read -r xk xt xval; do
+    # A key given twice counts with its first value (section 5.5).
+    case $xks in *" $xk "*) continue ;; esac
+    xks="$xks$xk "
     case $xk in
       v) xv=$xval ;; fmt) xf=$xval ;; rid) xr=$xval ;; nonce) xn=$xval ;; decision) xd=$xval ;;
       req) xq=$xval ;; act) xa=$xval ;; scope) [ "$xt" = r ] && xs=$xval ;; mode) xm=$xval ;;
@@ -2130,8 +2134,14 @@ EOF
       set -f
       set -- $jsmap
       set +f
-      shift "$xs" 2>/dev/null || { JV=bad; return 0; }
-      X_ORIG=${1:-}
+      # The agent's own index of the scope, where the hook keeps a map
+      # (Claude Code's suggestions; OpenCode's scope is its one pattern
+      # list). Checked first: a shift past the end ends dash and ksh.
+      if [ "$#" -gt 0 ]; then
+        [ "$xs" -lt "$#" ] || { JV=bad; return 0; }
+        shift "$xs"
+        X_ORIG=$1
+      fi
       ;;
     plan_approve)
       [ -z "$xm" ] || case ",$jmodes," in *",$xm,"*) X_MODE=$xm ;; *) JV=bad; return 0 ;; esac
