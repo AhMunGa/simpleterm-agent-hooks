@@ -3012,7 +3012,8 @@ function Find-AskAgent([string]$name) {
 # app-server writes its own state, syncs its plugins and may refresh an
 # expired sign-in). As usage_ask in agent-hook.sh.
 function Invoke-UsageAsk {
-    if (@('off', '0', 'no', 'false') -ccontains (Get-ConfWord 'usage_ask' 'on')) { return }
+    # (Values in any case: OFF and No turn it off too.)
+    if (@('off', '0', 'no', 'false') -ccontains (Get-ConfWord 'usage_ask' 'on').ToLowerInvariant()) { return }
     if ($Script:HookEvent -cne 'Stop' -and $Script:HookEvent -cne 'StopFailure') { return }
     if ($Script:Agent -ceq 'claude') {
         $ab = 'claude'
@@ -3022,7 +3023,7 @@ function Invoke-UsageAsk {
         $abelow = $AskClaudeBelow
         $ind = Join-Path $cfg '.credentials.json'
     } elseif ($Script:Agent -ceq 'codex') {
-        if (-not (@('on', '1', 'yes', 'true') -ccontains (Get-ConfWord 'usage_ask_codex' 'off'))) { return }
+        if (-not (@('on', '1', 'yes', 'true') -ccontains (Get-ConfWord 'usage_ask_codex' 'off').ToLowerInvariant())) { return }
         $ab = 'codex'
         $cfg = [string]$env:CODEX_HOME
         if (-not $cfg) { $cfg = Join-Path $HOME '.codex' }
@@ -3348,7 +3349,9 @@ function Invoke-AskChild($job) {
     $shown = $err
     if (-not $shown) { $shown = 'ok' }
     Write-Log ('usage-ask ' + $Script:Agent + ' ' + $shown)
-    if ($err -ceq 'auth') { [void](Write-FileB ($af + '.auth') '') }
+    # A failed sign-in, or an account without plan limits (an API key, a
+    # gateway): not asked again until the credentials change (sh: ask_run).
+    if ($err -ceq 'auth' -or $err -ceq 'not-subscriber') { [void](Write-FileB ($af + '.auth') '') }
     $Script:Ts = $at
     if (Test-UInt $at) { $Script:Now = [int64]$at }
     $Script:UsageJson = ''

@@ -3055,10 +3055,12 @@ def t_v2_usage_ask(s):
             s.run("claude", stop, {"SIMPLETERM": "1"})
             time.sleep(2.5)
             s.check("ask: not asked, app not connected (%s)" % name, asks() == 0, str(asks()))
-        setup(ok, conf={"usage_ask": "off"})
-        s.run("claude", stop, {"SIMPLETERM": "1"})
-        time.sleep(2.5)
-        s.check("ask: usage_ask=off", asks() == 0, str(asks()))
+        # The off switch in any case.
+        for v in ("off", "OFF", "No", "FALSE", "0"):
+            setup(ok, conf={"usage_ask": v})
+            s.run("claude", stop, {"SIMPLETERM": "1"})
+            time.sleep(2.5)
+            s.check("ask: usage_ask=%s" % v, asks() == 0, str(asks()))
         # Only the measured versions.
         for v in ("2.2.0", "2.1.315"):
             tr.write_text(json.dumps({"type": "user", "version": v, "message": {"role": "user", "content": "x"}}) + "\n")
@@ -3074,6 +3076,13 @@ def t_v2_usage_ask(s):
         p = u[0] if u else {}
         s.check("ask: rate_limits_available false -> uq not-subscriber, no lims",
                 p.get("uq", {}).get("err") == "not-subscriber" and p["uq"].get("ok") is False and "lims" not in p, str(p)[:300])
+        # Reported once: not asked again (5 minutes past) until the credentials change.
+        for f in [f for f in run.glob("ask.claude.*") if not f.name.endswith((".auth", ".off"))]:
+            f.write_text("%d\n" % (int(time.time()) - 400))
+        s.run("claude", stop, {"SIMPLETERM": "1"})
+        time.sleep(2.5)
+        s.check("ask: after not-subscriber, not again until the credentials change", asks() == 1 and len(ask_events()) == 1,
+                "%d asks, %d events" % (asks(), len(ask_events())))
         # An answer showing model spend: uq failed, and that version is not asked again.
         spent = json.loads(json.dumps(ok))
         spent["response"]["response"]["session"]["total_cost_usd"] = 0.0012
@@ -3130,7 +3139,7 @@ def t_v2_usage_ask(s):
             s.run("codex", cstop, {"SIMPLETERM": "1"})
             time.sleep(2.5)
             s.check("ask codex: not asked by default", asks() == 0, str(asks()))
-            setup({"id": 1, "result": {"userAgent": "x"}}, conf={"usage_ask_codex": "on"})
+            setup({"id": 1, "result": {"userAgent": "x"}}, conf={"usage_ask_codex": "Yes"})
             (s.tmp / "reply2").write_text(reply2)
             s.run("codex", cstop, {"SIMPLETERM": "1"})
             u = wait_for(lambda: [x for x in ask_events() if x.get("app") == "codex"], 25)
