@@ -23,7 +23,12 @@ older apps and relays read these events as before, and a v1 allow or deny still 
   with a reason; Antigravity: approve a plan from its `Stop` hook. OpenCode: always (the pattern),
   reject with a reason (1.19 and 2.x), answer a 1.19 question. The extension (`dext`) is checked:
   its MAC (`st1-dext.`), the request it answers, the answers offered to that link, the other
-  requests an OpenCode answer settles (all seen), a request answered in the terminal meanwhile.
+  requests an OpenCode answer settles, a request answered in the terminal meanwhile; a key given
+  twice counts with its first value, as in the agent's input. OpenCode 1.19 and 2.x always and
+  reject settle every request of the session open at that moment: such an answer (also a v1 deny,
+  also from an older app) applies only if the user saw every one of them, those that opened after
+  the request was sent included; the request always names them (`affects`, `others`, `[]` when
+  none).
 - **Waiting per link.** A decision that does not hold ends only that link's wait; a v2 tunnel hears
   it (`resolved`) and gets the request again under a new rid, 3 times at most. Codex and
   Antigravity, whose prompt hides while a hook waits: the tunnel first; when the app answers there,
@@ -65,8 +70,14 @@ older apps and relays read these events as before, and a v1 allow or deny still 
   check takes spaces around `:`; a run folder that cannot be made no longer stops the hook; Windows
   PowerShell 5.1 no longer queues a third request to the relay behind a long poll (2 connections
   per host); a waiting background `done` ends as soon as a newer event replaces it.
-- **Log**: a background send that trimmed `~/.simpleterm/agent-hook.log` at the moment the hook
-  did could leave it empty; each now writes its own temporary copy.
+- **State events**: a subagent's start and stop are sent each time, at once; within the second
+  only session states replace one another.
+- **Fixes**: an input past 256 KiB is read to its end, so the agent no longer gets a broken pipe
+  (Codex: `failed to write hook stdin`); bytes that are not well-formed UTF-8 (overlong forms,
+  encoded surrogates, past U+10FFFF) become spaces in every event, as the app drops an event it
+  cannot decode; an Antigravity read inside the workspace never waits with `agy_wait` (agy asks
+  only for reads outside it); a background send that trimmed `~/.simpleterm/agent-hook.log` at the
+  moment the hook did could leave it empty.
 
 ## 0.3.2 - 2026-11-02
 
