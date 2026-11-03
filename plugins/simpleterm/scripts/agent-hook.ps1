@@ -27,6 +27,12 @@
 # that agent-hook.sh makes is -ceq / -cne / -cmatch or ordinal.
 
 $ErrorActionPreference = 'Stop'
+
+# A usage ask runs the agent with SIMPLETERM_PROBE=1 (TDS_AGENT_EVENTS_V2
+# section 9.2): hooks it runs do nothing, or the ask would make sessions and
+# alerts of its own.
+if ($env:SIMPLETERM_PROBE -ceq '1') { exit 0 }
+
 $ScriptArgs = @($args)
 $Agent = ''
 $Mode = ''
@@ -1196,6 +1202,9 @@ function New-PlainV2($link, [string]$rid, [string]$ev, [string]$nonce) {
     [void]$sb.Append('=rid' + $Tab + $rid + $Nl + '=ev' + $Tab + $ev + $Nl + '=app' + $Tab + $Script:App + $Nl)
     [void]$sb.Append('=host' + $Tab + (ConvertTo-JsonB $link.label 100000 100000) + $Nl + '=cwd' + $Tab + $Script:CwdBaseF + $Nl)
     if (-not $Script:NoMsg) { [void]$sb.Append('=msg' + $Tab + $Script:MsgF + $Nl) }
+    # A usage event's own fields: v1 ones (ctx, lims, plan) after cwd, uq and
+    # cost before ts (section 9.1).
+    if ($ev -ceq 'usage') { [void]$sb.Append('=uv1' + $Tab + [string]$Script:UsageJson + $Nl + '=uv2' + $Tab + [string]$Script:UsageV2 + $Nl) }
     [void]$sb.Append('=xflags' + $Tab + $vx + $Nl + '=nonce' + $Tab + $nonce + $Nl + '=ts' + $Tab + $Script:Ts + $Nl)
     [void]$sb.Append([string]$Script:Spec + $Nl)
     $recs = $sb.ToString().Split([char]10)
@@ -1308,12 +1317,14 @@ function New-PlainV2($link, [string]$rid, [string]$ev, [string]$nonce) {
         [void]$x.Append('{"v":1,"rid":"' + (GetV1 'rid') + '","ev":"' + (GetV1 'ev') + '","app":"' + (GetV1 'app') + '","host":"' + $vs.host + '","cwd":"' + $vs.cwd + '"')
         if ($V1.ContainsKey('title')) { [void]$x.Append(',"title":"' + $vs.title + '"') }
         if ($V1.ContainsKey('msg')) { [void]$x.Append(',"msg":"' + $vs.msg + '"') }
+        [void]$x.Append((GetV1 'uv1'))
         [void]$x.Append((GetV1 'xflags'))
         if ($dec -and (GetV1 'nonce').Length -gt 0) { [void]$x.Append(',"nonce":"' + (GetV1 'nonce') + '"') }
         foreach ($c in $CH[0]) {
             if (-not $ND[$c]) { [void]$x.Append(',"' + $NK[$c] + '":' + (BSer $c)) }
         }
         [void]$x.Append((BCut))
+        [void]$x.Append((GetV1 'uv2'))
         [void]$x.Append(',"ts":' + (GetV1 'ts') + '}')
         return $x.ToString()
     }
@@ -1517,9 +1528,9 @@ function Set-Msg([string]$text) {
     $Script:Msg = Limit-Json $text 200 800
 }
 
-# The section 5.2 (v1) plaintext for $link: notify, usage and test, and every
-# event before the v2 fields are prepared. `usage` carries UsageJson instead of
-# a message; `notify` adds a title.
+# The section 5.2 (v1) plaintext for $link: notify and test, and every event
+# before the v2 fields are prepared (a usage event has them: Send-Usage).
+# `usage` carries UsageJson instead of a message; `notify` adds a title.
 function New-PlainV1($link, [string]$rid, [string]$ev, [string]$nonce) {
     $hostText = ConvertTo-JsonB $link.label 64 256
     $p = '{"v":1,"rid":"' + $rid + '","ev":"' + $ev + '","app":"' + $Script:App + '","host":"' + $hostText + '","cwd":"' + $Script:CwdBase + '"'
@@ -1534,7 +1545,7 @@ function New-PlainV1($link, [string]$rid, [string]$ev, [string]$nonce) {
 
 function Get-Plaintext($link, [string]$rid, [string]$ev, [string]$nonce) {
     $Script:LastMeta = $null
-    if ($ev -cne 'notify' -and $ev -cne 'usage' -and $ev -cne 'test' -and $Script:V2) {
+    if ($ev -cne 'notify' -and $ev -cne 'test' -and $Script:V2) {
         $r = New-PlainV2 $link $rid $ev $nonce
         $Script:LastMeta = $r.meta
         return $r.plain
@@ -1600,6 +1611,9 @@ function Complete-Ingest($op) {
     elseif ($r.code -eq 410) { [void](Write-FileB (Join-Path $RunDir ($op.link.link + '.revoked')) '') }
     elseif ($r.code -eq 400) { $err = [regex]::Replace((Get-Field (Get-JsonKV $r.body @('error')) 'error'), '[^a-zA-Z-]', '') }
     $code = Format-Code $r.code
+    # The last event to a tunnel and its answer: a usage ask needs the app
+    # connected (an HTTP 200 within 10 minutes, section 9.2).
+    if ($op.link.kind -ceq 'tunnel') { [void](Write-FileB (Join-Path $RunDir ('tun.' + (Short $op.link.link) + '.last')) ([string](Now-Epoch) + ' ' + $code + "`n")) }
     $shown = $push
     if (-not $shown) { $shown = '-' }
     Write-Log ('ingest ev=' + $op.ev + ' link=' + (Short $op.link.link) + ' http=' + $code + ' push=' + $shown)
@@ -1651,6 +1665,7 @@ function New-Job([string]$kind) {
         msgf = [string]$Script:MsgF; nomsg = $(if ($Script:NoMsg) { '1' } else { '' }); xflags = [string]$Script:XFlags
         waitov = [string]$Script:WaitOv; cwdbasef = [string]$Script:CwdBaseF; cwdbase = [string]$Script:CwdBase
         msg = [string]$Script:Msg; title = [string]$Script:Title; usage = [string]$Script:UsageJson; reqid = [string]$Script:ReqId
+        usagev2 = [string]$Script:UsageV2
     }
 }
 
@@ -1756,6 +1771,7 @@ function Restore-Job($job) {
     $Script:Msg = $job.msg
     $Script:Title = $job.title
     $Script:UsageJson = $job.usage
+    $Script:UsageV2 = [string]$job.usagev2
     $Script:ReqId = $job.reqid
     $Script:IngMt = ''
     $Script:InputB = ''
@@ -1832,6 +1848,7 @@ function Invoke-Child([string]$name) {
             }
         }
         'ver' { Invoke-VerChild $job }
+        'uask' { Invoke-AskChild $job }
     }
 }
 
@@ -2458,46 +2475,144 @@ function Get-ClaudeUsage([string]$path) {
     return @{ ctx = $ctx; model = $model }
 }
 
-# Codex rollout: the newest token_count with info and the newest with rate
-# limits. A usage table (see Format-Usage) or $null.
-function Get-CodexUsage([string]$path) {
-    $len = (New-Object IO.FileInfo($path)).Length
-    $ctx = $null; $win = $null; $rl = $null
-    foreach ($limit in @(262144, 2097152)) {
-        $lines = Read-TailLines $path $limit
-        $ctx = $null; $win = $null; $rl = $null
-        $seen = 0
-        for ($i = $lines.Length - 1; $i -ge 0 -and $seen -lt 8; $i--) {
-            if (-not $lines[$i].Contains('"token_count"')) { continue }
-            $seen++
-            $o = ConvertFrom-JsonLine $lines[$i]
-            if ($null -eq $o -or $null -eq $o.payload -or $o.payload.type -ne 'token_count') { continue }
-            $info = $o.payload.info
-            if ($null -eq $ctx -and $null -ne $info -and $null -ne $info.last_token_usage -and (Test-Num $info.last_token_usage.total_tokens)) {
-                $ctx = [int64]$info.last_token_usage.total_tokens
-                if (Test-Num $info.model_context_window) { $win = [int64]$info.model_context_window }
-            }
-            if ($null -eq $rl -and $null -ne $o.payload.rate_limits) { $rl = $o.payload.rate_limits }
-            if ($null -ne $ctx -and $null -ne $rl) { break }
-        }
-        if ($null -ne $ctx) { break }
-        if ($len -le $limit) { break }
+# ISO 8601 date-time (YYYY-MM-DDTHH:MM:SS, a fraction, Z or +-HH:MM) to epoch
+# seconds; -1 if it is not one (section 9.1 `at`, the windows' resets). The
+# port of isoepoch (ISO_FN) in agent-hook.sh, its int() truncations included.
+function Get-IsoEpoch([string]$t) {
+    if ($t -cnotmatch '\A[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt ][0-9]{2}:[0-9]{2}:[0-9]{2}') { return [int64]-1 }
+    $y = [int64]$t.Substring(0, 4); $mo = [int64]$t.Substring(5, 2); $d = [int64]$t.Substring(8, 2)
+    $h = [int64]$t.Substring(11, 2); $mi = [int64]$t.Substring(14, 2); $se = [int64]$t.Substring(17, 2)
+    $r = [regex]::Replace($t.Substring(19), '\A[.][0-9]+', '')
+    $off = [int64]0
+    if ($r -ceq 'Z' -or $r -ceq 'z') { $off = [int64]0 }
+    elseif ($r -cmatch '\A[+-][0-9][0-9]:?[0-9][0-9]\z') {
+        $off = ([int64]$r.Substring(1, 2) * 60 + [int64]$r.Substring($r.Length - 2, 2)) * 60
+        if ($r.StartsWith('+', $Ord)) { $off = -$off }
+    } else { return [int64]-1 }
+    if ($mo -lt 1 -or $mo -gt 12 -or $d -lt 1 -or $d -gt 31 -or $h -gt 23 -or $mi -gt 59 -or $se -gt 59) { return [int64]-1 }
+    $yy = $y
+    if ($mo -le 2) { $yy = $y - 1 }
+    $era = [int64][Math]::Truncate([double]$yy / 400)
+    $yoe = $yy - $era * 400
+    $mp = $mo + 9
+    if ($mo -gt 2) { $mp = $mo - 3 }
+    $doy = [int64][Math]::Truncate([double](153 * $mp + 2) / 5) + $d - 1
+    $doe = $yoe * 365 + [int64][Math]::Truncate([double]$yoe / 4) - [int64][Math]::Truncate([double]$yoe / 100) + $doy
+    return [int64](($era * 146097 + $doe - 719468) * 86400 + $h * 3600 + $mi * 60 + $se + $off)
+}
+
+# Minutes from a month before date-time t to t (monthmin: a monthly window,
+# Copilot's in agent-hook.sh; no agent of this hook has one).
+function Get-MonthMin([string]$t) {
+    $e = Get-IsoEpoch $t
+    if ($e -lt 0) { return [int64]-1 }
+    $y = [int64]$t.Substring(0, 4); $mo = [int64]$t.Substring(5, 2) - 1; $d = [int64]$t.Substring(8, 2)
+    if ($mo -lt 1) { $mo = 12; $y-- }
+    $md = 31
+    if ($mo -eq 2) {
+        $md = 28
+        if ($y % 4 -eq 0 -and ($y % 100 -ne 0 -or $y % 400 -eq 0)) { $md = 29 }
+    } elseif ($mo -eq 4 -or $mo -eq 6 -or $mo -eq 9 -or $mo -eq 11) { $md = 30 }
+    if ($d -gt $md) { $d = $md }
+    # sprintf("%04d-%02d-%02d", y, mo, d)
+    $ys = ([string][Math]::Abs($y))
+    if ($y -lt 0) { $ys = '-' + $ys.PadLeft(3, '0') } else { $ys = $ys.PadLeft(4, '0') }
+    $b = Get-IsoEpoch ($ys + '-' + ([string]$mo).PadLeft(2, '0') + '-' + ([string]$d).PadLeft(2, '0') + $t.Substring(10))
+    return [int64][Math]::Truncate([double]($e - $b) / 60)
+}
+
+# A non-negative decimal (digits, a fraction) as micro-units, exactly, by
+# string math (micro: Copilot's 100 - pct and OpenCode's USD in
+# agent-hook.sh): the digits without leading zeros, or -1 if it is not one.
+# And back, without trailing zeros (unmicro: Grok's USD).
+function Get-Micro([string]$v) {
+    if ($v -cnotmatch '\A[0-9]+([.][0-9]+)?\z') { return '-1' }
+    $i = $v
+    $f = ''
+    $k = $v.IndexOf('.')
+    if ($k -ge 0) { $i = $v.Substring(0, $k); $f = $v.Substring($k + 1) }
+    $f = ($f + '000000').Substring(0, 6)
+    $m = ($i + $f).TrimStart('0')
+    if (-not $m) { $m = '0' }
+    return $m
+}
+
+function Get-Unmicro([string]$m) {
+    $m = $m.TrimStart('0')
+    if ($m.Length -lt 7) { $m = '0000000'.Substring(0, 7 - $m.Length) + $m }
+    $i = $m.Substring(0, $m.Length - 6).TrimStart('0')
+    if (-not $i) { $i = '0' }
+    $f = $m.Substring($m.Length - 6).TrimEnd('0')
+    if ($f) { return $i + '.' + $f }
+    return $i
+}
+
+$CodexWant = @('timestamp', 'payload.type', 'payload.info.last_token_usage.total_tokens', 'payload.info.model_context_window',
+    'payload.rate_limits.limit_id', 'payload.rate_limits.primary.used_percent', 'payload.rate_limits.primary.window_minutes',
+    'payload.rate_limits.primary.resets_at', 'payload.rate_limits.secondary.used_percent', 'payload.rate_limits.secondary.window_minutes',
+    'payload.rate_limits.secondary.resets_at', 'payload.rate_limits.plan_type', 'payload.rate_limits.rate_limit_reached_type')
+
+# Codex rollout (JSONL) -> a usage line (see Format-UsageLine): the newest
+# token_count event with info (context) and the newest with rate limits, its
+# windows from the file with the record's time (USAGE_CODEX through tail_awk:
+# the last 256 KiB, then the last 2 MiB if that found nothing). Raw JSON
+# tokens, as agent-hook.sh passes them on.
+function Get-CodexUsageLine([string]$path) {
+    $size = (New-Object IO.FileInfo($path)).Length
+    $r = ''
+    foreach ($lim in @(262144, 2097152)) {
+        $skip = ($size -gt $lim)
+        $r = Get-CodexUsageTail (Read-TailB $path $lim) $skip
+        if ($r -and -not $r.EndsWith(' -', $Ord)) { return $r }
+        if (-not $skip) { break }
     }
-    if ($null -eq $ctx) { return $null }
-    $u = @{ ctx = $ctx; win = $win; src = 'rollout'; est = $false; base = 12000; plan = ''; reached = $false; lims = @() }
-    if ($null -ne $rl) {
-        $id = ([string]$rl.limit_id) -replace '[^A-Za-z0-9_.-]', ''
-        if (-not $id) { $id = 'codex' }
-        foreach ($k in @('primary', 'secondary')) {
-            $w = $rl.$k
-            if ($null -ne $w -and (Test-Dec $w.used_percent) -and (Test-Num $w.window_minutes) -and (Test-Num $w.resets_at)) {
-                $u.lims += , @(($id + '.' + $k), (Format-Num $w.used_percent), (Format-Num $w.window_minutes), (Format-Num $w.resets_at))
-            }
-        }
-        if (([string]$rl.plan_type) -match '^[A-Za-z0-9_-]+$') { $u.plan = [string]$rl.plan_type }
-        if ($rl.rate_limit_reached_type) { $u.reached = $true }
+    return $r
+}
+
+function Get-CodexUsageTail([string]$text, [bool]$skip) {
+    $recs = $text.Split([char]10)
+    $L = New-Object 'System.Collections.Generic.List[string]'
+    for ($i = 0; $i -lt $recs.Length; $i++) {
+        # A cut first line is skipped.
+        if ($i -eq 0 -and $skip) { continue }
+        if ($recs[$i].Contains('"token_count"')) { $L.Add($recs[$i]) }
     }
-    return $u
+    $ctx = ''; $win = '-'; $rl = $false; $lims = ''; $plan = '-'; $reached = '0'
+    for ($k = $L.Count - 1; $k -ge 0 -and $k -ge $L.Count - 8; $k--) {
+        $kv = Get-JsonKV $L[$k] $CodexWant
+        if ((Get-Field $kv 'payload.type') -cne 'token_count') { continue }
+        $tt = Get-Field $kv 'payload.info.last_token_usage.total_tokens'
+        if (-not $ctx -and $tt -cmatch '\A[0-9]+\z') {
+            $ctx = $tt
+            $mw = Get-Field $kv 'payload.info.model_context_window'
+            if ($mw -cmatch '\A[0-9]+\z') { $win = $mw }
+        }
+        if (-not $rl -and ($kv.got.ContainsKey('payload.rate_limits.primary.used_percent') -or $kv.got.ContainsKey('payload.rate_limits.plan_type'))) {
+            $rl = $true
+            # The record time is when Codex learned these values (section 9.1).
+            $at = Get-IsoEpoch (Get-Field $kv 'timestamp')
+            $id = [regex]::Replace((Get-Field $kv 'payload.rate_limits.limit_id'), '[^A-Za-z0-9_.-]', '')
+            # (A null limit_id is Codex's own: the ask names it codex too.)
+            if (-not $id -or $id -ceq 'null') { $id = 'codex' }
+            foreach ($w in @('primary', 'secondary')) {
+                $b = 'payload.rate_limits.' + $w + '.'
+                $p = Get-Field $kv ($b + 'used_percent')
+                $m = Get-Field $kv ($b + 'window_minutes')
+                $rs = Get-Field $kv ($b + 'resets_at')
+                if ($p -cmatch '\A[0-9]+([.][0-9]+)?\z' -and $m -cmatch '\A[0-9]+\z' -and $rs -cmatch '\A[0-9]+\z') {
+                    $lims += ' ' + $id + '.' + $w + ':' + $p + ':' + $m + ':' + $rs + ':file'
+                    if ($at -ge 0) { $lims += ':' + $at }
+                }
+            }
+            $p = Get-Field $kv 'payload.rate_limits.plan_type'
+            if ($p -cmatch '\A[A-Za-z0-9_-]+\z' -and $p -cne 'null') { $plan = $p }
+            $p = Get-Field $kv 'payload.rate_limits.rate_limit_reached_type'
+            if ($p -and $p -cne 'null' -and $p -cne 'false') { $reached = '1' }
+        }
+        if ($ctx -and $rl) { break }
+    }
+    if (-not $ctx) { return '' }
+    return $ctx + ' ' + $win + ' rollout 0 12000 ' + $plan + ' ' + $reached + $lims
 }
 
 # Context window Claude Code would use: from its environment, or a guess
@@ -2515,13 +2630,104 @@ function Get-ClaudeWindow([string]$model) {
     return @{ win = 200000; est = $true }
 }
 
-function Get-UsageNow {
+$StatusWant = @('context_window.context_window_size', 'rate_limits.five_hour.used_percentage', 'rate_limits.five_hour.resets_at',
+    'rate_limits.seven_day.used_percentage', 'rate_limits.seven_day.resets_at', 'rate_limits.spend_limit.used_percentage',
+    'rate_limits.spend_limit.resets_at', 'rate_limits.spend_limit.period')
+
+# Status line data saved by scripts/statusline-tap.sh (optional, the user
+# registers it): its lines after the first (STATUSLINE_LIMS) -> @{ win (digits
+# or -); lims (" <id>:<used %>:<window minutes>:<reset epoch>:statusline"...,
+# windows that reset after $now) }. Raw JSON tokens.
+function Get-StatusLineLims([string]$text, [int64]$now) {
+    $s = ''
+    $nl = $text.IndexOf([char]10)
+    if ($nl -ge 0) { $s = $text.Substring($nl + 1) }
+    $kv = Get-JsonKV $s $StatusWant
+    $r = @{ win = '-'; lims = '' }
+    $w = Get-Field $kv 'context_window.context_window_size'
+    if ($w -cmatch '\A[0-9]+\z') { $r.win = $w }
+    $p = Get-Field $kv 'rate_limits.spend_limit.period'
+    $pw = '0'
+    if ($p -ceq 'daily') { $pw = '1440' } elseif ($p -ceq 'weekly') { $pw = '10080' } elseif ($p -ceq 'monthly') { $pw = '43200' }
+    foreach ($row in @(@('five_hour', '300'), @('seven_day', '10080'), @('spend_limit', $pw))) {
+        $u = Get-Field $kv ('rate_limits.' + $row[0] + '.used_percentage')
+        $rs = Get-Field $kv ('rate_limits.' + $row[0] + '.resets_at')
+        if ($u -cnotmatch '\A[0-9]+([.][0-9]+)?\z' -or $rs -cnotmatch '\A[0-9]+\z' -or [double]$rs -le $now) { continue }
+        $r.lims += ' ' + $row[0] + ':' + $u + ':' + $row[1] + ':' + $rs + ':statusline'
+    }
+    return $r
+}
+
+# The `cost` object of a session (costjson in COST_FN), or ''.
+function Get-CostJson([string]$usd, [string]$tin, [string]$tout) {
+    $s = ''
+    if ($usd) { $s += ',"usd":' + $usd }
+    if ($tin -cmatch '\A[0-9]+\z') { $s += ',"tok_in":' + $tin }
+    if ($tout -cmatch '\A[0-9]+\z') { $s += ',"tok_out":' + $tout }
+    if (-not $s) { return '' }
+    return ',"cost":{' + $s.Substring(1) + ',"scope":"session"}'
+}
+
+# Grok Build: tokens and cost of the session from its usage.json (no limits;
+# GROK_COST, section 9.3), the last of ~/.grok/sessions/*/<session>/usage.json.
+# costUsdTicks: 10^-10 USD each (xAI cost_in_usd_ticks); micro-USD exact.
+function Get-GrokCost {
+    if (-not (Test-Id $Script:RawSid)) { return '' }
+    $root = Join-Path (Join-Path $HOME '.grok') 'sessions'
+    $uf = ''
+    try {
+        if (-not [IO.Directory]::Exists($root)) { return '' }
+        $names = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($d in [IO.Directory]::GetDirectories($root)) { $names.Add([IO.Path]::GetFileName($d)) }
+        $names.Sort([StringComparer]::Ordinal)
+        foreach ($n in $names) {
+            # (A shell glob * leaves dot names out.)
+            if ($n.StartsWith('.', $Ord)) { continue }
+            $f = [IO.Path]::Combine($root, $n, (US $Script:RawSid), 'usage.json')
+            if ([IO.File]::Exists($f)) { $uf = $f }
+        }
+    } catch { return '' }
+    if (-not $uf) { return '' }
+    return (Get-GrokCostOf (Read-HeadB $uf 262144))
+}
+
+# The `cost` object of a Grok usage.json text (GROK_COST), or ''.
+function Get-GrokCostOf([string]$text) {
+    $G = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach ($l in (Get-Facts $text '')) {
+        $x = ([string]$l).Split([char]9)
+        if ($x.Length -ge 3 -and $x[1] -ceq 'r' -and -not $G.ContainsKey($x[0])) { $G[$x[0]] = $x[2] }
+    }
+    $t = ''; $tin = ''; $tout = ''
+    [void]$G.TryGetValue('session.costUsdTicks', [ref]$t)
+    [void]$G.TryGetValue('session.inputTokens', [ref]$tin)
+    [void]$G.TryGetValue('session.outputTokens', [ref]$tout)
+    $usd = ''
+    if ([string]$t -cmatch '\A[0-9]+\z') {
+        $t = ([string]$t).TrimStart('0')
+        if ($t.Length -gt 4) { $usd = Get-Unmicro $t.Substring(0, $t.Length - 4) } else { $usd = Get-Unmicro '0' }
+    }
+    return (Get-CostJson $usd ([string]$tin) ([string]$tout))
+}
+
+# The usage line of the current event and its `cost` object (usage_compute):
+# @{ line; cost }, each '' if there is none. The line is "<ctx|-> <win|->
+# <src|-> <est 0|1> <baseline|-> <plan|-> <reached 0|1>
+# [<id>:<pct>:<win min>:<reset epoch>[:<src>[:<at epoch>]]]...".
+function Get-UsageLine {
+    $u = @{ line = ''; cost = '' }
+    if ($Script:Agent -ceq 'grok') {
+        $u.cost = Get-GrokCost
+        return $u
+    }
     $tpath = Get-InputFile $Script:TPath
     if ($Script:Agent -ceq 'codex') {
-        if (-not $tpath) { return $null }
-        return (Get-CodexUsage $tpath)
+        if ($tpath) { $u.line = Get-CodexUsageLine $tpath }
+        return $u
     }
-    if ($Script:Agent -cne 'claude') { return $null }
+    if ($Script:Agent -cne 'claude') { return $u }
+    $reached = '0'
+    if ($Script:HookEvent -ceq 'StopFailure' -and $Script:Err -ceq 'rate_limit') { $reached = '1' }
     $ctx = $null; $src = 'transcript'
     $model = $Script:Model
     $tok = $Script:CtxTok
@@ -2531,11 +2737,11 @@ function Get-UsageNow {
         $c = Get-ClaudeUsage $tpath
         if ($null -ne $c) { $ctx = $c.ctx; if (-not $model) { $model = $c.model } }
     }
-    if ($null -eq $ctx) { return $null }
+    if ($null -eq $ctx) { return $u }
     $model = $model -replace '[^A-Za-z0-9._:@/\[\]-]', ''
     $w = Get-ClaudeWindow $model
-    $u = @{ ctx = $ctx; win = $w.win; src = $src; est = $w.est; base = $null; plan = ''; reached = $false; lims = @() }
-    if ($Script:HookEvent -ceq 'StopFailure' -and $Script:Err -ceq 'rate_limit') { $u.reached = $true }
+    $win = $w.win
+    $est = $w.est
     # The session's window as last known, "<window|-> <est 0|1> <since>" (as in
     # agent-hook.sh): transcripts drop the [1m] of a 1M session. SessionStart
     # and PostModelSwitch name the model in use and start it over.
@@ -2551,93 +2757,603 @@ function Get-UsageNow {
             }
         }
     } catch { }
-    if ($Script:HookEvent -ceq 'SessionStart' -or $Script:HookEvent -ceq 'PostModelSwitch') { $mw = ''; $me = $true; $ms = Now-Epoch }
+    if ($Script:HookEvent -ceq 'SessionStart' -or $Script:HookEvent -ceq 'PostModelSwitch') { $mw = ''; $me = $true; $ms = $Script:Now }
     # Optional status line tap (scripts/statusline-tap.sh): exact window, limits.
+    $lims = ''
     $sl = Join-Path $RunDir ('usage.' + $Sid + '.json')
     try {
-        if ([IO.File]::Exists($sl) -and (New-Object IO.FileInfo($sl)).Length -le 65536) {
-            $text = [IO.File]::ReadAllText($sl, $Utf8)
-            $nl = $text.IndexOf([char]10)
-            $t = ''
-            if ($nl -gt 0) { $t = $text.Substring(0, $nl).Trim() }
-            $now = Now-Epoch
+        if ([IO.File]::Exists($sl)) {
+            $head = Read-HeadB $sl 65536
+            $t = $head
+            $nl = $head.IndexOf([char]10)
+            if ($nl -ge 0) { $t = $head.Substring(0, $nl) }
+            $now = $Script:Now
             if ((Test-UInt $t) -and ($now - [int64]$t) -le 600 -and ([int64]$t - $now) -le 60) {
-                $o = ConvertFrom-JsonLine $text.Substring($nl + 1)
-                if ($null -ne $o) {
-                    if ($null -ne $o.context_window -and (Test-Num $o.context_window.context_window_size) -and [int64]$t -gt $ms) {
-                        $u.win = [int64]$o.context_window.context_window_size; $u.est = $false
-                    }
-                    if ($null -ne $o.rate_limits) {
-                        $period = [string]$o.rate_limits.spend_limit.period
-                        $pw = 0
-                        if ($period -eq 'daily') { $pw = 1440 } elseif ($period -eq 'weekly') { $pw = 10080 } elseif ($period -eq 'monthly') { $pw = 43200 }
-                        foreach ($row in @(@('five_hour', 300), @('seven_day', 10080), @('spend_limit', $pw))) {
-                            $lw = $o.rate_limits.($row[0])
-                            if ($null -ne $lw -and (Test-Dec $lw.used_percentage) -and (Test-Num $lw.resets_at) -and [int64]$lw.resets_at -gt $now) {
-                                $u.lims += , @($row[0], (Format-Num $lw.used_percentage), [string]$row[1], (Format-Num $lw.resets_at))
-                            }
-                        }
-                    }
-                }
+                $s = Get-StatusLineLims $head $now
+                if ((Test-UInt $s.win) -and [int64]$t -gt $ms) { $win = [int64]$s.win; $est = $false }
+                $lims = $s.lims
             }
         }
     } catch { }
-    if ($u.est -and $mw) { $u.win = [int64]$mw; $u.est = $me }
+    if ($est -and $mw) { $win = [int64]$mw; $est = $me }
     # A guess below the context in use is wrong: the window is 1M.
-    if ($u.est -and $u.ctx -gt $u.win) { $u.win = 1000000; $mw = '1000000' }
+    if ($est -and $ctx -gt $win) { $win = 1000000; $mw = '1000000' }
     $new = '- 1 ' + $ms
-    if (-not $u.est) { $new = [string]$u.win + ' 0 ' + $ms } elseif ($mw) { $new = [string]$u.win + ' 1 ' + $ms }
+    if (-not $est) { $new = [string]$win + ' 0 ' + $ms } elseif ($mw) { $new = [string]$win + ' 1 ' + $ms }
     try {
         $old = ''
         if ([IO.File]::Exists($winPath)) { $old = [IO.File]::ReadAllText($winPath, $Utf8).Trim() }
         if ($old -ne $new) { [IO.File]::WriteAllText($winPath, $new + "`n", $Utf8) }
     } catch { }
+    $e = '0'
+    if ($est) { $e = '1' }
+    $u.line = [string]$ctx + ' ' + [string]$win + ' ' + $src + ' ' + $e + ' - - ' + $reached + $lims
     return $u
 }
 
-# A usage table -> @{ osc (OSC 9 body); json (plaintext fields) }.
-function Format-Usage($u) {
-    $osc = 'simpleterm:usage v=1 agent=' + $App + ' ctx=' + $u.ctx
-    $js = ',"ctx":{"used":' + $u.ctx
-    if ($null -ne $u.win) { $osc += ' win=' + $u.win; $js += ',"win":' + $u.win }
-    if ($null -ne $u.base) { $js += ',"baseline":' + $u.base }
-    $osc += ' src=' + $u.src
-    $js += ',"src":"' + $u.src + '"'
-    if ($u.est) { $osc += ' est=1'; $js += ',"est":true' }
-    $js += '}'
-    $la = @()
-    foreach ($l in $u.lims) {
-        $osc += ' lim=' + $l[0] + ':' + $l[1] + ':' + $l[2] + ':' + $l[3]
-        $la += ('{"id":"' + $l[0] + '","pct":' + $l[1] + ',"win_min":' + $l[2] + ',"resets_at":' + $l[3] + '}')
-    }
-    if ($u.reached) { $osc += ' lim=reached'; $la += '{"id":"reached"}' }
-    $js += ',"lims":[' + ($la -join ',') + ']'
-    if ($u.plan) { $js += ',"plan":"' + $u.plan + '"' }
-    return @{ osc = $osc; json = $js }
+# awk's `$n == 1` of a field: a number when it looks like one.
+function Test-AwkOne([string]$v) {
+    if ($v -cmatch '\A[+-]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][+-]?[0-9]+)?\z') { return ([double]::Parse($v, $Inv) -eq 1) }
+    return ($v -ceq '1')
 }
 
-# Reports changed context/limits: the OSC for the terminal (Claude Code in
-# SimpleTerm) and a `usage` event for the SSH tunnel links (the relay does
-# not push them, so it gets none).
+# A usage line (see Get-UsageLine) -> @{ osc (the OSC 9 body: v1, none
+# without a context); json (the v1 fields of the `usage` event, with each
+# window's `src` and `at`, section 9.1) } (USAGE_FMT).
+function Format-UsageLine([string]$line) {
+    $r = @{ osc = ''; json = '' }
+    $k = $line.IndexOf([char]10)
+    if ($k -ge 0) { $line = $line.Substring(0, $k) }
+    $fs = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($m in [regex]::Matches($line, '[^ \t]+')) { $fs.Add($m.Value) }
+    while ($fs.Count -lt 7) { $fs.Add('') }
+    $num = '\A[0-9]+\z'
+    $dec = '\A[0-9]+([.][0-9]+)?\z'
+    $hc = ($fs[0] -cmatch $num)
+    if (-not $hc -and $fs[0] -cne '-') { return $r }
+    if ($hc -and $fs[2] -cnotmatch '\A[a-z]+\z') { return $r }
+    $osc = ''
+    $js = ''
+    if ($hc) {
+        $osc = 'simpleterm:usage v=1 agent=' + $Script:App + ' ctx=' + $fs[0]
+        $js = ',"ctx":{"used":' + $fs[0]
+        if ($fs[1] -cmatch $num) { $osc += ' win=' + $fs[1]; $js += ',"win":' + $fs[1] }
+        if ($fs[4] -cmatch $num) { $js += ',"baseline":' + $fs[4] }
+        $osc += ' src=' + $fs[2]
+        $js += ',"src":"' + $fs[2] + '"'
+        if (Test-AwkOne $fs[3]) { $osc += ' est=1'; $js += ',"est":true' }
+        $js += '}'
+    }
+    $la = ''
+    $nl = 0
+    for ($i = 7; $i -lt $fs.Count; $i++) {
+        $P = $fs[$i].Split(':')
+        $n = $P.Length
+        if ($n -lt 4 -or $n -gt 6) { continue }
+        if ($P[0] -cnotmatch '\A[A-Za-z0-9_.-]+\z' -or $P[1] -cnotmatch $dec -or $P[2] -cnotmatch $num -or $P[3] -cnotmatch $num) { continue }
+        if ($n -ge 5 -and $P[4] -cnotmatch '\A(ask|file|statusline|hook)\z') { continue }
+        if ($n -eq 6 -and $P[5] -cnotmatch $num) { continue }
+        if ($hc) { $osc += ' lim=' + $P[0] + ':' + $P[1] + ':' + $P[2] + ':' + $P[3] }
+        $e = '{"id":"' + $P[0] + '","pct":' + $P[1] + ',"win_min":' + $P[2] + ',"resets_at":' + $P[3]
+        if ($n -ge 5) { $e += ',"src":"' + $P[4] + '"' }
+        if ($n -eq 6) { $e += ',"at":' + $P[5] }
+        if ($la) { $la += ',' }
+        $la += $e + '}'
+        $nl++
+    }
+    if (Test-AwkOne $fs[6]) {
+        if ($hc) { $osc += ' lim=reached' }
+        if ($la) { $la += ',' }
+        $la += '{"id":"reached"}'
+        $nl++
+    }
+    # (As in v1, a report with a context always names its windows, [] too.)
+    if ($hc -or $nl -gt 0) { $js += ',"lims":[' + $la + ']' }
+    if ($fs[5] -cmatch '\A[A-Za-z0-9_-]+\z' -and $fs[5] -cne '-') { $js += ',"plan":"' + $fs[5] + '"' }
+    $r.osc = $osc
+    $r.json = $js
+    return $r
+}
+
+# Reports context, rate limits and cost when they changed: an OSC 9 for the
+# terminal (Claude Code in SimpleTerm, UsageSeq; v1, context and windows only)
+# and a `usage` event for the SSH tunnel links (section 9.1). The relay gets
+# none: it does not push them (an iOS push is always an alert) and every
+# request costs a function call. At a turn's end it may also ask the agent
+# (Invoke-UsageAsk). As usage_report in agent-hook.sh.
 function Invoke-UsageReport {
     $Script:UsageSeq = ''
     if ((Get-ConfInt 'usage' 1) -eq 0) { return }
-    $u = $null
-    try { $u = Get-UsageNow } catch { Write-Log ('usage-failed ' + $_.Exception.GetType().Name) }
-    if ($null -eq $u) { return }
-    $fmt = Format-Usage $u
-    $Script:UsageJson = $fmt.json
-    $last = Join-Path $RunDir ($Sid + '.usage')
-    $prev = ''
-    try { if ([IO.File]::Exists($last)) { $prev = [IO.File]::ReadAllText($last, $Utf8).Trim() } } catch { }
-    if ($prev -eq $fmt.osc) { return }
-    # Recorded as sent only once SimpleTerm has it: on Claude Code's terminal,
-    # or when a tunnel link took the event (as in agent-hook.sh).
-    $Script:UsageSeq = '\u001b]9;' + $fmt.osc + '\u0007'
-    if ($Agent -eq 'claude' -and $env:SIMPLETERM -eq '1') {
-        try { [IO.File]::WriteAllText($last, $fmt.osc + "`n", $Utf8) } catch { }
+    $u = @{ line = ''; cost = '' }
+    try { $u = Get-UsageLine } catch { Write-Log ('usage-failed ' + $_.Exception.GetType().Name) }
+    $osc = ''
+    $Script:UsageJson = ''
+    if ($u.line) {
+        $fmt = Format-UsageLine $u.line
+        $osc = $fmt.osc
+        $Script:UsageJson = $fmt.json
     }
-    Send-Background 'usage' (New-RandomHex 8) 'tunnel' ($Sid + '.usage') $fmt.osc
+    try { Invoke-UsageAsk } catch { Write-Log ('usage-ask-failed ' + $_.Exception.GetType().Name) }
+    $cost = [string]$u.cost
+    if (-not ($Script:UsageJson + $cost)) { return }
+    $key = $osc + $Script:UsageJson + $cost
+    $last = Join-Path $RunDir ($Sid + '.usage')
+    $prev = Read-FileB $last
+    if ($null -eq $prev) { $prev = '' }
+    if ($prev.TrimEnd([char]10) -ceq $key) { return }
+    # Recorded as sent only once SimpleTerm has it: on Claude Code's terminal
+    # (printed by Write-State), or when a tunnel link took the event.
+    # Otherwise it goes again next time, though unchanged, in case the app
+    # connects meanwhile.
+    if ($osc) {
+        $Script:UsageSeq = '\u001b]9;' + $osc + '\u0007'
+        if ($Script:Agent -ceq 'claude' -and $env:SIMPLETERM -eq '1') { [void](Write-FileB $last ($key + "`n")) }
+    }
+    Send-Usage (Get-UsageRid) $cost ($Sid + '.usage') $key
+}
+
+# A usage event's own rid (SIMPLETERM_HOOK_TEST_URID in tests).
+function Get-UsageRid {
+    if ($env:SIMPLETERM_HOOK_TEST -eq '1' -and $env:SIMPLETERM_HOOK_TEST_URID) { return (BS $env:SIMPLETERM_HOOK_TEST_URID) }
+    return (New-RandomHex 8)
+}
+
+# The `usage` event (UsageJson, then $tail: uq, cost) to the tunnels, with the
+# common fields (section 9.1); once a tunnel took it, $markText goes to the
+# run file $markName (usage_send). -Sync sends from this process (a usage
+# ask's child, already in the background).
+function Send-Usage([string]$rid, [string]$tail, [string]$markName, [string]$markText, [switch]$Sync) {
+    if (-not (Test-Hex $rid 16)) { return }
+    $us = $Script:Spec
+    $ux = $Script:V2X
+    $um = $Script:NoMsg
+    $Script:UsageV2 = $tail
+    $Script:NoMsg = $true
+    Initialize-V2 ''
+    if ($Sync) { Send-Now 'usage' $rid 'tunnel' $markName $markText }
+    else { Send-Background 'usage' $rid 'tunnel' $markName $markText }
+    $Script:Spec = $us
+    $Script:V2X = $ux
+    $Script:NoMsg = $um
+    $Script:UsageV2 = ''
+}
+
+# --- usage asks (TDS_AGENT_EVENTS_V2 section 9.2) ----------------------------------
+
+# The agent versions whose ask was measured to make no model request
+# (2026-11-03, a local mock API, .hjc/research/2026-11-03-usage-ask of the
+# app): asks run from Min up to, not including, Below. Another version is not
+# asked (its file values still go).
+$AskClaudeMin = '2.1.316'
+$AskClaudeBelow = '2.2.0'
+$AskCodexMin = '0.165.0'
+$AskCodexBelow = '0.166.0'
+# (Measured 0 model requests: Claude Code 2.1.316 and 2.1.317 in 22 asks,
+# Codex 0.165.0 in 11; the same harness caught 6 and 31 in real turns.)
+
+# A word value of agent-hook.conf (the first line key=<letters and digits>),
+# or $default (conf_word).
+function Get-ConfWord([string]$key, [string]$default) {
+    $path = Join-Path $StDir 'agent-hook.conf'
+    $v = ''
+    try {
+        if ([IO.File]::Exists($path)) {
+            foreach ($line in (Read-HeadB $path 4096).Split([char]10)) {
+                $m = [regex]::Match($line, '\A' + [regex]::Escape($key) + '=([A-Za-z0-9]*)\z')
+                if ($m.Success) { $v = $m.Groups[1].Value; break }
+            }
+        }
+    } catch { }
+    if (-not $v) { return $default }
+    return $v
+}
+
+# A number as awk reads a string (its leading number, else 0).
+function Get-AwkNum([string]$s) {
+    $m = [regex]::Match($s, '\A[ \t]*[+-]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][+-]?[0-9]+)?')
+    if (-not $m.Success) { return [double]0 }
+    try { return [double]::Parse($m.Value.Trim(), $Inv) } catch { return [double]0 }
+}
+
+# True if dotted version $a is older than $b (ver_lt: the first three parts).
+function Test-VerLt([string]$a, [string]$b) {
+    $pa = $a.Split('.')
+    $pb = $b.Split('.')
+    for ($i = 0; $i -lt 3; $i++) {
+        $x = [double]0
+        $y = [double]0
+        if ($i -lt $pa.Length) { $x = Get-AwkNum $pa[$i] }
+        if ($i -lt $pb.Length) { $y = Get-AwkNum $pb[$i] }
+        if ($x -lt $y) { return $true }
+        if ($x -gt $y) { return $false }
+    }
+    return $false
+}
+
+# True if the app is connected: a tunnel link whose last event got an HTTP 200
+# within 10 minutes (Complete-Ingest records it). A tunnel file left behind by
+# a closed connection does not count (tunnel_live).
+function Test-TunnelLive {
+    $tn = Now-Epoch
+    foreach ($f in $Script:LinkFiles) {
+        $link = Read-Link $f
+        if ($null -eq $link -or $link.kind -cne 'tunnel') { continue }
+        $t = Read-FileB (Join-Path $RunDir ('tun.' + (Short $link.link) + '.last'))
+        if ($null -eq $t) { continue }
+        # read -r lt lc: a whole line, its first word and the rest.
+        $k = $t.IndexOf([char]10)
+        if ($k -lt 0) { continue }
+        $m = [regex]::Match($t.Substring(0, $k), '\A[ \t]*([^ \t]*)[ \t]*(.*?)[ \t]*\z')
+        $lt = $m.Groups[1].Value
+        $lc = $m.Groups[2].Value
+        if ((Test-UInt $lt) -and $lc -ceq '200' -and ($tn - [int64]$lt) -le 600 -and ([int64]$lt - $tn) -le 60) { return $true }
+    }
+    return $false
+}
+
+# The agent's executable on PATH: claude or codex (claude.exe, codex.exe on
+# Windows), a full path, or ''.
+function Find-AskAgent([string]$name) {
+    if ($IsWin) { $name += '.exe' }
+    try {
+        $cmd = @(Get-Command -Name $name -CommandType Application -ErrorAction SilentlyContinue)
+        if ($cmd.Count -eq 0) { return '' }
+        $p = [string]$cmd[0].Path
+        if ($p -and [IO.Path]::IsPathRooted($p) -and [IO.File]::Exists($p)) { return $p }
+    } catch { }
+    return ''
+}
+
+# At the end of a turn, while the app is connected, at most every 5 minutes
+# per agent and settings folder: asks the agent for its limits in a detached
+# child (stdio closed, 20 seconds at most). After a failed sign-in it asks
+# again only once the agent's credentials file changed. usage_ask=off in
+# agent-hook.conf turns it off. As usage_ask in agent-hook.sh.
+function Invoke-UsageAsk {
+    if (@('off', '0', 'no', 'false') -ccontains (Get-ConfWord 'usage_ask' 'on')) { return }
+    if ($Script:HookEvent -cne 'Stop' -and $Script:HookEvent -cne 'StopFailure') { return }
+    if ($Script:Agent -ceq 'claude') {
+        $ab = 'claude'
+        $cfg = [string]$env:CLAUDE_CONFIG_DIR
+        if (-not $cfg) { $cfg = Join-Path $HOME '.claude' }
+        $amin = $AskClaudeMin
+        $abelow = $AskClaudeBelow
+        $ind = Join-Path $cfg '.credentials.json'
+    } elseif ($Script:Agent -ceq 'codex') {
+        $ab = 'codex'
+        $cfg = [string]$env:CODEX_HOME
+        if (-not $cfg) { $cfg = Join-Path $HOME '.codex' }
+        $amin = $AskCodexMin
+        $abelow = $AskCodexBelow
+        $ind = Join-Path $cfg 'auth.json'
+    } else { return }
+    if ($Script:LinkFiles.Count -eq 0 -or -not (Test-TunnelLive)) { return }
+    Initialize-Common
+    if ($Script:AV -cnotmatch '\A[0-9].*[.][0-9]') { return }
+    if (Test-VerLt $Script:AV $amin) { return }
+    if (-not (Test-VerLt $Script:AV $abelow)) { return }
+    $off = Read-FileB (Join-Path $RunDir ('ask.' + $Script:Agent + '.off'))
+    if ($null -ne $off -and $off.TrimEnd([char]10) -ceq $Script:AV) { return }
+    $af = Join-Path $RunDir ('ask.' + $Script:Agent + '.' + (Get-Sha256Hex (BS $cfg)).Substring(0, 16))
+    $auth = $af + '.auth'
+    if ([IO.File]::Exists($auth)) {
+        if (-not ([IO.File]::Exists($ind) -and [IO.File]::GetLastWriteTimeUtc($ind) -gt [IO.File]::GetLastWriteTimeUtc($auth))) { return }
+        Remove-FileQ $auth
+    }
+    $la = Read-FileB $af
+    if ($null -eq $la) { $la = '' }
+    $la = $la.TrimEnd([char]10)
+    if ((Test-UInt $la) -and ($Script:Now - [int64]$la) -lt 300 -and ([int64]$la - $Script:Now) -le 60) { return }
+    $ap = Find-AskAgent $ab
+    if (-not $ap) { return }
+    if (-not (Write-FileB $af ([string]$Script:Now + "`n"))) { return }
+    $probe = Join-Path $StDir 'probe'
+    try { if (-not [IO.Directory]::Exists($probe)) { [void][IO.Directory]::CreateDirectory($probe) } } catch { return }
+    # 700 where there are modes (Windows: the profile's own ACL).
+    if (-not $IsWin) { try { [IO.File]::SetUnixFileMode($probe, 448) } catch { } }
+    Write-Log ('usage-ask ' + $Script:Agent)
+    Initialize-Facts
+    $job = New-Job 'uask'
+    $job.ap = BS $ap
+    $job.af = BS $af
+    $job.av = $Script:AV
+    Start-Child $job
+}
+
+# The agent session's own variables (measured, Claude Code 2.1.316): the ask
+# is not a child of that session.
+$AskUnset = @('CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_EXECPATH',
+    'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN',
+    'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS', 'CLAUDE_EFFORT', 'CLAUDE_PID', 'AI_AGENT', 'SIMPLETERM')
+
+function Write-AskLines($stream, [string[]]$lines) {
+    try {
+        foreach ($l in $lines) {
+            $b = $Latin1.GetBytes($l + "`n")
+            $stream.Write($b, 0, $b.Length)
+        }
+        $stream.Flush()
+    } catch { }
+}
+
+# Takes what the agent wrote so far ($st.text, 2 MiB at most kept).
+function Step-AskOut($st) {
+    while ($null -ne $st.task -and $st.task.IsCompleted) {
+        $n = 0
+        try { $n = [int]$st.task.Result } catch { $n = 0 }
+        if ($n -le 0) { $st.eof = $true; $st.task = $null; break }
+        if ($st.text.Length -lt 2097152) { $st.text += $Latin1.GetString($st.buf, 0, $n) }
+        try { $st.task = $st.so.ReadAsync($st.buf, 0, $st.buf.Length) } catch { $st.eof = $true; $st.task = $null }
+    }
+}
+
+# The first MiB of the output, where the answers are looked for.
+function Get-AskHead($st) {
+    if ($st.text.Length -gt 1048576) { return $st.text.Substring(0, 1048576) }
+    return $st.text
+}
+
+# Runs agent $exe ($argLine) in ~/.simpleterm/probe with SIMPLETERM_PROBE=1,
+# its standard input the lines $inLines, then the lines $moreLines once its
+# output holds $w1 (or at once without $w1), then open until the output holds
+# $w2 or 20 seconds passed; then closed, and the agent stopped 3 seconds
+# later (ask_pipe). Returns @{ res: ok (got $w2), gone (ended without it) or
+# timeout; text: its output }.
+function Invoke-AskPipe([string]$exe, [string]$argLine, [string[]]$inLines, [string[]]$moreLines, [string]$w1, [string]$w2) {
+    $st = @{ res = 'gone'; text = ''; eof = $false; task = $null; so = $null; buf = (New-Object byte[] 65536) }
+    $probe = Join-Path $StDir 'probe'
+    $p = $null
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $exe
+        $psi.Arguments = $argLine
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.WorkingDirectory = $probe
+        foreach ($v in $AskUnset) { if ($psi.EnvironmentVariables.ContainsKey($v)) { $psi.EnvironmentVariables.Remove($v) } }
+        $psi.EnvironmentVariables['SIMPLETERM_PROBE'] = '1'
+        if (-not $IsWin) { $psi.EnvironmentVariables['PWD'] = $probe }
+        # (.NET Framework would start the agent's input with the console
+        # encoding's preamble: a UTF-8 code page's BOM.)
+        if ($IsWin) { try { [Console]::InputEncoding = $Utf8 } catch { } }
+        $p = [System.Diagnostics.Process]::Start($psi)
+    } catch { return $st }
+    try {
+        $st.so = $p.StandardOutput.BaseStream
+        # Its errors go nowhere (2>/dev/null), read so that it never blocks.
+        [void]$p.StandardError.ReadToEndAsync()
+        $st.task = $st.so.ReadAsync($st.buf, 0, $st.buf.Length)
+        $si = $p.StandardInput.BaseStream
+        Write-AskLines $si $inLines
+        $sent = ($w1.Length -eq 0)
+        $until = [DateTime]::UtcNow.AddSeconds(20)
+        $st.res = 'timeout'
+        while ($true) {
+            Step-AskOut $st
+            if (-not $sent -and (Get-AskHead $st).Contains($w1)) { Write-AskLines $si $moreLines; $sent = $true }
+            if ((Get-AskHead $st).Contains($w2)) { $st.res = 'ok'; break }
+            if ($p.HasExited) {
+                # Ended: what it wrote is read to the end first.
+                $end = [DateTime]::UtcNow.AddSeconds(2)
+                while (-not $st.eof -and [DateTime]::UtcNow -lt $end) { Step-AskOut $st; if (-not $st.eof) { Start-Sleep -Milliseconds 50 } }
+                $st.res = 'gone'
+                break
+            }
+            if ([DateTime]::UtcNow -ge $until) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ((Get-AskHead $st).Contains($w2)) { $st.res = 'ok' }
+        if (-not $sent) { Write-AskLines $si $moreLines }
+        try { $p.StandardInput.Close() } catch { }
+        $kill = [DateTime]::UtcNow.AddSeconds(3)
+        while (-not $p.HasExited -and [DateTime]::UtcNow -lt $kill) { Step-AskOut $st; Start-Sleep -Milliseconds 100 }
+        if (-not $p.HasExited) { try { $p.Kill() } catch { } }
+        $end = [DateTime]::UtcNow.AddSeconds(1)
+        while (-not $st.eof -and [DateTime]::UtcNow -lt $end) { Step-AskOut $st; if (-not $st.eof) { Start-Sleep -Milliseconds 50 } }
+    } catch {
+        try { if (-not $p.HasExited) { $p.Kill() } } catch { }
+    }
+    try { $p.Dispose() } catch { }
+    return $st
+}
+
+# The facts of the first line of output $text holding $w, cut to 256 KiB
+# (ask_facts).
+function Get-AskFacts([string]$text, [string]$w) {
+    foreach ($line in $text.Split([char]10)) {
+        if (-not $line.Contains($w)) { continue }
+        $l = $line + "`n"
+        if ($l.Length -gt 262144) { $l = $l.Substring(0, 262144) }
+        return (Get-Facts $l '')
+    }
+    return @()
+}
+
+# Facts lines `path TAB type TAB value` -> @{ F (value); T (type); O (paths in
+# order) }, the first line of each path.
+function Read-FactMap($facts) {
+    $m = @{
+        F = (New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal))
+        T = (New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal))
+        O = (New-Object 'System.Collections.Generic.List[string]')
+    }
+    foreach ($x in $facts) {
+        $l = [string]$x
+        $p = $l; $t = ''; $v = ''
+        $t1 = $l.IndexOf([char]9)
+        if ($t1 -ge 0) {
+            $p = $l.Substring(0, $t1)
+            $t2 = $l.IndexOf([char]9, $t1 + 1)
+            if ($t2 -lt 0) { $t = $l.Substring($t1 + 1) }
+            else {
+                $t = $l.Substring($t1 + 1, $t2 - $t1 - 1)
+                $v = $l.Substring($t2 + 1)
+                $t3 = $v.IndexOf([char]9)
+                if ($t3 -ge 0) { $v = $v.Substring(0, $t3) }
+            }
+        }
+        if (-not $m.F.ContainsKey($p)) { $m.F[$p] = $v; $m.T[$p] = $t; $m.O.Add($p) }
+    }
+    return $m
+}
+
+function Get-FactV($m, [string]$p) { $x = $null; if ($m.F.TryGetValue($p, [ref]$x)) { return [string]$x }; return '' }
+function Get-FactT($m, [string]$p) { $x = $null; if ($m.T.TryGetValue($p, [ref]$x)) { return [string]$x }; return '' }
+
+# A window of a Claude Code answer: " <id>:<pct>:<win>:<reset>:ask:<at>" or ''.
+function Get-ClaudeAskWin($m, [string]$id, [string]$p, [string]$w, [string]$at) {
+    $u = Get-FactV $m ($p + '.utilization')
+    $r = Get-IsoEpoch (Get-FactV $m ($p + '.resets_at'))
+    if ((Get-FactT $m ($p + '.utilization')) -cne 'r' -or $u -cnotmatch '\A[0-9]+([.][0-9]+)?\z' -or $r -lt 0) { return '' }
+    return ' ' + $id + ':' + $u + ':' + $w + ':' + $r + ':ask:' + $at
+}
+
+# Claude Code get_usage control response (facts) -> "OK <usage line>" or "ERR
+# <uq.err>" (section 9.3; CLAUDE_USAGE). $at: the epoch the answer came. An
+# answer whose session shows any model spend (cost, API time or a model's
+# usage; measured 0 in every ask, 2.1.316 and 2.1.317) is "ERR spent": asks
+# of that version stop.
+function Get-ClaudeAskLine($facts, [string]$at) {
+    $m = Read-FactMap $facts
+    if ((Get-FactV $m 'response.subtype') -cne 'success') {
+        $e = (Get-FactV $m 'response.error').ToLowerInvariant()
+        if ($e -cmatch 'auth|log ?in|credential|oauth|unauthori|401|403') { return 'ERR auth' }
+        return 'ERR failed'
+    }
+    $R = 'response.response.'
+    if ((Get-FactV $m ($R + 'session.total_cost_usd')) -cnotmatch '\A0([.]0+)?\z' -or (Get-FactV $m ($R + 'session.total_api_duration_ms')) -cnotmatch '\A0([.]0+)?\z') { return 'ERR spent' }
+    foreach ($p in $m.O) { if ($p.StartsWith($R + 'session.model_usage.', $Ord)) { return 'ERR spent' } }
+    if ((Get-FactV $m ($R + 'rate_limits_available')) -ceq 'false') { return 'ERR not-subscriber' }
+    # Limits there but not known now (traffic turned off, a failed refresh):
+    # nothing to show, not 0 percent.
+    if (-not $m.F.ContainsKey($R + 'rate_limits.five_hour.utilization') -and -not $m.F.ContainsKey($R + 'rate_limits.seven_day.utilization') -and
+        -not $m.F.ContainsKey($R + 'rate_limits.model_scoped.0.utilization')) { return 'ERR failed' }
+    $plan = Get-FactV $m ($R + 'subscription_type')
+    if ((Get-FactT $m ($R + 'subscription_type')) -cne 's' -or $plan -cnotmatch '\A[A-Za-z0-9_-]+\z') { $plan = '-' }
+    $out = ''
+    $out += Get-ClaudeAskWin $m 'five_hour' ($R + 'rate_limits.five_hour') '300' $at
+    $out += Get-ClaudeAskWin $m 'seven_day' ($R + 'rate_limits.seven_day') '10080' $at
+    for ($k = 0; $k -lt 16 -and $m.F.ContainsKey($R + 'rate_limits.model_scoped.' + $k + '.display_name'); $k++) {
+        $n = [regex]::Replace((Get-FactV $m ($R + 'rate_limits.model_scoped.' + $k + '.display_name')), '[^A-Za-z0-9._-]', '-')
+        if (-not $n) { continue }
+        $id = 'seven_day.' + $n
+        if ($id.Length -gt 64) { $id = $id.Substring(0, 64) }
+        $out += Get-ClaudeAskWin $m $id ($R + 'rate_limits.model_scoped.' + $k) '10080' $at
+    }
+    return 'OK - - - 0 - ' + $plan + ' 0' + $out
+}
+
+# A window of a Codex RateLimitSnapshot: " <id>:<pct>:<win>:<reset>:ask:<at>" or ''.
+function Get-CodexAskWin($m, [string]$id, [string]$b, [string]$at) {
+    $p = Get-FactV $m ($b + '.usedPercent')
+    $w = Get-FactV $m ($b + '.windowDurationMins')
+    $r = Get-FactV $m ($b + '.resetsAt')
+    if ($p -cnotmatch '\A[0-9]+([.][0-9]+)?\z' -or $w -cnotmatch '\A[0-9]+\z' -or $r -cnotmatch '\A[0-9]+\z') { return '' }
+    return ' ' + $id + ':' + $p + ':' + $w + ':' + $r + ':ask:' + $at
+}
+
+# One RateLimitSnapshot at fact path $b (its id, else $key) into $cs: its
+# primary and secondary windows, the plan, reached.
+function Add-CodexAskSnap($m, $cs, [string]$b, [string]$key, [string]$at) {
+    $id = $key
+    if ((Get-FactT $m ($b + '.limitId')) -ceq 's') { $id = Get-FactV $m ($b + '.limitId') }
+    $id = [regex]::Replace($id, '[^A-Za-z0-9_.-]', '')
+    if (-not $id) { $id = 'codex' }
+    $cs.out += Get-CodexAskWin $m ($id + '.primary') ($b + '.primary') $at
+    $cs.out += Get-CodexAskWin $m ($id + '.secondary') ($b + '.secondary') $at
+    if ($cs.plan -ceq '-' -and (Get-FactT $m ($b + '.planType')) -ceq 's' -and (Get-FactV $m ($b + '.planType')) -cmatch '\A[A-Za-z0-9_-]+\z') { $cs.plan = Get-FactV $m ($b + '.planType') }
+    if ((Get-FactT $m ($b + '.rateLimitReachedType')) -ceq 's') { $cs.reached = 1 }
+}
+
+# Codex app-server account/rateLimits/read reply (facts) -> as
+# Get-ClaudeAskLine: each RateLimitSnapshot of rateLimitsByLimitId (else
+# rateLimits) as <limitId>.primary and .secondary, the id as the rollout path
+# makes it (CODEX_USAGE).
+function Get-CodexAskLine($facts, [string]$at) {
+    $m = Read-FactMap $facts
+    # Measured (0.165.0): -32600 "codex account authentication required to
+    # read rate limits" (signed out), -32600 "chatgpt authentication required
+    # to read rate limits" (an API key: no plan limits), -32603 "failed to
+    # fetch codex rate limits: GET .../wham/usage failed: 401 ..." (the
+    # backend refused). The message itself goes nowhere.
+    if ($m.F.ContainsKey('error.message') -or $m.F.ContainsKey('error.code')) {
+        $e = (Get-FactV $m 'error.message').ToLowerInvariant()
+        if ($e -cmatch 'chatgpt authentication required') { return 'ERR not-subscriber' }
+        if ($e -cmatch 'authentication required|401|403') { return 'ERR auth' }
+        return 'ERR failed'
+    }
+    $cs = @{ plan = '-'; reached = 0; out = '' }
+    $nk = 0
+    $B = 'result.rateLimitsByLimitId.'
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($p in $m.O) {
+        if (-not $p.StartsWith($B, $Ord)) { continue }
+        $k = $p.Substring($B.Length)
+        $d = $k.IndexOf('.')
+        if ($d -ge 0) { $k = $k.Substring(0, $d) }
+        if (-not $seen.Add($k)) { continue }
+        Add-CodexAskSnap $m $cs ($B + $k) $k $at
+        $nk++
+    }
+    if ($nk -eq 0) { Add-CodexAskSnap $m $cs 'result.rateLimits' 'codex' $at }
+    if (-not $cs.out -and $cs.plan -ceq '-' -and $cs.reached -eq 0 -and -not $m.F.ContainsKey('result.rateLimits.limitId') -and $nk -eq 0) { return 'ERR failed' }
+    return 'OK - - - 0 - ' + $cs.plan + ' ' + $cs.reached + $cs.out
+}
+
+# The time an answer came (SIMPLETERM_HOOK_TEST_TS in tests).
+function Get-AskNow {
+    if ($env:SIMPLETERM_HOOK_TEST -eq '1' -and $env:SIMPLETERM_HOOK_TEST_TS) { return (BS $env:SIMPLETERM_HOOK_TEST_TS) }
+    return [string](Now-Epoch)
+}
+
+# The ask itself (the detached child): runs it, makes the `usage` event from
+# its answer (windows src ask, uq) and sends it to the tunnels (ask_run).
+function Invoke-AskChild($job) {
+    $ap = US ([string]$job.ap)
+    $af = US ([string]$job.af)
+    $Script:AV = [string]$job.av
+    # The common fields came with the job.
+    $Script:V2C = $true
+    if ($Script:Agent -ceq 'claude') {
+        $w2 = '"type":"control_response"'
+        $q = Invoke-AskPipe $ap '-p --input-format stream-json --output-format stream-json --verbose --safe-mode --strict-mcp-config --no-session-persistence --include-hook-events' `
+            @('{"type":"control_request","request_id":"1","request":{"subtype":"get_usage","skip_behaviors":true}}') @() '' $w2
+    } elseif ($Script:Agent -ceq 'codex') {
+        $w2 = '"id":2,'
+        $q = Invoke-AskPipe $ap 'app-server' @('{"id":1,"method":"initialize","params":{"clientInfo":{"name":"simpleterm","version":"' + $HookVersion + '"}}}') `
+            @('{"method":"initialized"}', '{"id":2,"method":"account/rateLimits/read"}') '"id":1,' $w2
+    } else { return }
+    $at = Get-AskNow
+    $a = ''
+    if ($q.res -ceq 'ok') {
+        $facts = Get-AskFacts $q.text $w2
+        if ($Script:Agent -ceq 'claude') { $a = [string](Get-ClaudeAskLine $facts $at) } else { $a = [string](Get-CodexAskLine $facts $at) }
+    }
+    $err = ''
+    if ($a.StartsWith('OK ', $Ord)) { $err = '' }
+    elseif ($a.StartsWith('ERR ', $Ord)) { $err = $a.Substring(4) }
+    elseif ($q.res -ceq 'timeout') { $err = 'timeout' }
+    else { $err = 'failed' }
+    if ($err -ceq 'spent') {
+        # The ask cost a model call: no more asks of this version.
+        [void](Write-FileB (Join-Path $RunDir ('ask.' + $Script:Agent + '.off')) ($Script:AV + "`n"))
+        $err = 'failed'
+    }
+    $shown = $err
+    if (-not $shown) { $shown = 'ok' }
+    Write-Log ('usage-ask ' + $Script:Agent + ' ' + $shown)
+    if ($err -ceq 'auth') { [void](Write-FileB ($af + '.auth') '') }
+    $Script:Ts = $at
+    if (Test-UInt $at) { $Script:Now = [int64]$at }
+    $Script:UsageJson = ''
+    if (-not $err) { $Script:UsageJson = (Format-UsageLine $a.Substring(3)).json }
+    $uq = ',"uq":{"src":"ask","at":' + $at + ',"ok":'
+    if (-not $err) { $uq += 'true}' } else { $uq += 'false,"err":"' + $err + '"}' }
+    $Script:RidUsed = $true
+    Send-Usage (Get-UsageRid) $uq '' '' -Sync
 }
 
 # --- the `simpleterm` command (Windows) ---------------------------------------
@@ -4071,6 +4787,8 @@ function Invoke-TurnEnd {
     try {
         $now = [DateTime]::UtcNow
         foreach ($f in [IO.Directory]::GetFiles($RunDir)) {
+            # (A failed sign-in of a usage ask holds until the credentials change.)
+            if ([IO.Path]::GetFileName($f) -cmatch '\Aask\..*\.(auth|off)\z') { continue }
             if (($now - [IO.File]::GetLastWriteTimeUtc($f)).TotalDays -ge 1) { Remove-FileQ $f }
         }
     } catch { }
@@ -4568,6 +5286,7 @@ try {
     $Script:UsageSeq = ''
     $Script:BgSeq = ''
     $Script:UsageJson = ''
+    $Script:UsageV2 = ''
     $Script:Title = ''
     $Script:Msg = ''
     $Script:MsgF = ''
