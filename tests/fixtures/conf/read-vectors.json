@@ -1,5 +1,5 @@
 {
- "source": "SimpleTerm docs/tech_specs/TDS_AGENT_ALERTS.md section 6.7, read vectors R1-R46 (branch feat/agent-hook-conf-sync 1c2eb2a4, before merge)",
+ "source": "SimpleTerm docs/tech_specs/TDS_AGENT_ALERTS.md section 6.7, read vectors R1-R48 (main 5f524ec1)",
  "vectors": [
   {
    "id": "R1",
@@ -101,10 +101,10 @@
   },
   {
    "id": "R15",
-   "file_hex": "efbbbf636c617564655f776169743d33300a",
-   "key": "claude_wait",
-   "want": "540",
-   "what": "BOM이 키에 붙는다"
+   "file_hex": "636c617564655f776169743d350aefbbbf636f6465785f776169743d33300a",
+   "key": "codex_wait",
+   "want": "60",
+   "what": "맨 앞이 아닌 BOM은 키에 붙는다(2026-11-03 바뀜 — 처음 벡터는 맨 앞 BOM이었다, R47·R48)"
   },
   {
    "id": "R16",
@@ -325,6 +325,20 @@
    "key": "ask_delay",
    "want": "2",
    "what": "`=`가 창 밖"
+  },
+  {
+   "id": "R47",
+   "file_hex": "efbbbf75736167655f61736b3d6f66660a",
+   "key": "usage_ask",
+   "want": "off",
+   "what": "맨 앞 BOM은 지운다"
+  },
+  {
+   "id": "R48",
+   "file_hex": "efbbbf636c617564655f776169743d39300a",
+   "key": "claude_wait",
+   "want": "90",
+   "what": "맨 앞 BOM은 지운다"
   }
  ]
 }

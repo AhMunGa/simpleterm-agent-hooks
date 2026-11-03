@@ -72,6 +72,7 @@ LINK_T = {"id": "e7" * 16, "secret": "f8" * 32, "enc": "a9" * 32, "mac": "ba" * 
 SH_UTILS = [
     "awk", "head", "date", "tr", "sed", "cut", "cksum", "wc", "tail", "mv", "rm",
     "mkdir", "chmod", "find", "sleep", "cat", "dd", "ls", "ps", "printf", "touch", "readlink",
+    "perl", "setsid",
 ]
 
 
@@ -3046,6 +3047,13 @@ read -r l
 [ -f "$d/reply2" ] && { read -r l2; read -r l3; cat "$d/reply2"; }
 cat >/dev/null
 if [ -f "$d/linger" ]; then sleep 600 & echo $! >"$d/child"; wait; fi
+if [ -f "$d/stubborn" ]; then
+  echo $$ >"$d/agentpid"
+  sleep 600 & echo $! >"$d/child"
+  ( sleep 601 & echo $! >"$d/grand" ) &
+  trap '' TERM
+  while :; do sleep 1; done
+fi
 """
 
 
@@ -3098,7 +3106,7 @@ def t_v2_usage_ask_gate(s):
             s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})])
             tctl("/_ctl/reset", {})
             tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown")}})
-            for f in ("asks", "ask.env", "reply", "vcalls", "version", "linger", "child"):
+            for f in ("asks", "ask.env", "reply", "vcalls", "version", "linger", "child", "stubborn", "agentpid", "grand"):
                 (s.tmp / f).unlink() if (s.tmp / f).exists() else None
             if conf_text is not None:
                 (s.home / ".simpleterm" / "agent-hook.conf").write_bytes(conf_text)
@@ -3303,6 +3311,59 @@ def t_v2_usage_ask_gate(s):
         s.check("ask gate: an agent that stays, and its child, end after the answer", bool(child) and bool(gone), "child %s alive %s" % (child, child and alive(child)))
         if child and alive(child):
             os.kill(int(child), 9)
+
+        def pid_of(name):
+            f = s.tmp / name
+            return f.read_text().strip() if f.exists() else ""
+
+        def stubborn(env_extra=None):
+            # An agent that ignores TERM after its answer, with a child and a grandchild that left its tree.
+            setup()
+            (s.tmp / "stubborn").write_text("1")
+            n = len(events())
+            s.run("claude", stop(), dict({"SIMPLETERM": "1"}, **(env_extra or {})))
+            wait_for(lambda: len(events()) > n, 25)
+            wait_for(lambda: pid_of("agentpid") and pid_of("child") and pid_of("grand"), 10)
+            agent, kid, grand = pid_of("agentpid"), pid_of("child"), pid_of("grand")
+            wait_for(lambda: not alive(agent) and not alive(kid) and not alive(grand), 15)
+            state = (alive(agent), alive(kid), alive(grand))
+            for pid in (agent, kid, grand):
+                if pid and alive(pid):
+                    os.kill(int(pid), 9)
+            return bool(agent and kid and grand), state
+        if s.kind == "sh":
+            # Its own process group (perl setpgrp, else setsid): all of it ends, TERM ignored or not.
+            seen, state = stubborn()
+            s.check("ask gate: in its own process group, an agent that ignores TERM, its child and a grandchild out of its tree all end",
+                    seen and state == (False, False, False), "pids seen %s, alive (agent, child, grandchild) %s" % (seen, state))
+            # Without perl and setsid: its tree, KILL after TERM; a grandchild out of the tree is not reached (README).
+            nogrp = s.tmp / "bin-nogroup"
+            if not nogrp.exists():
+                nogrp.mkdir()
+                for e in s.bin.iterdir():
+                    if e.name not in ("perl", "setsid"):
+                        os.symlink(e, nogrp / e.name)
+            seen, state = stubborn({"PATH": str(nogrp)})
+            s.check("ask gate: without perl and setsid, an agent that ignores TERM and its child end (its tree)",
+                    seen and state[:2] == (False, False), "pids seen %s, alive (agent, child, grandchild) %s" % (seen, state))
+        else:
+            # The process tree (Kill(true)): an agent that ignores TERM and its child end.
+            seen, state = stubborn()
+            s.check("ask gate: an agent that ignores TERM and its child end (process tree)", seen and state[:2] == (False, False),
+                    "pids seen %s, alive (agent, child, grandchild) %s" % (seen, state))
+        # Sessions of one agent and settings folder end a turn at once: one ask (the 5-minute slot is claimed at
+        # once), in every round (sh 20 sessions x 5 rounds, ps1 10 x 4: its hooks start slower).
+        n, rounds = (20, 5) if s.kind == "sh" else (10, 4)
+        counts = []
+        for rnd in range(rounds):
+            setup()
+            ps = [s.start("claude", stop("race%d" % i), {"SIMPLETERM": "1"}) for i in range(n)]
+            for pr in ps:
+                s.finish(pr, 60)
+            wait_for(lambda: asks() >= 1, 25)
+            time.sleep(3 if s.kind == "sh" else 10)
+            counts.append(asks())
+        s.check("ask gate: %d sessions end a turn at once -> one ask, each of %d rounds" % (n, rounds), counts == [1] * rounds, str(counts))
         # agent-hook.conf as people write it: comments, blanks, CRLF, quotes; the key's first line decides.
         for name, text in (("comment", b"usage_ask=off      # off: never ask an agent for its limits\n"), ("blanks around =", b"usage_ask = off\n"),
                            ("CRLF", b"usage_ask=off\r\n"), ("trailing blank", b"usage_ask=off \n"), ("double quotes", b'usage_ask="off"\n'),
