@@ -2018,25 +2018,32 @@ function Test-HasTunnel {
 
 # A state event (section 6.2) to the tunnels, when the session's state
 # changed, one a second at most (a change within the second goes a second later
-# unless another replaced it). $extra: extra parameter lines (the turn).
+# unless another replaced it). A subagent's start or stop is an event of its
+# own: sent each time, at once, and it neither replaces a session state nor is
+# replaced by one. $extra: extra parameter lines (the turn).
 # -Sync sends from this process (the agent is exiting: the send finishes
 # before the hook does).
 function Send-State([string]$st, [string]$extra, [switch]$Sync) {
     if ($Script:LinkFiles.Count -eq 0 -or -not (Test-HasTunnel)) { return }
+    $sub = ($st -ceq 'sub_start' -or $st -ceq 'sub_stop')
     $sf = Join-Path $RunDir ($Script:Sid + '.st')
-    $sl = Read-FileB $sf
-    if ($null -eq $sl) { $sl = '' }
-    $sl = $sl.TrimEnd([char]10)
-    $first = $sl
-    $sp = $sl.IndexOf(' ')
-    if ($sp -ge 0) { $first = $sl.Substring(0, $sp) }
-    if ($first -ceq $st -and $st -cne 'sub_start' -and $st -cne 'sub_stop') { return }
+    $sl = ''
+    $sp = -1
+    if (-not $sub) {
+        $sl = Read-FileB $sf
+        if ($null -eq $sl) { $sl = '' }
+        $sl = $sl.TrimEnd([char]10)
+        $first = $sl
+        $sp = $sl.IndexOf(' ')
+        if ($sp -ge 0) { $first = $sl.Substring(0, $sp) }
+        if ($first -ceq $st) { return }
+    }
     $srid = $Script:Rid
     if ($Script:RidUsed) {
         $srid = New-RandomHex 8
         if (-not (Test-Hex $srid 16)) { return }
     }
-    [void](Write-FileB $sf ($st + ' ' + $Script:Now + ' ' + $srid + "`n"))
+    if (-not $sub) { [void](Write-FileB $sf ($st + ' ' + $Script:Now + ' ' + $srid + "`n")) }
     $ss = $Script:Spec
     $sx = $Script:V2X
     $sm = $Script:NoMsg

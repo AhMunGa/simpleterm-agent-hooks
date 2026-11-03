@@ -3184,6 +3184,19 @@ def t_v2_state(s):
         s.check("state: idle after an interrupt, turn end interrupt", [x for x in st if x.get("st") == "idle" and (x.get("turn") or {}).get("end") == "interrupt"], str(st)[:400])
         s.check("state: ended", [x for x in st if x.get("st") == "ended"], str(st)[:400])
         s.check("state: no msg in a state event", all("msg" not in x for x in st), str(st)[:300])
+        # A subagent's start and stop are events of their own: in the same second as a session state
+        # and as each other, none replaces another (section 6.2).
+        tctl("/_ctl/reset", {})
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown")}})
+        sub = lambda name, ag: json.dumps({"session_id": "st2", "cwd": "/w", "hook_event_name": name, "agent_id": ag, "agent_type": "explore"})
+        for inp in (json.dumps({"session_id": "st2", "cwd": "/w", "hook_event_name": "UserPromptSubmit", "prompt": "go"}),
+                    sub("SubagentStart", "ag1"), sub("SubagentStart", "ag2"), sub("SubagentStop", "ag1")):
+            s.run("claude", inp)
+        wait_for(lambda: len(states()) >= 4, 15)
+        time.sleep(1.5)
+        got = sorted((x.get("st"), (x.get("sub") or {}).get("id")) for x in states())
+        s.check("state: subagent events in the same second are all sent",
+                got == sorted([("running", None), ("sub_start", "ag1"), ("sub_start", "ag2"), ("sub_stop", "ag1")]), str(got))
     finally:
         tun.terminate()
         tun.wait(5)

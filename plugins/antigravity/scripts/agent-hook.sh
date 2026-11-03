@@ -1565,21 +1565,35 @@ EOF
 
 # A state event (section 6.2) to the tunnels, when the session's state
 # changed, one a second at most (a change within the second goes a second
-# later unless another replaced it). $2: extra parameter lines (the turn).
+# later unless another replaced it). A subagent's start or stop is an event
+# of its own: sent each time, at once, and it neither replaces a session
+# state nor is replaced by one. $2: extra parameter lines (the turn).
 send_state() { # st [extra]
   [ -n "$LINKS" ] && has_tunnel || return 0
-  sf=$RUN_DIR/$SID.st
-  sl=$(cat "$sf" 2>/dev/null)
-  [ "${sl%% *}" = "$1" ] && [ "$1" != sub_start ] && [ "$1" != sub_stop ] && return 0
+  sf=$RUN_DIR/$SID.st sl=''
+  case $1 in
+    sub_start | sub_stop) ;;
+    *)
+      sl=$(cat "$sf" 2>/dev/null)
+      [ "${sl%% *}" = "$1" ] && return 0
+      ;;
+  esac
   srid=$RID
   if [ "${RID_USED:-0}" = 1 ]; then
     srid=$(rand_hex 8)
     is_hex "$srid" 16 || return 0
   fi
-  printf '%s %s %s\n' "$1" "$NOW" "$srid" >"$sf" 2>/dev/null
   ss=$SPEC sx=$V2X sm=$NOMSG
   v2_prep "${2:-}@.st${TAB}s$TAB$1$NL"
   NOMSG=1
+  case $1 in
+    sub_start | sub_stop)
+      send_bg state "$srid" tunnel
+      SPEC=$ss V2X=$sx NOMSG=$sm
+      return 0
+      ;;
+  esac
+  printf '%s %s %s\n' "$1" "$NOW" "$srid" >"$sf" 2>/dev/null
   if [ "${sl#* }" != "$sl" ] && [ "$(printf '%s' "$sl" | cut -d' ' -f2)" = "$NOW" ]; then
     trap '' HUP
     (
