@@ -2854,6 +2854,26 @@ def t_v2_decisions(s):
         s.check("decision dropped (%s): the link's wait ends, not the cap" % name, el < 30, "%.2fs" % el)
 
 
+def t_v2_input_drain(s):
+    """An input past the 256 KiB the hook reads is read to its end and dropped: an agent still writing
+    to a hook that ended gets a broken pipe (Codex 0.165: "failed to write hook stdin")."""
+    s.setup([(LINK_A, {"push": "disabled"})])
+    big = json.dumps({"session_id": "s1", "turn_id": "t1", "cwd": "/w", "hook_event_name": "PostToolUse", "tool_name": "Bash",
+                      "tool_input": {"command": "cat big"}, "tool_response": "x" * (1 << 20)}).encode()
+    for agent in ("codex", "claude"):
+        p = subprocess.Popen(list(s.argv) + [agent], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             env=s.env(), cwd=str(s.tmp))
+        broken = False
+        try:
+            p.stdin.write(big)
+            p.stdin.close()
+        except BrokenPipeError:
+            broken = True
+        p.stdin = None
+        out, err = p.communicate(timeout=90)
+        s.check("input drain %s: 1 MiB written to the end, exit 0" % agent, not broken and p.returncode == 0, "broken=%s rc=%s" % (broken, p.returncode))
+
+
 def t_v2_param_keys(s):
     """The hook adds its own parameters to the input's facts as @.<name> (the request kind, the
     window, ...): a top-level input key that starts with @ must not stand in for one of them."""
@@ -3662,7 +3682,7 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js,
-         t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_not_sent,
+         t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_not_sent,
          t_v2_state, t_v2_sessions, t_v2_opencode_js, t_copilot_hooks, t_copilot,
          t_v2_versions, t_v2_claude_question_once]
 

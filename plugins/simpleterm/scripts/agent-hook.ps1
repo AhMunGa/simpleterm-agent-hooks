@@ -4582,6 +4582,12 @@ try {
             if ($n -le 0) { break }
             $total += $n
         }
+        # The rest of a larger input is read and dropped: an agent still
+        # writing to a hook that ended gets a broken pipe (sh: cat >/dev/null).
+        if ($total -ge $buf.Length) {
+            $rest = New-Object byte[] 65536
+            try { while ($stream.Read($rest, 0, $rest.Length) -gt 0) { } } catch { }
+        }
         $Script:InputB = $Latin1.GetString($buf, 0, $total).Replace([string][char]0, '').TrimEnd([char]10)
     }
     # Codex runs PreToolUse and PostToolUse hooks for the session record's

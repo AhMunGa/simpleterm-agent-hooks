@@ -2891,6 +2891,10 @@ elif [ "$AGENT" = notify ]; then
   INPUT=''
 else
   INPUT=$(head -c "$MAX_INPUT" 2>/dev/null) || INPUT=$(dd bs=4096 count=64 2>/dev/null)
+  # The rest of a larger input is read and dropped: an agent still writing
+  # to a hook that ended gets a broken pipe (Codex 0.165: "failed to write
+  # hook stdin").
+  [ "${#INPUT}" -lt $((MAX_INPUT - 4096)) ] || cat >/dev/null 2>&1
 fi
 
 # Codex runs PreToolUse and PostToolUse hooks for the session record's
