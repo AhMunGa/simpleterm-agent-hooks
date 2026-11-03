@@ -5139,7 +5139,7 @@ case $AGENT:$EVENT in
       sess_ok && [ ! -f "$SESS.json" ] && sess_turn idle
     fi
     ;;
-  claude:SessionEnd | grok:SessionEnd | copilot:sessionEnd)
+  claude:SessionEnd | grok:SessionEnd | copilot:sessionEnd | codex:SessionEnd)
     if [ "$AGENT" = copilot ] && [ "$REASON" = error ]; then
       # The session ended on an error (its last try, kept above).
       e=$(cat "$RUN_DIR/$SID.cerr" 2>/dev/null)
@@ -5151,12 +5151,16 @@ case $AGENT:$EVENT in
     fi
     rm -f "$RUN_DIR/$SID.cerr" 2>/dev/null
     printf '' 2>/dev/null >"$RUN_DIR/t0.$$"
-    send_state ended
+    # The record first: Codex gives this hook 3 seconds at most and then
+    # ends its process group (0.165.0, measured).
     sess_end
+    send_state ended
     rm -f "$RUN_DIR/t0.$$" 2>/dev/null
     # The agent is exiting and may take its hooks' children with it
-    # (measured with Copilot -p): the sends finish first.
-    wait
+    # (measured with Copilot -p): the sends finish first. Codex keeps the
+    # children of a hook that ended in time, and ends the whole group of
+    # one that did not (measured), so its hook does not wait.
+    [ "$AGENT" = codex ] || wait
     ;;
   claude:SubagentStart | claude:SubagentStop | grok:SubagentStart | grok:SubagentStop | copilot:subagentStart | copilot:subagentStop)
     case $EVENT in *Start | *start) send_state sub_start ;; *) send_state sub_stop ;; esac

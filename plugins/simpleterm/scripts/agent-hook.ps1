@@ -5418,12 +5418,14 @@ function Invoke-Event {
         }
         return
     }
-    if ($ev -ceq 'claude:SessionEnd' -or $ev -ceq 'grok:SessionEnd') {
+    if ($ev -ceq 'claude:SessionEnd' -or $ev -ceq 'grok:SessionEnd' -or $ev -ceq 'codex:SessionEnd') {
         $since = [DateTime]::UtcNow
+        # The record first: Codex gives this hook 3 seconds at most and then
+        # ends it (0.165.0, measured).
+        Stop-Sess $since
         # The agent is exiting and may take its hooks' children with it: the
         # send finishes first (here, not in a child).
         Send-State 'ended' '' -Sync
-        Stop-Sess $since
         return
     }
     if (@('claude:SubagentStart', 'claude:SubagentStop', 'grok:SubagentStart', 'grok:SubagentStop') -ccontains $ev) {

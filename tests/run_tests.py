@@ -2098,7 +2098,12 @@ def t_codex_hooks(s):
     # Codex runs `$SHELL -c '<command>'` with ${PLUGIN_ROOT} replaced (the shell under test here).
     noisy = s.tmp / "noisy-plugin"
     write(noisy / "scripts" / "agent-hook.sh", "echo noise\n")
-    for ev in ("SessionStart", "PostCompact", "Stop"):
+    # SessionEnd (R7): Codex 0.165 runs it for every reason ("other" only), at most 3 seconds (more
+    # is cut to 3 with a warning) and ends the hook's process group then (measured).
+    se = hooks["SessionEnd"][0]
+    s.check("codex hooks: SessionEnd for every end, within Codex's 3-second limit",
+            not se.get("matcher") and se["hooks"][0]["timeout"] <= 3, str(se))
+    for ev in ("SessionStart", "PostCompact", "Stop", "SessionEnd"):
         cmd = hooks[ev][0]["hooks"][0]["command"].replace("${PLUGIN_ROOT}", str(noisy))
         p = s.proc_run([s.argv[0], "-c", cmd], input=b"{}", capture_output=True, env=s.env(), timeout=20)
         s.check("codex hooks: %s command prints nothing, whatever the script writes" % ev,
@@ -3924,6 +3929,16 @@ def t_v2_sessions(s):
     os.utime(beat, (fut, fut))
     s.run("claude", ev("SessionEnd", reason="exit"), env)
     s.check("session: a late SessionEnd (newer .beat) does not mark it ended", not (sd / (sid + ".ended")).exists())
+    # Codex 0.165's SessionEnd (R7): session_id, transcript_path, cwd, hook_event_name and reason
+    # ("other", the only value) [measured]; nothing printed.
+    cd = s.home / ".simpleterm" / "sessions" / "codex"
+    cx = "019a5c3e-0000-7000-8000-00000000c0de"
+    cev = lambda name, **kw: json.dumps(dict({"session_id": cx, "transcript_path": None, "cwd": "/w/repo", "hook_event_name": name}, **kw))
+    s.run("codex", cev("UserPromptSubmit", turn_id="t1", prompt="Fix it", model="gpt-5.5", permission_mode="default"), env)
+    rc, out, err, el = s.run("codex", cev("SessionEnd", reason="other"), env)
+    s.check("session: codex .ended at SessionEnd, nothing printed",
+            (cd / (cx + ".json")).exists() and (cd / (cx + ".ended")).exists() and out.strip() == "" and el < 3, "%r %.2fs" % (out, el))
+    shutil.rmtree(cd, ignore_errors=True)  # the retention case below counts every agent's records
     s.run("claude", json.dumps({"session_id": "s:1", "cwd": "/w", "hook_event_name": "UserPromptSubmit", "prompt": "x"}), env)
     name = hashlib.sha256(b"s:1").hexdigest()[:32]
     s.check("session: an id with ':' -> sha256 name", (sd / (name + ".json")).exists() and json.loads((sd / (name + ".json")).read_text()).get("sid") == "s:1")
