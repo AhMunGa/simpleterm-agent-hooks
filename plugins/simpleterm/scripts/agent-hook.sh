@@ -2020,15 +2020,31 @@ poll_link() { # rid nonce outfile deadline
 agent_pid() {
   ap=$PPID n=0
   while [ "$n" -lt 4 ] && is_uint "$ap" && [ "$ap" -gt 1 ]; do
-    comm=$(ps -o comm= -p "$ap" 2>/dev/null) || { ap=''; break; }
+    comm=$(proc_comm "$ap")
+    [ -n "$comm" ] || { ap=''; break; }
     case ${comm##*/} in
       sh | -sh | bash | -bash | dash | zsh | -zsh | ksh | mksh | ash | fish | -fish | busybox) ;;
       *) break ;;
     esac
-    ap=$(ps -o ppid= -p "$ap" 2>/dev/null | tr -d ' ')
+    ap=$(proc_ppid "$ap")
     n=$((n + 1))
   done
   is_uint "$ap" && [ "$ap" -gt 1 ] && printf '%s' "$ap"
+}
+
+# The command name and the parent of process $1: from ps, else from Linux's
+# /proc (a container without ps, or a ps that may not run).
+PROC_DIR=/proc
+[ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ -n "${SIMPLETERM_HOOK_TEST_PROC:-}" ] && PROC_DIR=$SIMPLETERM_HOOK_TEST_PROC
+proc_comm() { # pid
+  pc=$(ps -o comm= -p "$1" 2>/dev/null) && [ -n "$pc" ] && { printf '%s' "$pc"; return 0; }
+  [ -r "$PROC_DIR/$1/comm" ] && head -c 64 "$PROC_DIR/$1/comm" 2>/dev/null | tr -d '\n'
+}
+proc_ppid() { # pid
+  pp=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')
+  is_uint "$pp" && { printf '%s' "$pp"; return 0; }
+  # stat is "pid (comm) state ppid ...": the comm may hold blanks and parens.
+  [ -r "$PROC_DIR/$1/stat" ] && head -c 512 "$PROC_DIR/$1/stat" 2>/dev/null | sed 's/.*) //' | awk '{ print $2 }'
 }
 
 # True if the agent moved on from request $1 (answered at the terminal).
@@ -2437,10 +2453,9 @@ rq_reject() { # i bad|changed
 # under CLAUDE_CONFIG_DIR or ~/.claude, the first 8 KiB) says this session
 # (sessionId) waits on a permission prompt, the one first seen there
 # (statusUpdatedAt unchanged, RQ_WAT), and no other permission hook of this
-# session waits now (rq_alone).
+# session waits on that same window (rq_alone).
 rq_window() {
   [ "$AGENT" = claude ] && [ -n "$AGENT_PID" ] || return 1
-  rq_alone || return 1
   wv=$(head -c 8192 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/$AGENT_PID.json" 2>/dev/null |
     awk -v want=sessionId,status,waitingFor,statusUpdatedAt "$JSON_GET" 2>/dev/null)
   wsid='' wst='' wfor='' wat=''
@@ -2462,23 +2477,32 @@ EOF
   if [ -z "$RQ_WAT" ]; then
     [ "$wopen" = 0 ] || return 2
     RQ_WAT=$wat
-    return 0
+    [ -n "$RQ_MARK" ] && printf '%s\n' "$wat" 2>/dev/null >"$RQ_MARK"
   fi
-  [ "$wopen" = 0 ] && [ "$wat" = "$RQ_WAT" ]
+  [ "$wopen" = 0 ] && [ "$wat" = "$RQ_WAT" ] || return 1
+  rq_alone
 }
 
-# No other permission hook of this session is waiting now (perm.<session>.<pid>
-# of a live hook, RQ_MARK). Claude Code shows the requests of parallel tool
-# calls in one window ("1 of 2") and its session file stays as it was from one
-# item to the next [measured 2.1.316]: which one is open cannot be told.
+# Whether no other permission hook of this session waits on the same window
+# (perm.<session>.<pid> of a live hook holds the statusUpdatedAt its hook first
+# saw; RQ_MARK is this hook's): 0 alone, 1 not (the same window), 2 not known
+# yet (a hook that has not read the window yet). Claude Code shows the
+# requests of parallel tool calls in one window ("1 of 2") and its session
+# file stays as it was from one item to the next [measured 2.1.316]: which one
+# is open cannot be told. A hook of an earlier window that has not ended yet
+# (it checks once a second) holds another value and does not count.
 rq_alone() {
+  ra=0
   for mf in "$RUN_DIR"/perm."$SID".*; do
     [ -e "$mf" ] || continue
     [ "$mf" = "$RQ_MARK" ] && continue
     mp=${mf##*.}
-    is_uint "$mp" && kill -0 "$mp" 2>/dev/null && return 1
+    is_uint "$mp" && kill -0 "$mp" 2>/dev/null || continue
+    mv=$(head -c 32 "$mf" 2>/dev/null | tr -cd '0-9')
+    [ -n "$mv" ] || { ra=2; continue; }
+    [ "$mv" = "$RQ_WAT" ] && return 1
   done
-  return 0
+  return "$ra"
 }
 
 # Tunnels that hold the request back for a wait the user is looking at

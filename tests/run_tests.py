@@ -3808,10 +3808,13 @@ def t_v2_held(s):
                                        "waitingFor": waiting_for, "statusUpdatedAt": at, "updatedAt": at}))
             os.replace(tmp, f)
 
-        def start(session="held-1", **st):
+        def start(session="held-1", env=None, proc=None, **st):
             """The stand-in agent (its pid names the session file) and the hook under it."""
             cmd = [sys.executable, "-I", "-c", AGENT_PY, v2_perm(session=session)] + list(s.argv) + ["claude"]
-            agent = s.popen(cmd, stdout=subprocess.PIPE, env=s.env(), cwd=str(s.tmp))
+            agent = s.popen(cmd, stdout=subprocess.PIPE, env=s.env(env), cwd=str(s.tmp))
+            if proc:  # a /proc of the agent for a hook without ps
+                (proc / str(agent.pid)).mkdir(parents=True, exist_ok=True)
+                (proc / str(agent.pid) / "comm").write_text("claude\n")
             if st.get("status") != "none":
                 state(agent.pid, **st)
             hook = int(agent.stdout.readline())
@@ -3877,7 +3880,8 @@ def t_v2_held(s):
             for old in run.glob("perm.*"):
                 old.unlink()
             if st.pop("sibling", False):
-                (run / ("perm.held-1.%d" % os.getpid())).write_text("")  # a live process: this runner
+                # A live process (this runner) waiting on the same window (statusUpdatedAt).
+                (run / ("perm.held-1.%d" % os.getpid())).write_text("1793232000123\n")
             t0 = time.time()
             agent, hook = start(**dict({"session": "held-1"}, **{k: v for k, v in st.items() if k != "session"}))
             if st.get("session"):
@@ -3886,6 +3890,41 @@ def t_v2_held(s):
             el = time.time() - t0
             s.check("held: %s: not told again, ends with no decision" % name,
                     done and out.strip() == "" and len(perms()) == 1 and el < 15, "%r %.1fs n=%d" % (out, el, len(perms())))
+
+        # A hook of the session's earlier window that has not ended yet (it checks once a second)
+        # holds another statusUpdatedAt: the window open now is still told again (E2E E4d).
+        setup(["held"])
+        run = s.home / ".simpleterm" / "run"
+        run.mkdir(parents=True, exist_ok=True)
+        for old in run.glob("perm.*"):
+            old.unlink()
+        (run / ("perm.held-1.%d" % os.getpid())).write_text("1793231999000\n")
+        agent, hook = start()
+        s.check("held: an earlier window's hook does not stop it", wait_for(lambda: len(perms()) >= 2, 15), str(len(perms())))
+        state(agent.pid, status="idle", waiting_for=None, at=1793232009000)
+        finished(agent, 15)
+        (run / ("perm.held-1.%d" % os.getpid())).unlink()
+        if s.kind == "sh":
+            # No ps (some containers): the agent's pid from /proc instead (Linux).
+            nops = s.tmp / "nops"
+            if not nops.exists():
+                nops.mkdir()
+                for e in s.bin.iterdir():
+                    if e.name != "ps":
+                        os.symlink(os.readlink(e), nops / e.name)
+            for name, proc in (("from /proc", s.tmp / "fakeproc"), ("not at all", None)):
+                setup(["held"])
+                shutil.rmtree(s.tmp / "fakeproc", ignore_errors=True)
+                env = {"PATH": str(nops)}
+                if proc:
+                    env.update(SIMPLETERM_HOOK_TEST="1", SIMPLETERM_HOOK_TEST_PROC=str(proc))
+                agent, hook = start(env=env, proc=proc)
+                if proc:
+                    s.check("held: without ps, the agent found %s: told again" % name, wait_for(lambda: len(perms()) >= 2, 15), str(len(perms())))
+                    state(agent.pid, status="idle", waiting_for=None, at=1793232009000)
+                done, out = finished(agent, 20)
+                if not proc:
+                    s.check("held: without ps or /proc: not told again, ends", done and len(perms()) == 1, "%d %s" % (len(perms()), s.log_text()[-200:]))
     finally:
         tun.terminate()
         tun.wait(5)

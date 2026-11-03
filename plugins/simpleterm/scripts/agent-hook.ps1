@@ -4123,10 +4123,9 @@ function Step-RqPoll($L, [int64]$deadline, [int64]$pollWait) {
 # CLAUDE_CONFIG_DIR or ~\.claude, the first 8 KiB) says this session
 # (sessionId) waits on a permission prompt, the one first seen there
 # (statusUpdatedAt unchanged), and no other permission hook of this session
-# waits now (Test-RqAlone) (rq_window).
+# waits on that same window (Get-RqAlone) (rq_window).
 function Get-RqWindow([int]$agentPid) {
     if ($Script:Agent -cne 'claude' -or $agentPid -le 0) { return 1 }
-    if (-not (Test-RqAlone)) { return 1 }
     $dir = $env:CLAUDE_CONFIG_DIR
     if (-not $dir) { $dir = Join-Path $HOME '.claude' }
     $kv = Get-JsonKV (Read-HeadB (Join-Path (Join-Path $dir 'sessions') ([string]$agentPid + '.json')) 8192) @('sessionId', 'status', 'waitingFor', 'statusUpdatedAt')
@@ -4141,27 +4140,34 @@ function Get-RqWindow([int]$agentPid) {
     if (-not $Script:RqWat) {
         if (-not $open) { return 2 }
         $Script:RqWat = $wat
-        return 0
+        if ($Script:RqMark) { [void](Write-FileB $Script:RqMark ($wat + "`n")) }
     }
-    if ($open -and $wat -ceq $Script:RqWat) { return 0 }
-    return 1
+    if (-not ($open -and $wat -ceq $Script:RqWat)) { return 1 }
+    return (Get-RqAlone)
 }
 
-# No other permission hook of this session is waiting now (perm.<session>.<pid>
-# of a live hook, $Script:RqMark). Claude Code shows the requests of parallel
-# tool calls in one window ("1 of 2") and its session file stays as it was from
-# one item to the next [measured 2.1.316]: which one is open cannot be told
-# (rq_alone).
-function Test-RqAlone {
+# Whether no other permission hook of this session waits on the same window
+# (perm.<session>.<pid> of a live hook holds the statusUpdatedAt its hook first
+# saw; $Script:RqMark is this hook's): 0 alone, 1 not (the same window), 2 not
+# known yet (a hook that has not read the window yet). Claude Code shows the
+# requests of parallel tool calls in one window ("1 of 2") and its session file
+# stays as it was from one item to the next [measured 2.1.316]: which one is
+# open cannot be told. A hook of an earlier window that has not ended yet holds
+# another value and does not count (rq_alone).
+function Get-RqAlone {
+    $ra = 0
     try {
         foreach ($f in [IO.Directory]::GetFiles($RunDir, 'perm.' + $Sid + '.*')) {
             if ($f -ceq $Script:RqMark) { continue }
             $mp = [IO.Path]::GetExtension($f).TrimStart('.')
             if (-not (Test-UInt $mp)) { continue }
-            if ($null -ne (Get-Process -Id ([int]$mp) -ErrorAction SilentlyContinue)) { return $false }
+            if ($null -eq (Get-Process -Id ([int]$mp) -ErrorAction SilentlyContinue)) { continue }
+            $mv = [regex]::Replace((Read-HeadB $f 32), '[^0-9]', '')
+            if (-not $mv) { $ra = 2; continue }
+            if ($mv -ceq $Script:RqWat) { return 1 }
         }
     } catch { }
-    return $true
+    return $ra
 }
 
 # Tunnels that hold the request back for a wait the user is looking at
@@ -4276,7 +4282,7 @@ function Invoke-RequestFlow([string]$ev, [string]$mode) {
     $Script:RqWat = ''
     $Script:RqMiss = 0
     $Script:RqHeldNext = [DateTime]::MinValue
-    # This session's waiting permission hooks, for Test-RqAlone.
+    # This session's waiting permission hooks, for Get-RqAlone.
     $Script:RqMark = ''
     if ($Script:Agent -ceq 'claude') {
         $mark = Join-Path $RunDir ('perm.' + $Sid + '.' + $PID)
