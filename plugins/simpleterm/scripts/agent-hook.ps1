@@ -1862,6 +1862,7 @@ function Invoke-Child([string]$name) {
             }
         }
         'ver' { Invoke-VerChild $job }
+        'askver' { Invoke-AskVerChild $job }
         'uask' { Invoke-AskChild $job }
     }
 }
@@ -2993,16 +2994,13 @@ function Send-Usage([string]$rid, [string]$tail, [string]$markName, [string]$mar
 
 # --- usage asks (TDS_AGENT_EVENTS_V2 section 9.2) ----------------------------------
 
-# The agent versions whose ask was measured to make no model request
-# (2026-11-03, a local mock API, .hjc/research/2026-11-03-usage-ask of the
-# app): asks run from Min up to, not including, Below. Another version is not
-# asked (its file values still go).
-$AskClaudeMin = '2.1.316'
-$AskClaudeBelow = '2.2.0'
-$AskCodexMin = '0.165.0'
-$AskCodexBelow = '0.166.0'
-# (Measured 0 model requests: Claude Code 2.1.316 and 2.1.317 in 22 asks,
-# Codex 0.165.0 in 11; the same harness caught 6 and 31 in real turns.)
+# Every version and OS is asked (D22, 2026-11-03 user decision). Measured
+# against a local mock API (2026-11-03, .hjc/research/2026-11-03-usage-ask of
+# the app): 0 model requests in 22 asks of Claude Code 2.1.316 and 2.1.317 and
+# 11 of Codex 0.165.0 on macOS (the same harness caught 6 and 31 in real
+# turns). What guards the others: the version of the executable that ran stops
+# for good after an answer showing spend or a hook, or after 3 failed asks in
+# a row (run/ask.<agent>.off).
 
 # A value of agent-hook.conf (Get-ConfVal), or $default if empty (conf_word).
 # The caller compares it in any case.
@@ -3068,13 +3066,195 @@ function Find-AskAgent([string]$name) {
     return ''
 }
 
+# True if asks of the agent's executable version $v were stopped (an answer of
+# that version showed model spend or a hook, or 3 asks in a row failed):
+# run/ask.<agent>.off, one version a line, `unknown` among them (ask_stopped).
+function Test-AskStopped([string]$v) {
+    $t = Read-HeadB (Join-Path $RunDir ('ask.' + $Script:Agent + '.off')) 4096
+    foreach ($l in $t.Split([char]10)) { if ($l -ceq $v) { return $true } }
+    return $false
+}
+
+# Stops asks of executable version $v for good (ask_stop).
+function Add-AskStopped([string]$v) {
+    if (Test-AskStopped $v) { return }
+    $off = Join-Path $RunDir ('ask.' + $Script:Agent + '.off')
+    $old = Read-FileB $off
+    if ($null -eq $old) { $old = '' }
+    if ($old -and -not $old.EndsWith([string][char]10, $Ord)) { $old += "`n" }
+    [void](Write-FileB $off ($old + $v + "`n"))
+}
+
+# The failed asks in a row of executable version $v (D22; ask_fails): the first
+# line of run/ask.<agent>.fail (its first 4 KiB), `<version> <count>`; 0 if it
+# is another version or not of that form.
+function Get-AskFails([string]$v) {
+    $l = (Read-HeadB (Join-Path $RunDir ('ask.' + $Script:Agent + '.fail')) 4096).Split([char]10)[0]
+    $m = [regex]::Match($l, '\A([0-9A-Za-z.+_-]+) ([1-9][0-9]{0,8})\z')
+    if ($m.Success -and $m.Groups[1].Value -ceq $v) { return [int64]$m.Groups[2].Value }
+    return [int64]0
+}
+
+# After an ask: an answer clears the count; a failed one (failed, timeout;
+# $failed) adds one, from 1 for another version, written whole to
+# run/ask.<agent>.fail.<pid> and renamed over the file (not counted if that
+# fails); the third stops that version (D22; ask_fail_count). Sign-in results
+# (auth, not-subscriber) do not come here.
+function Update-AskFails([string]$v, [bool]$failed) {
+    $ff = Join-Path $RunDir ('ask.' + $Script:Agent + '.fail')
+    if (-not $failed) { Remove-FileQ $ff; return }
+    $c = (Get-AskFails $v) + 1
+    $tmp = $ff + '.' + $PID
+    $done = $false
+    if (Write-FileB $tmp ($v + ' ' + $c + "`n")) {
+        try { Move-Item -LiteralPath $tmp -Destination $ff -Force -ErrorAction Stop; $done = $true } catch { }
+    }
+    Remove-FileQ $tmp
+    if ($done -and $c -ge 3) { Add-AskStopped $v }
+}
+
+# Ends process $p and every process under it (the agent's own children;
+# kill_tree). .NET Framework has no Kill(true): taskkill /T there.
+function Stop-AskTree($p) {
+    try { if ($p.HasExited) { return } } catch { return }
+    try { $p.Kill($true); return } catch { }
+    if ($IsWin) {
+        try {
+            $tk = Join-Path ([Environment]::GetFolderPath('System')) 'taskkill.exe'
+            $k = [System.Diagnostics.Process]::Start((New-Object System.Diagnostics.ProcessStartInfo -Property @{
+                FileName = $tk; Arguments = ('/T /F /PID ' + $p.Id); UseShellExecute = $false; CreateNoWindow = $true }))
+            [void]$k.WaitForExit(5000)
+        } catch { }
+    }
+    try { if (-not $p.HasExited) { $p.Kill() } } catch { }
+}
+
+# The folder an ask runs in: ~/.simpleterm/probe (700 where there are modes;
+# Windows: the profile's own ACL), with no project settings (ask_probe_dir).
+function Initialize-AskProbe {
+    $probe = Join-Path $StDir 'probe'
+    try { if (-not [IO.Directory]::Exists($probe)) { [void][IO.Directory]::CreateDirectory($probe) } } catch { return $false }
+    if (-not $IsWin) { try { [IO.File]::SetUnixFileMode($probe, 448) } catch { } }
+    return $true
+}
+
+# A ProcessStartInfo for agent $exe as the ask runs it: in ~/.simpleterm/probe
+# with SIMPLETERM_PROBE=1, without the session's variables.
+function New-AskPsi([string]$exe, [string]$argLine) {
+    $probe = Join-Path $StDir 'probe'
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $exe
+    $psi.Arguments = $argLine
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.WorkingDirectory = $probe
+    foreach ($v in $AskUnset) { if ($psi.EnvironmentVariables.ContainsKey($v)) { $psi.EnvironmentVariables.Remove($v) } }
+    $psi.EnvironmentVariables['SIMPLETERM_PROBE'] = '1'
+    if (-not $IsWin) { $psi.EnvironmentVariables['PWD'] = $probe }
+    return $psi
+}
+
+# The version of agent executable $exe, which the ask would run (section 9.2
+# condition 6, D21, D22; ask_bin_version): @{ bv; exe }, exe the file that the
+# ask then runs. Its links are followed to the end: .../versions/<version> (a
+# native Claude Code install) gives the version. Otherwise run/ver.<agent>
+# (D13, section 10.1: that file's path, and its --version's first dotted
+# number or an empty line if it gave none) is used for the same file while the
+# file is not newer: `unknown` if it holds no version. Else a child measures it
+# again (15 seconds at most) and bv stays '': no ask this turn.
+function Get-AskBinVersion([string]$exe) {
+    $res = @{ bv = ''; exe = '' }
+    $r = $exe
+    for ($n = 0; $n -le 16; $n++) {
+        $t = $null
+        try {
+            $fi = New-Object IO.FileInfo $r
+            if (-not ($fi.Attributes -band [IO.FileAttributes]::ReparsePoint)) { break }
+            $t = $fi.LinkTarget
+        } catch { return $res }
+        if ($n -eq 16 -or -not $t) { return $res }
+        if ([IO.Path]::IsPathRooted($t)) { $r = $t } else { $r = Join-Path ([IO.Path]::GetDirectoryName($r)) $t }
+    }
+    if (-not [IO.File]::Exists($r) -or $r.Contains([string][char]10) -or $r.Contains([string][char]13)) { return $res }
+    $v = ''
+    $dir = [IO.Path]::GetDirectoryName($r)
+    if ($dir -and [IO.Path]::GetFileName($dir) -ceq 'versions') { $v = [IO.Path]::GetFileName($r) }
+    if (-not (Test-AskVer $v)) { $v = '' }
+    if (-not $v) {
+        $vc = Join-Path $RunDir ('ver.' + $Script:Agent)
+        $fresh = $false
+        try { $fresh = [IO.File]::Exists($vc) -and ((Read-LineB $vc 0) -ceq (BS $r)) -and -not ([IO.File]::GetLastWriteTimeUtc($r) -gt [IO.File]::GetLastWriteTimeUtc($vc)) } catch { }
+        if ($fresh) {
+            $v = Read-LineB $vc 1
+            if (-not (Test-AskVer $v)) { $v = 'unknown' }
+        } else {
+            if (-not (Initialize-AskProbe)) { return $res }
+            # (A lock left by a measurement that never ended holds a minute.)
+            try { if ([IO.File]::Exists($vc + '.lock') -and ([DateTime]::UtcNow - [IO.File]::GetLastWriteTimeUtc($vc + '.lock')).TotalSeconds -gt 60) { Remove-FileQ ($vc + '.lock') } } catch { }
+            try {
+                $fs = New-Object IO.FileStream(($vc + '.lock'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
+                $fs.Dispose()
+            } catch { return $res }
+            $job = New-Job 'askver'
+            $job.vb = BS $r
+            Start-Child $job
+            return $res
+        }
+    }
+    $res.bv = $v
+    $res.exe = $r
+    return $res
+}
+
+# True if $v is a version as av is written (section 3): [0-9A-Za-z.+_-]{1,32}
+# (ask_ver_ok).
+function Test-AskVer([string]$v) {
+    return ($v -cmatch '\A[0-9A-Za-z.+_-]{1,32}\z')
+}
+
+# Measures run/ver.<agent> again (the child of Get-AskBinVersion): the file's
+# --version, run as the ask runs, 15 seconds at most; none: an empty line, so
+# the same file is not measured again.
+function Invoke-AskVerChild($job) {
+    if ($Script:Agent -cne 'claude' -and $Script:Agent -cne 'codex') { return }
+    $vc = Join-Path $RunDir ('ver.' + $Script:Agent)
+    try {
+        $p = [System.Diagnostics.Process]::Start((New-AskPsi (US ([string]$job.vb)) '--version'))
+        try {
+            $p.StandardInput.Close()
+            $out = $p.StandardOutput.ReadToEndAsync()
+            [void]$p.StandardError.ReadToEndAsync()
+            if (-not $p.WaitForExit(15000)) { Stop-AskTree $p }
+            $text = ''
+            if ($out.Wait(2000)) { $text = BS ([string]$out.Result) }
+            if ($text.Length -gt 4096) { $text = $text.Substring(0, 4096) }
+            $v = ''
+            foreach ($line in $text.Split([char]10)) {
+                $m = [regex]::Match($line, '[0-9]+[.][0-9]+[0-9A-Za-z.+_-]*')
+                if ($m.Success) { $v = $m.Value; break }
+            }
+            if (-not (Test-AskVer $v)) { $v = '' }
+            if (Write-FileB ($vc + '.tmp') ([string]$job.vb + "`n" + $v + "`n")) {
+                Remove-FileQ $vc
+                [IO.File]::Move(($vc + '.tmp'), $vc)
+            }
+        } finally { try { $p.Dispose() } catch { } }
+    } catch { }
+    Remove-FileQ ($vc + '.tmp')
+    Remove-FileQ ($vc + '.lock')
+}
+
 # At the end of a turn, while the app is connected, at most every 5 minutes
-# per agent and settings folder: asks the agent for its limits in a detached
-# child (stdio closed, 20 seconds at most). After a failed sign-in or an
-# answer of no plan limits (not-subscriber) it asks again only once the
-# agent's credentials file changed. usage_ask=off in
-# agent-hook.conf turns it off; Codex only with usage_ask_codex=on (its
-# app-server writes its own state, syncs its plugins and may refresh an
+# per agent and settings folder: asks Claude Code or Codex for its limits in a
+# detached child (stdio closed, 20 seconds at most), unless asks of the version
+# of the executable that the ask runs were stopped (section 9.2, D21, D22).
+# After a failed sign-in or an answer of no plan limits (not-subscriber) it
+# asks again only once the agent's credentials file changed. usage_ask=off in
+# agent-hook.conf turns it off; usage_ask_codex=off turns off Codex's only
+# (its app-server writes its own state, syncs its plugins and may refresh an
 # expired sign-in). As usage_ask in agent-hook.sh.
 function Invoke-UsageAsk {
     # (Values in any case: OFF and No turn it off too.)
@@ -3084,25 +3264,23 @@ function Invoke-UsageAsk {
         $ab = 'claude'
         $cfg = [string]$env:CLAUDE_CONFIG_DIR
         if (-not $cfg) { $cfg = Join-Path $HOME '.claude' }
-        $amin = $AskClaudeMin
-        $abelow = $AskClaudeBelow
         $ind = Join-Path $cfg '.credentials.json'
     } elseif ($Script:Agent -ceq 'codex') {
-        if (-not (@('on', '1', 'yes', 'true') -ccontains (Get-ConfWord 'usage_ask_codex' 'off').ToLowerInvariant())) { return }
+        if (@('off', '0', 'no', 'false') -ccontains (Get-ConfWord 'usage_ask_codex' 'on').ToLowerInvariant()) { return }
         $ab = 'codex'
         $cfg = [string]$env:CODEX_HOME
         if (-not $cfg) { $cfg = Join-Path $HOME '.codex' }
-        $amin = $AskCodexMin
-        $abelow = $AskCodexBelow
         $ind = Join-Path $cfg 'auth.json'
     } else { return }
     if ($Script:LinkFiles.Count -eq 0 -or -not (Test-TunnelLive)) { return }
+    $ap = Find-AskAgent $ab
+    if (-not $ap) { return }
+    # The version of the executable the ask runs (a native install moves the
+    # link on PATH to a newer version while sessions of the older one still
+    # run): asks of it not stopped.
+    $bin = Get-AskBinVersion $ap
+    if (-not $bin.bv -or (Test-AskStopped $bin.bv) -or (Get-AskFails $bin.bv) -ge 3) { return }
     Initialize-Common
-    if ($Script:AV -cnotmatch '\A[0-9].*[.][0-9]') { return }
-    if (Test-VerLt $Script:AV $amin) { return }
-    if (-not (Test-VerLt $Script:AV $abelow)) { return }
-    $off = Read-FileB (Join-Path $RunDir ('ask.' + $Script:Agent + '.off'))
-    if ($null -ne $off -and $off.TrimEnd([char]10) -ceq $Script:AV) { return }
     $af = Join-Path $RunDir ('ask.' + $Script:Agent + '.' + (Get-Sha256Hex (BS $cfg)).Substring(0, 16))
     $auth = $af + '.auth'
     if ([IO.File]::Exists($auth)) {
@@ -3113,19 +3291,15 @@ function Invoke-UsageAsk {
     if ($null -eq $la) { $la = '' }
     $la = $la.TrimEnd([char]10)
     if ((Test-UInt $la) -and ($Script:Now - [int64]$la) -lt 300 -and ([int64]$la - $Script:Now) -le 60) { return }
-    $ap = Find-AskAgent $ab
-    if (-not $ap) { return }
     if (-not (Write-FileB $af ([string]$Script:Now + "`n"))) { return }
-    $probe = Join-Path $StDir 'probe'
-    try { if (-not [IO.Directory]::Exists($probe)) { [void][IO.Directory]::CreateDirectory($probe) } } catch { return }
-    # 700 where there are modes (Windows: the profile's own ACL).
-    if (-not $IsWin) { try { [IO.File]::SetUnixFileMode($probe, 448) } catch { } }
-    Write-Log ('usage-ask ' + $Script:Agent)
+    if (-not (Initialize-AskProbe)) { return }
+    Write-Log ('usage-ask ' + $Script:Agent + ' ' + $bin.bv)
     Initialize-Facts
     $job = New-Job 'uask'
-    $job.ap = BS $ap
+    $job.ap = BS $bin.exe
     $job.af = BS $af
     $job.av = $Script:AV
+    $job.bv = $bin.bv
     Start-Child $job
 }
 
@@ -3170,21 +3344,9 @@ function Get-AskHead($st) {
 # timeout; text: its output }.
 function Invoke-AskPipe([string]$exe, [string]$argLine, [string[]]$inLines, [string[]]$moreLines, [string]$w1, [string]$w2) {
     $st = @{ res = 'gone'; text = ''; eof = $false; task = $null; so = $null; buf = (New-Object byte[] 65536) }
-    $probe = Join-Path $StDir 'probe'
     $p = $null
     try {
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $exe
-        $psi.Arguments = $argLine
-        $psi.UseShellExecute = $false
-        $psi.CreateNoWindow = $true
-        $psi.RedirectStandardInput = $true
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $true
-        $psi.WorkingDirectory = $probe
-        foreach ($v in $AskUnset) { if ($psi.EnvironmentVariables.ContainsKey($v)) { $psi.EnvironmentVariables.Remove($v) } }
-        $psi.EnvironmentVariables['SIMPLETERM_PROBE'] = '1'
-        if (-not $IsWin) { $psi.EnvironmentVariables['PWD'] = $probe }
+        $psi = New-AskPsi $exe $argLine
         # (.NET Framework would start the agent's input with the console
         # encoding's preamble: a UTF-8 code page's BOM.)
         if ($IsWin) { try { [Console]::InputEncoding = $Utf8 } catch { } }
@@ -3219,11 +3381,12 @@ function Invoke-AskPipe([string]$exe, [string]$argLine, [string[]]$inLines, [str
         try { $p.StandardInput.Close() } catch { }
         $kill = [DateTime]::UtcNow.AddSeconds(3)
         while (-not $p.HasExited -and [DateTime]::UtcNow -lt $kill) { Step-AskOut $st; Start-Sleep -Milliseconds 100 }
-        if (-not $p.HasExited) { try { $p.Kill() } catch { } }
+        # Still there: it and what it started.
+        Stop-AskTree $p
         $end = [DateTime]::UtcNow.AddSeconds(1)
         while (-not $st.eof -and [DateTime]::UtcNow -lt $end) { Step-AskOut $st; if (-not $st.eof) { Start-Sleep -Milliseconds 50 } }
     } catch {
-        try { if (-not $p.HasExited) { $p.Kill() } } catch { }
+        Stop-AskTree $p
     }
     try { $p.Dispose() } catch { }
     return $st
@@ -3386,10 +3549,20 @@ function Invoke-AskChild($job) {
     $Script:AV = [string]$job.av
     # The common fields came with the job.
     $Script:V2C = $true
+    # The executable's version, checked by Invoke-UsageAsk.
+    $bv = [string]$job.bv
+    $hk = $false
     if ($Script:Agent -ceq 'claude') {
         $w2 = '"type":"control_response"'
         $q = Invoke-AskPipe $ap '-p --input-format stream-json --output-format stream-json --verbose --safe-mode --strict-mcp-config --no-session-persistence --include-hook-events' `
             @('{"type":"control_request","request_id":"1","request":{"subtype":"get_usage","skip_behaviors":true}}') @() '' $w2
+        # A hook ran in the ask (--include-hook-events shows it; measured 0):
+        # the probe guard did not hold or the ask ran as a turn, so as with
+        # spend (D21).
+        $head = Get-AskHead $q
+        foreach ($k in @('hook_started', 'hook_progress', 'hook_response')) {
+            if ($head.Contains('{"type":"system","subtype":"' + $k + '"')) { $hk = $true }
+        }
     } elseif ($Script:Agent -ceq 'codex') {
         $w2 = '"id":2,'
         $q = Invoke-AskPipe $ap 'app-server' @('{"id":1,"method":"initialize","params":{"clientInfo":{"name":"simpleterm","version":"' + $HookVersion + '"}}}') `
@@ -3406,10 +3579,17 @@ function Invoke-AskChild($job) {
     elseif ($a.StartsWith('ERR ', $Ord)) { $err = $a.Substring(4) }
     elseif ($q.res -ceq 'timeout') { $err = 'timeout' }
     else { $err = 'failed' }
+    if ($hk) { $err = 'spent' }
     if ($err -ceq 'spent') {
-        # The ask cost a model call: no more asks of this version.
-        [void](Write-FileB (Join-Path $RunDir ('ask.' + $Script:Agent + '.off')) ($Script:AV + "`n"))
+        # The ask cost a model call: no more asks of this executable version
+        # (added to the set, D21); a failed ask too.
+        Add-AskStopped $bv
         $err = 'failed'
+        Update-AskFails $bv $true
+    } elseif ($err -ceq 'failed' -or $err -ceq 'timeout' -or $err -ceq 'unsupported') {
+        Update-AskFails $bv $true
+    } elseif (-not $err) {
+        Update-AskFails $bv $false
     }
     $shown = $err
     if (-not $shown) { $shown = 'ok' }
@@ -4859,8 +5039,8 @@ function Invoke-TurnEnd {
         $now = [DateTime]::UtcNow
         foreach ($f in [IO.Directory]::GetFiles($RunDir)) {
             # (Kept: the hold after an ask got auth or not-subscriber, until the
-            # credentials change, and the version whose ask spent.)
-            if ([IO.Path]::GetFileName($f) -cmatch '\Aask\..*\.(auth|off)\z') { continue }
+            # credentials change, the stopped versions and the count of failed asks.)
+            if ([IO.Path]::GetFileName($f) -cmatch '\Aask\..*\.(auth|off|fail)\z') { continue }
             if (($now - [IO.File]::GetLastWriteTimeUtc($f)).TotalDays -ge 1) { Remove-FileQ $f }
         }
     } catch { }

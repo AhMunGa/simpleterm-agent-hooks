@@ -3047,14 +3047,13 @@ usage_send() { # rid tail [file text]
 
 # --- usage asks (TDS_AGENT_EVENTS_V2 section 9.2) ----------------------------------
 
-# The agent versions whose ask was measured to make no model request
-# (2026-11-03, a local mock API, .hjc/research/2026-11-03-usage-ask of the
-# app): asks run from MIN up to, not including, BELOW. Another version is
-# not asked (its file values still go).
-ASK_CLAUDE_MIN=2.1.316 ASK_CLAUDE_BELOW=2.2.0
-ASK_CODEX_MIN=0.165.0 ASK_CODEX_BELOW=0.166.0
-# (Measured 0 model requests: Claude Code 2.1.316 and 2.1.317 in 22 asks,
-# Codex 0.165.0 in 11; the same harness caught 6 and 31 in real turns.)
+# Every version and OS is asked (D22, 2026-11-03 user decision). Measured
+# against a local mock API (2026-11-03, .hjc/research/2026-11-03-usage-ask
+# of the app): 0 model requests in 22 asks of Claude Code 2.1.316 and
+# 2.1.317 and 11 of Codex 0.165.0 on macOS (the same harness caught 6 and 31
+# in real turns). What guards the others: the version of the executable
+# that ran stops for good after an answer showing spend or a hook, or after
+# 3 failed asks in a row (run/ask.<agent>.off).
 
 # A value of agent-hook.conf (conf_val), or $2 if empty. The caller compares
 # it in any case.
@@ -3081,37 +3080,190 @@ EOF
   return 1
 }
 
+# True if asks of the agent's executable version $1 were stopped (an answer
+# of that version showed model spend or a hook, or 3 asks in a row failed):
+# run/ask.<agent>.off, one version a line (`unknown` among them).
+ask_stopped() { # version
+  [ -f "$RUN_DIR/ask.$AGENT.off" ] || return 1
+  head -c 4096 "$RUN_DIR/ask.$AGENT.off" 2>/dev/null | awk -v v="$1" '$0 == v { f = 1; exit } END { exit !f }'
+}
+
+# Ends process $1 and every process under it (the agent's own children): the
+# process and then those under it are stopped first, so that none starts
+# another unseen while ps runs, then all get TERM and go on to take it. (A
+# process group would hold them all, but a POSIX shell without job control
+# cannot start one: dash needs a terminal for set -m, macOS has no setsid.)
+kill_tree() { # pid
+  is_uint "$1" && [ "$1" -gt 1 ] || return 0
+  kill -STOP "$1" 2>/dev/null || return 0
+  kt=$1
+  for kr in 1 2; do
+    kt=$( { ps -A -o pid= -o ppid= 2>/dev/null || ps -o pid= -o ppid= 2>/dev/null; } | awk -v r="$1" '
+      $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { n[$2]++; k[$2, n[$2]] = $1 }
+      END { q[1] = r; m = 1; for (i = 1; i <= m && m < 512; i++) { p = q[i]; for (j = 1; j <= n[p]; j++) q[++m] = k[p, j] } for (i = 1; i <= m; i++) printf "%s ", q[i] }' 2>/dev/null)
+    # (Each a number: the words are the process ids.)
+    # shellcheck disable=SC2086
+    kill -STOP ${kt:-$1} 2>/dev/null
+  done
+  # shellcheck disable=SC2086
+  kill ${kt:-$1} 2>/dev/null
+  # shellcheck disable=SC2086
+  kill -CONT ${kt:-$1} 2>/dev/null
+  return 0
+}
+
+# The folder an ask runs in: ~/.simpleterm/probe (700), with no project
+# settings.
+ask_probe_dir() {
+  mkdir -p "$ST_DIR/probe" 2>/dev/null && chmod 700 "$ST_DIR/probe" 2>/dev/null
+}
+
+# The probe's environment, in a subshell: ~/.simpleterm/probe, SIMPLETERM_PROBE=1
+# and none of the agent session's own variables (measured, Claude Code
+# 2.1.316): an ask is not a child of that session.
+ask_env() {
+  cd "$ST_DIR/probe" || exit 0
+  unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_EXECPATH \
+    CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN \
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS CLAUDE_EFFORT CLAUDE_PID AI_AGENT SIMPLETERM 2>/dev/null
+  SIMPLETERM_PROBE=1
+  export SIMPLETERM_PROBE
+}
+
+# True if $1 is a version as av is written (section 3): [0-9A-Za-z.+_-]{1,32}.
+ask_ver_ok() { # version
+  case $1 in '' | *[!0-9A-Za-z.+_-]*) return 1 ;; esac
+  [ "${#1}" -le 32 ]
+}
+
+# The version of agent executable $1, which the ask would run (section 9.2
+# condition 6, D21, D22): ASK_BV, and ASK_EXE the file that the ask then
+# runs. Its links are followed to the end: .../versions/<version> (a native
+# Claude Code install) gives the version. Otherwise run/ver.<agent> (D13,
+# section 10.1: that file's path, and its --version's first dotted number or
+# an empty line if it gave none) is used for the same file while the file is
+# not newer: `unknown` if it holds no version. Else it is measured again in
+# the background (15 seconds at most) and ASK_BV stays empty: no ask this
+# turn.
+ask_bin_version() { # executable
+  ASK_BV='' ASK_EXE=''
+  r=$1 n=0
+  while [ -h "$r" ] && [ "$n" -lt 16 ]; do
+    t=$(readlink "$r" 2>/dev/null) || return 0
+    case $t in '') return 0 ;; /*) r=$t ;; *) r=${r%/*}/$t ;; esac
+    n=$((n + 1))
+  done
+  [ -f "$r" ] && ! [ -h "$r" ] || return 0
+  case $r in *"$CR"* | *'
+'*) return 0 ;; esac
+  v=''
+  case ${r%/*} in */versions) v=${r##*/} ;; esac
+  ask_ver_ok "$v" || v=''
+  if [ -z "$v" ]; then
+    vc=$RUN_DIR/ver.$AGENT
+    if [ -f "$vc" ] && [ "$(sed -n 1p "$vc" 2>/dev/null)" = "$r" ] && ! [ "$r" -nt "$vc" ]; then
+      v=$(sed -n 2p "$vc" 2>/dev/null)
+      ask_ver_ok "$v" || v=unknown
+    else
+      ask_probe_dir || return 0
+      # (A lock left by a measurement that never ended holds a minute.)
+      [ -n "$(find "$vc.lock" -mmin +1 2>/dev/null)" ] && rm -f "$vc.lock"
+      ( set -C; printf '' >"$vc.lock" ) 2>/dev/null || return 0
+      trap '' HUP
+      (
+        v=$(
+          ask_env
+          "$r" --version </dev/null >"$vc.out" 2>/dev/null &
+          vk=$!
+          ( sleep 15; kill_tree "$vk" ) </dev/null >/dev/null 2>&1 &
+          wd=$!
+          wait "$vk" 2>/dev/null
+          # (Its sleep ends by itself; ps, which kill_tree needs, can be slow
+          # on a loaded machine.)
+          kill "$wd" 2>/dev/null
+          head -c 4096 "$vc.out" 2>/dev/null | awk 'match($0, /[0-9]+[.][0-9]+[0-9A-Za-z.+_-]*/) { print substr($0, RSTART, RLENGTH); exit }'
+        )
+        # (None: an empty line, so the same file is not measured again.)
+        ask_ver_ok "$v" || v=''
+        printf '%s\n%s\n' "$r" "$v" >"$vc.tmp" && mv -f "$vc.tmp" "$vc"
+        rm -f "$vc.out" "$vc.tmp" "$vc.lock"
+      ) </dev/null >/dev/null 2>&1 &
+      return 0
+    fi
+  fi
+  ASK_BV=$v ASK_EXE=$r
+}
+
+# The failed asks in a row of executable version ASK_BV (D22): the first line
+# of run/ask.<agent>.fail (its first 4 KiB), `<version> <count>`; 0 if it is
+# another version or not of that form.
+ask_fails() {
+  [ -f "$RUN_DIR/ask.$AGENT.fail" ] || { printf 0; return 0; }
+  head -c 4096 "$RUN_DIR/ask.$AGENT.fail" 2>/dev/null | awk -v v="$ASK_BV" '
+    NR == 1 { if ($0 ~ /^[0-9A-Za-z.+_-]+ [1-9][0-9]*$/ && substr($0, 1, length(v) + 1) == v " " && length($0) - length(v) <= 10) c = substr($0, length(v) + 2); exit }
+    END { print c + 0 }' 2>/dev/null
+}
+
+# After an ask: an answer ($1 0) clears the count; a failed one (failed,
+# timeout; $1 1) adds one, from 1 for another version, written whole to
+# run/ask.<agent>.fail.<pid> and renamed over the file (not counted if that
+# fails); the third stops that version (D22). Sign-in results (auth,
+# not-subscriber) do not come here.
+ask_fail_count() { # 1|0
+  ff=$RUN_DIR/ask.$AGENT.fail
+  if [ "$1" = 0 ]; then
+    rm -f "$ff" 2>/dev/null
+    return 0
+  fi
+  fc=$(($(ask_fails) + 1))
+  if printf '%s %s\n' "$ASK_BV" "$fc" >"$ff.$$" 2>/dev/null && mv -f "$ff.$$" "$ff" 2>/dev/null; then
+    [ "$fc" -ge 3 ] && ask_stop
+  fi
+  rm -f "$ff.$$" 2>/dev/null
+  return 0
+}
+
+# Stops asks of executable version ASK_BV for good (run/ask.<agent>.off).
+ask_stop() {
+  ask_stopped "$ASK_BV" || printf '%s\n' "$ASK_BV" >>"$RUN_DIR/ask.$AGENT.off" 2>/dev/null
+}
+
 # At the end of a turn, while the app is connected, at most every 5 minutes
-# per agent and settings folder: asks the agent for its limits in the
-# background (stdio closed, 20 seconds at most). After a failed sign-in or an
-# answer of no plan limits (not-subscriber) it asks again only once the
-# agent's credentials file changed. usage_ask=off
-# in agent-hook.conf turns it off. Codex only with usage_ask_codex=on: its
-# app-server writes its own state, syncs its plugins over the network and
-# may refresh an expired sign-in (2026-11-03 decision), and its rollout
-# gives the limits already.
+# per agent and settings folder: asks Claude Code or Codex for its limits in
+# the background (stdio closed, 20 seconds at most), unless asks of the
+# version of the executable that the ask runs were stopped (section 9.2,
+# D21, D22). After a failed sign-in or an answer of no plan limits
+# (not-subscriber) it asks again only once the agent's credentials file
+# changed. usage_ask=off in agent-hook.conf turns it off; usage_ask_codex=off
+# turns off Codex's only (its app-server writes its own state, syncs its
+# plugins over the network and may refresh an expired sign-in).
 usage_ask() {
   # (Values in any case: OFF and No turn it off too.)
   case $(conf_word usage_ask on | tr 'A-Z' 'a-z') in off | 0 | no | false) return 0 ;; esac
   case $EVENT in Stop | StopFailure) ;; *) return 0 ;; esac
   case $AGENT in
     claude)
-      ab=claude cfg=${CLAUDE_CONFIG_DIR:-$HOME/.claude} amin=$ASK_CLAUDE_MIN abelow=$ASK_CLAUDE_BELOW
+      ab=claude cfg=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
       ind=$cfg/.credentials.json
       ;;
     codex)
-      case $(conf_word usage_ask_codex off | tr 'A-Z' 'a-z') in on | 1 | yes | true) ;; *) return 0 ;; esac
-      ab=codex cfg=${CODEX_HOME:-$HOME/.codex} amin=$ASK_CODEX_MIN abelow=$ASK_CODEX_BELOW
+      case $(conf_word usage_ask_codex on | tr 'A-Z' 'a-z') in off | 0 | no | false) return 0 ;; esac
+      ab=codex cfg=${CODEX_HOME:-$HOME/.codex}
       ind=$cfg/auth.json
       ;;
     *) return 0 ;;
   esac
   [ -n "$LINKS" ] && tunnel_live || return 0
+  ap=$(command -v "$ab" 2>/dev/null)
+  case $ap in /*) ;; *) return 0 ;; esac
+  # The version of the executable the ask runs (a native install moves the
+  # link on PATH to a newer version while sessions of the older one still
+  # run): asks of it not stopped.
+  ask_bin_version "$ap"
+  [ -n "$ASK_BV" ] || return 0
+  ask_stopped "$ASK_BV" && return 0
+  [ "$(ask_fails)" -ge 3 ] && return 0
   v2_common
-  case $AV in [0-9]*.[0-9]*) ;; *) return 0 ;; esac
-  ver_lt "$AV" "$amin" && return 0
-  ver_lt "$AV" "$abelow" || return 0
-  [ "$(cat "$RUN_DIR/ask.$AGENT.off" 2>/dev/null)" = "$AV" ] && return 0
   af=$RUN_DIR/ask.$AGENT.$(printf '%s' "$cfg" | cksum | awk '{ print $1 }')
   if [ -f "$af.auth" ]; then
     [ -f "$ind" ] && [ "$ind" -nt "$af.auth" ] || return 0
@@ -3119,13 +3271,11 @@ usage_ask() {
   fi
   la=$(cat "$af" 2>/dev/null)
   is_uint "$la" && [ $((NOW - la)) -lt 300 ] && [ $((la - NOW)) -le 60 ] && return 0
-  ap=$(command -v "$ab" 2>/dev/null)
-  case $ap in /*) ;; *) return 0 ;; esac
   printf '%s\n' "$NOW" >"$af" 2>/dev/null || return 0
-  mkdir -p "$ST_DIR/probe" 2>/dev/null && chmod 700 "$ST_DIR/probe" 2>/dev/null || return 0
-  log "usage-ask $AGENT"
+  ask_probe_dir || return 0
+  log "usage-ask $AGENT $ASK_BV"
   trap '' HUP
-  (ask_run "$ap" "$af") </dev/null >/dev/null 2>&1 &
+  (ask_run "$ASK_EXE" "$af") </dev/null >/dev/null 2>&1 &
 }
 
 # Runs command "$@" in ~/.simpleterm/probe with SIMPLETERM_PROBE=1, its
@@ -3137,14 +3287,7 @@ ask_pipe() { # command...
   : >"$AQ.out"
   rm -f "$AQ.done"
   (
-    cd "$ST_DIR/probe" || exit 0
-    # The agent session's own variables (measured, Claude Code 2.1.316): the
-    # ask is not a child of that session.
-    unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_EXECPATH \
-      CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN \
-      CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS CLAUDE_EFFORT CLAUDE_PID AI_AGENT SIMPLETERM 2>/dev/null
-    SIMPLETERM_PROBE=1
-    export SIMPLETERM_PROBE
+    ask_env
     {
       cat "$AQ.in"
       if [ -n "$AQ_WAIT1" ]; then
@@ -3172,7 +3315,8 @@ ask_pipe() { # command...
     : >"$AQ.done"
     aw=0
     while [ "$aw" -lt 3 ] && kill -0 "$apid" 2>/dev/null; do sleep 1; aw=$((aw + 1)); done
-    kill "$apid" 2>/dev/null
+    # Still there: it and what it started.
+    kill -0 "$apid" 2>/dev/null && kill_tree "$apid"
   ) </dev/null >/dev/null 2>&1
   AQ_RES=$(cat "$AQ.res" 2>/dev/null)
 }
@@ -3279,7 +3423,7 @@ ask_now() {
 # The ask itself (in the background): runs it, makes the `usage` event from
 # its answer (windows src ask, uq) and sends it to the tunnels.
 ask_run() { # agent-executable ask-file
-  AQ=$RUN_DIR/ask.$$.$(rand_hex 4) A=''
+  AQ=$RUN_DIR/ask.$$.$(rand_hex 4) A='' hk=''
   case $AGENT in
     claude)
       printf '%s\n' '{"type":"control_request","request_id":"1","request":{"subtype":"get_usage","skip_behaviors":true}}' >"$AQ.in"
@@ -3288,6 +3432,12 @@ ask_run() { # agent-executable ask-file
         --strict-mcp-config --no-session-persistence --include-hook-events
       at=$(ask_now)
       [ "$AQ_RES" = ok ] && A=$(ask_facts '"type":"control_response"' | awk -v at="$at" "$CLAUDE_USAGE" 2>/dev/null)
+      # A hook ran in the ask (--include-hook-events shows it; measured 0):
+      # the probe guard did not hold or the ask ran as a turn, so as with
+      # spend (D21).
+      case $(head -c 1048576 "$AQ.out" 2>/dev/null) in
+        *'{"type":"system","subtype":"hook_started"'* | *'{"type":"system","subtype":"hook_progress"'* | *'{"type":"system","subtype":"hook_response"'*) hk=1 ;;
+      esac
       ;;
     codex)
       printf '%s\n' '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"simpleterm","version":"'"$HOOK_VERSION"'"}}}' >"$AQ.in"
@@ -3304,11 +3454,14 @@ ask_run() { # agent-executable ask-file
     'ERR '*) err=${A#ERR } ;;
     *) if [ "$AQ_RES" = timeout ]; then err=timeout; else err=failed; fi ;;
   esac
-  if [ "$err" = spent ]; then
-    # The ask cost a model call: no more asks of this version.
-    printf '%s\n' "$AV" >"$RUN_DIR/ask.$AGENT.off" 2>/dev/null
-    err=failed
-  fi
+  [ -n "$hk" ] && err=spent
+  case $err in
+    # The ask cost a model call: no more asks of this executable version
+    # (added to the set, D21); a failed ask too.
+    spent) ask_stop; err=failed; ask_fail_count 1 ;;
+    failed | timeout | unsupported) ask_fail_count 1 ;;
+    '') ask_fail_count 0 ;;
+  esac
   log "usage-ask $AGENT ${err:-ok}"
   # A failed sign-in, or an account without plan limits (an API key, a
   # gateway): not asked again until the credentials change (one report of
@@ -4455,8 +4608,8 @@ print_running() {
 turn_end() {
   ensure_cli
   # (Kept: the hold after an ask got auth or not-subscriber, until the
-  # credentials change, and the version whose ask spent.)
-  find "$RUN_DIR" -type f -mtime +0 ! -name 'ask.*.auth' ! -name 'ask.*.off' -exec rm -f {} + 2>/dev/null
+  # credentials change, the stopped versions and the count of failed asks.)
+  find "$RUN_DIR" -type f -mtime +0 ! -name 'ask.*.auth' ! -name 'ask.*.off' ! -name 'ask.*.fail' -exec rm -f {} + 2>/dev/null
 }
 
 # --- who started a turn, and what ran before it ------------------------------
