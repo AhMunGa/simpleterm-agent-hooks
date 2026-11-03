@@ -513,5 +513,25 @@
   "stdout": [
    ""
   ]
+ },
+ "opencode2_alone": {
+  "plain": [
+   "relay1 permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"opencode\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"approve edit: hello.txt\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"ses_9\",\"mux\":\"unknown\",\"req\":{\"id\":\"per_01JDX2\",\"win\":\"edit\",\"tool\":\"edit\",\"wait\":\"shared\",\"ask\":{\"path\":\"hello.txt\"},\"can\":[\"allow\",\"deny\"]},\"ts\":1793232000}",
+   "relay2 permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"opencode\",\"host\":\"box-b\",\"cwd\":\"api\",\"msg\":\"approve edit: hello.txt\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"ses_9\",\"mux\":\"unknown\",\"req\":{\"id\":\"per_01JDX2\",\"win\":\"edit\",\"tool\":\"edit\",\"wait\":\"shared\",\"ask\":{\"path\":\"hello.txt\"},\"can\":[\"allow\",\"allow_scope\",\"deny\",\"deny_reason\"],\"scopes\":[{\"label\":\"*\",\"kind\":\"pattern\",\"dest\":\"project\"}],\"affects\":[\"allow_scope\",\"deny\",\"deny_reason\"],\"others\":[]},\"ts\":1793232000}",
+   "tunnel permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"opencode\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"approve edit: hello.txt\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"ses_9\",\"dir\":\"/home/me/work/api\",\"mux\":\"unknown\",\"tms\":1793232000123,\"req\":{\"id\":\"per_01JDX2\",\"win\":\"edit\",\"tool\":\"edit\",\"wait\":\"shared\",\"ask\":{\"path\":\"hello.txt\",\"change\":{\"form\":\"patch\",\"fmt\":\"unified\",\"text\":\"--- a/hello.txt\\n+++ b/hello.txt\\n@@ -1 +1 @@\\n-hi\\n+hello\\n\"}},\"can\":[\"allow\",\"allow_scope\",\"deny\",\"deny_reason\"],\"scopes\":[{\"label\":\"*\",\"kind\":\"pattern\",\"dest\":\"project\"}],\"affects\":[\"allow_scope\",\"deny\",\"deny_reason\"],\"others\":[]},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   ""
+  ]
+ },
+ "opencode119_alone": {
+  "plain": [
+   "relay1 permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"opencode\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"approve bash: echo a1\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"ses_9\",\"req\":{\"id\":\"per_a1\",\"win\":\"shell\",\"tool\":\"bash\",\"wait\":\"shared\",\"ask\":{\"cmd\":\"echo a1\"},\"can\":[\"allow\",\"deny\"]},\"ts\":1793232000}",
+   "relay2 permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"opencode\",\"host\":\"box-b\",\"cwd\":\"api\",\"msg\":\"approve bash: echo a1\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"ses_9\",\"req\":{\"id\":\"per_a1\",\"win\":\"shell\",\"tool\":\"bash\",\"wait\":\"shared\",\"ask\":{\"cmd\":\"echo a1\"},\"can\":[\"allow\",\"allow_scope\",\"deny\",\"deny_reason\"],\"scopes\":[{\"label\":\"echo *\",\"kind\":\"pattern\",\"dest\":\"process\"}],\"affects\":[\"allow_scope\",\"deny\",\"deny_reason\"],\"others\":[]},\"ts\":1793232000}",
+   "tunnel permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"opencode\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"approve bash: echo a1\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"ses_9\",\"tid\":\"msg_01\",\"dir\":\"/home/me/work/api\",\"tms\":1793232000123,\"req\":{\"id\":\"per_a1\",\"win\":\"shell\",\"tool\":\"bash\",\"wait\":\"shared\",\"ask\":{\"cmd\":\"echo a1\"},\"can\":[\"allow\",\"allow_scope\",\"deny\",\"deny_reason\"],\"scopes\":[{\"label\":\"echo *\",\"kind\":\"pattern\",\"dest\":\"process\"}],\"affects\":[\"allow_scope\",\"deny\",\"deny_reason\"],\"others\":[]},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   ""
+  ]
  }
 }

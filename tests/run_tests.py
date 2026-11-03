@@ -2890,6 +2890,34 @@ def t_v2_n10(s):
         pend(open_ids)
         rc, out, err, el = s.run("opencode", oc)
         s.check("N10 opencode (%s)" % name, (decision_json(out) or None) == want, out + s.log_text()[-200:])
+    # Sent while it was the only open request (no others, so the bridge gave none), and another opened
+    # before the decision: always and reject would settle that one too (OpenCode 1.19 and 2.x), so the
+    # decision is judged by the requests open now, not by what the request carried (section 5.5-5).
+    for ocv in ("2", "1.19"):
+        alone = json.loads(oc)
+        alone.pop("others")
+        alone["oc"] = ocv
+        if ocv == "1.19":
+            alone.pop("save")
+            alone.update({"patterns": ["echo a"], "always": ["echo *"]})
+        alone = json.dumps(alone)
+        for name, fmt, dext, dec, open_ids, want in (
+                ("dext deny, seen only this one", 2, {"act": "deny", "seen": ["per_1"]}, "deny", ["per_1", "per_3"], None),
+                ("dext deny, no seen", 2, {"act": "deny"}, "deny", ["per_1", "per_3"], None),
+                ("v1 deny (a quick action)", 2, None, "deny", ["per_1", "per_3"], None),
+                ("older app (no fmt), v1 deny", None, None, "deny", ["per_1", "per_3"], None),
+                ("dext allow_scope, seen only this one", 2, {"act": "allow_scope", "scope": 0, "seen": ["per_1"]}, "allow", ["per_1", "per_3"], None),
+                ("dext deny, seen both", 2, {"act": "deny", "seen": ["per_1", "per_3"]}, "deny", ["per_1", "per_3"], {"decision": "deny"}),
+                ("v1 allow (once, settles nothing else)", 2, None, "allow", ["per_1", "per_3"], {"decision": "allow"}),
+                ("older app, v1 deny, nothing else open", None, None, "deny", ["per_1"], {"decision": "deny"})):
+            s.setup([(LINK_A, {"fmt": fmt, "decision": dec, "after": 1, "dext": dext})], conf={"opencode_wait": 20})
+            pend(open_ids)
+            rc, out, err, el = s.run("opencode", alone)
+            s.check("N10 opencode %s alone when sent (%s)" % (ocv, name), (decision_json(out) or None) == want, out + s.log_text()[-200:])
+            if name == "dext deny, no seen":
+                req = ((s.records("/v1/ingest") or [{}])[0].get("plain_json") or {}).get("req") or {}
+                s.check("N10 opencode %s alone when sent: affects and others [] all the same" % ocv,
+                        req.get("affects") == ["allow_scope", "deny", "deny_reason"] and req.get("others") == [], str(req)[:300])
     # A v1 link (no fmt=2) takes no extension beyond what it was offered (allow, deny).
     s.setup([(LINK_A, {"decision": "deny", "after": 1, "dext": {"act": "deny_reason", "reason": "no"}})], conf={"claude_wait": 8})
     rc, out, err, el = s.run("claude", v2_perm(session="sess-v1"))

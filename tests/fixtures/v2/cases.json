@@ -2787,6 +2787,96 @@
    "conf": {},
    "files": {},
    "note": ""
+  },
+  {
+   "name": "opencode2_alone",
+   "agent": "opencode",
+   "src": "OpenCode, from the plugin bridge (2.2.5 permission.asked, measured v2a8)",
+   "steps": [
+    {
+     "args": [
+      "opencode"
+     ],
+     "input": {
+      "hook_event_name": "PermissionRequest",
+      "session_id": "ses_9",
+      "cwd": "/home/me/work/api",
+      "tool_name": "edit",
+      "tool_input": {
+       "command": "hello.txt"
+      },
+      "oc": "2",
+      "request_id": "per_01JDX2",
+      "save": [
+       "*"
+      ],
+      "resources": [
+       "hello.txt"
+      ],
+      "metadata": {
+       "files": [
+        {
+         "file": "hello.txt",
+         "patch": "--- a/hello.txt\n+++ b/hello.txt\n@@ -1 +1 @@\n-hi\n+hello\n"
+        }
+       ]
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": "2.2.5 with no other request open: affects and others [] all the same (section 4.5)"
+  },
+  {
+   "name": "opencode119_alone",
+   "agent": "opencode",
+   "src": "OpenCode, from the plugin bridge (1.19.5 permission.asked, measured a1/a6)",
+   "steps": [
+    {
+     "args": [
+      "opencode"
+     ],
+     "input": {
+      "hook_event_name": "PermissionRequest",
+      "session_id": "ses_9",
+      "cwd": "/home/me/work/api",
+      "tool_name": "bash",
+      "tool_input": {
+       "command": "echo a1"
+      },
+      "oc": "1.19",
+      "request_id": "per_a1",
+      "patterns": [
+       "echo a1"
+      ],
+      "always": [
+       "echo *"
+      ],
+      "metadata": {
+       "command": "echo a1"
+      },
+      "message_id": "msg_01"
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {},
+   "conf": {},
+   "files": {},
+   "note": "1.19.5 with no other request open: affects and others [] all the same (section 4.5)"
   }
  ]
 }
