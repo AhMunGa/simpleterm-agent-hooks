@@ -56,6 +56,20 @@ const replied = (globalThis.__simpletermReplied ??= new Set());
 // ~/.simpleterm/run/oc.<session>.pending.
 const pending = (globalThis.__simpletermPending ??= new Map());
 
+// The session's tokens and cost as OpenCode keeps them (session info `cost`
+// and `tokens`), for the usage event's `cost` (TDS_AGENT_EVENTS_V2 section 9.3).
+function usage(info) {
+  const out = {};
+  if (typeof info?.cost === "number" && Number.isFinite(info.cost) && info.cost >= 0) out.cost = info.cost;
+  const t = info?.tokens;
+  if (t && typeof t === "object") {
+    const n = (v) => (Number.isInteger(v) && v >= 0 ? v : 0);
+    out.tokens_in = n(t.input) + n(t.cache?.read) + n(t.cache?.write);
+    out.tokens_out = n(t.output) + n(t.reasoning);
+  }
+  return out;
+}
+
 function pendingFile(sessionID) {
   const st = join(process.env.HOME || homedir(), ".simpleterm");
   if (!existsSync(st)) return null;
@@ -397,6 +411,7 @@ export default {
               oc: "2",
               last_assistant_message: String(info.title || ""),
               ...(background.length ? { background_tasks: background } : {}),
+              ...usage(info),
             },
         cwd,
         undefined,

@@ -20,6 +20,20 @@ import { fileURLToPath } from "node:url";
 
 const HOOK = join(dirname(fileURLToPath(import.meta.url)), "simpleterm-agent-hook.sh");
 
+// The session's tokens and cost as OpenCode keeps them (session info `cost`
+// and `tokens`), for the usage event's `cost` (TDS_AGENT_EVENTS_V2 section 9.3).
+function usage(info) {
+  const out = {};
+  if (typeof info?.cost === "number" && Number.isFinite(info.cost) && info.cost >= 0) out.cost = info.cost;
+  const t = info?.tokens;
+  if (t && typeof t === "object") {
+    const n = (v) => (Number.isInteger(v) && v >= 0 ? v : 0);
+    out.tokens_in = n(t.input) + n(t.cache?.read) + n(t.cache?.write);
+    out.tokens_out = n(t.output) + n(t.reasoning);
+  }
+  return out;
+}
+
 function runHook(event, cwd, waits, key) {
   return new Promise((resolve) => {
     let out = "";
@@ -238,7 +252,7 @@ export const SimpleTermAgentHooks = async ({ client, directory }) => {
         if (info.parentID) return; // a subagent's session
         if (await busyChild(p.sessionID)) return; // its report wakes this one
         await runHook(
-          { hook_event_name: "Stop", session_id: p.sessionID, cwd: directory, last_assistant_message: String(info.title || ""), title: String(info.title || ""), oc: "1" },
+          { hook_event_name: "Stop", session_id: p.sessionID, cwd: directory, last_assistant_message: String(info.title || ""), title: String(info.title || ""), oc: "1", ...usage(info) },
           directory,
         );
         return;

@@ -34,6 +34,11 @@ umask 077
 LC_ALL=C
 export LC_ALL
 
+# A usage ask runs the agent with SIMPLETERM_PROBE=1 (TDS_AGENT_EVENTS_V2
+# section 9.2): hooks it runs do nothing, or the ask would make sessions and
+# alerts of its own.
+[ "${SIMPLETERM_PROBE:-}" = 1 ] && exit 0
+
 AGENT=${1:-}
 MODE=${2:-}
 [ -n "${HOME:-}" ] || exit 0
@@ -460,7 +465,7 @@ resp_get() { # file wanted-paths
 # of a message; `notify` adds a title.
 plaintext() { # rid ev nonce
   case $2 in
-    notify | usage | test) ;;
+    notify | test) ;;
     *) if [ "$V2" = 1 ]; then v2_plain "$@"; return; fi ;;
   esac
   host=$(json_text "$L_LABEL" 64 256)
@@ -509,6 +514,9 @@ ingest_raw() { # rid ev nonce outfile
     400) err=$(resp_get "$4" error | sed -n 's/^error=//p' | tr -cd 'a-zA-Z-') ;;
   esac
   rm -f "$4"
+  # The last event to a tunnel and its answer: a usage ask needs the app
+  # connected (an HTTP 200 within 10 minutes, section 9.2).
+  [ "$L_KIND" = tunnel ] && printf '%s %s\n' "$(date +%s)" "$code" >"$RUN_DIR/tun.$(printf %.8s "$L_LINK").last" 2>/dev/null
   log "ingest ev=$2 link=$(printf %.8s "$L_LINK") http=$code push=${push:--}"
   printf '%s %s %s' "${push:-http$code}" "$code" "${err:--}"
   [ "$code" = 200 ]
@@ -1202,13 +1210,13 @@ function plain(   s, k, c) {
   s = "{\"v\":1,\"rid\":\"" V1["rid"] "\",\"ev\":\"" V1["ev"] "\",\"app\":\"" V1["app"] "\",\"host\":\"" HOST "\",\"cwd\":\"" CWD "\""
   if ("title" in V1) s = s ",\"title\":\"" TITLE "\""
   if ("msg" in V1) s = s ",\"msg\":\"" MSG "\""
-  s = s V1["xflags"]
+  s = s V1["uv1"] V1["xflags"]
   if (dec && V1["nonce"] != "") s = s ",\"nonce\":\"" V1["nonce"] "\""
   for (k = 1; k <= NC[0]; k++) {
     c = CH[0, k]
     if (!ND[c]) s = s ",\"" NK[c] "\":" ser(c)
   }
-  return s cutjson() ",\"ts\":" V1["ts"] "}"
+  return s cutjson() V1["uv2"] ",\"ts\":" V1["ts"] "}"
 }
 function size() { return length(plain()) }
 # Removes decision id d from req.can.
@@ -1413,6 +1421,9 @@ v2_plain() { # rid ev nonce
   vo=$( {
     printf '=rid\t%s\n=ev\t%s\n=app\t%s\n=host\t%s\n=cwd\t%s\n' "$1" "$2" "$APP" "$(json_text "$L_LABEL" 100000 100000)" "$CWD_BASEF"
     [ -n "$NOMSG" ] || printf '=msg\t%s\n' "$MSGF"
+    # A usage event's own fields: v1 ones (ctx, lims, plan) after cwd, uq and
+    # cost before ts (section 9.1).
+    [ "$2" = usage ] && printf '=uv1\t%s\n=uv2\t%s\n' "$USAGE_JSON" "$USAGE_V2"
     printf '=xflags\t%s\n=nonce\t%s\n=ts\t%s\n' "$vx" "$3" "$TS"
     printf '%s\n' "$SPEC"
   } | awk -v kind="${L_KIND:-relay}" -v fmt2="$vf" -v dec="$vd" -v waitov="$WAITOV" "$NORM_FN$V2_BUILD" 2>/dev/null)
@@ -2464,6 +2475,56 @@ EOF
 
 # --- usage (#342) ------------------------------------------------------------
 
+# ISO 8601 date-time (YYYY-MM-DDTHH:MM:SS, a fraction, Z or +-HH:MM) to
+# epoch seconds; -1 if it is not one (section 9.1 `at`, the windows' resets).
+ISO_FN='
+function isoepoch(t,   y, mo, d, h, mi, se, r, off, yy, era, yoe, doy, doe) {
+  if (t !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][Tt ][0-9][0-9]:[0-9][0-9]:[0-9][0-9]/) return -1
+  y = substr(t, 1, 4) + 0; mo = substr(t, 6, 2) + 0; d = substr(t, 9, 2) + 0
+  h = substr(t, 12, 2) + 0; mi = substr(t, 15, 2) + 0; se = substr(t, 18, 2) + 0
+  r = substr(t, 20)
+  sub(/^[.][0-9]+/, "", r)
+  if (r == "Z" || r == "z") off = 0
+  else if (r ~ /^[+-][0-9][0-9]:?[0-9][0-9]$/) {
+    off = (substr(r, 2, 2) * 60 + substr(r, length(r) - 1, 2)) * 60
+    if (substr(r, 1, 1) == "+") off = -off
+  } else return -1
+  if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || se > 59) return -1
+  yy = y - (mo <= 2 ? 1 : 0); era = int(yy / 400); yoe = yy - era * 400
+  doy = int((153 * (mo > 2 ? mo - 3 : mo + 9) + 2) / 5) + d - 1
+  doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+  return (era * 146097 + doe - 719468) * 86400 + h * 3600 + mi * 60 + se + off
+}
+# Minutes from a month before date-time t to t (a monthly window: Copilot).
+function monthmin(t,   e, y, mo, d, md) {
+  e = isoepoch(t)
+  if (e < 0) return -1
+  y = substr(t, 1, 4) + 0; mo = substr(t, 6, 2) + 0 - 1; d = substr(t, 9, 2) + 0
+  if (mo < 1) { mo = 12; y-- }
+  md = (mo == 2) ? ((y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)) ? 29 : 28) : ((mo == 4 || mo == 6 || mo == 9 || mo == 11) ? 30 : 31)
+  if (d > md) d = md
+  return int((e - isoepoch(sprintf("%04d-%02d-%02d", y, mo, d) substr(t, 11))) / 60)
+}
+# A non-negative decimal (digits, a fraction) as micro-units, exactly
+# (strings, no floats); -1 if it is not one. And back, without trailing
+# zeros. 100 - pct of Copilot, USD of Grok and OpenCode.
+function micro(v,   i, f) {
+  if (v !~ /^[0-9]+([.][0-9]+)?$/) return -1
+  i = v; f = ""
+  if (index(v, ".")) { i = substr(v, 1, index(v, ".") - 1); f = substr(v, index(v, ".") + 1) }
+  f = substr(f "000000", 1, 6)
+  return (i f) + 0
+}
+function unmicro(m,   i, f) {
+  sub(/^0+/, "", m)
+  m = substr("0000000", 1, 7 - length(m) > 0 ? 7 - length(m) : 0) m
+  i = substr(m, 1, length(m) - 6); f = substr(m, length(m) - 5)
+  sub(/^0+/, "", i); if (i == "") i = "0"
+  sub(/0+$/, "", f)
+  return i (f == "" ? "" : "." f)
+}'
+
+
 # How much of a transcript to read: its end only, where the newest record
 # is. The last 256 KiB nearly always hold it; 2 MiB is the most we read.
 USAGE_TAIL=2097152
@@ -2546,13 +2607,13 @@ END {
 
 # Codex rollout (JSONL) -> a usage line (see usage_report): the newest
 # token_count event with info (context) and the newest with rate limits.
-USAGE_CODEX=$JSON_FN'
+USAGE_CODEX=$JSON_FN$ISO_FN'
 function lim(id, p, w, r) {
   if (!isdec(p) || !isnum(w) || !isnum(r)) return
-  lims = lims " " id ":" p ":" w ":" r
+  lims = lims " " id ":" p ":" w ":" r ":file" (at >= 0 ? ":" at : "")
 }
 BEGIN {
-  jwant("payload.type,payload.info.last_token_usage.total_tokens,payload.info.model_context_window,payload.rate_limits.limit_id,payload.rate_limits.primary.used_percent,payload.rate_limits.primary.window_minutes,payload.rate_limits.primary.resets_at,payload.rate_limits.secondary.used_percent,payload.rate_limits.secondary.window_minutes,payload.rate_limits.secondary.resets_at,payload.rate_limits.plan_type,payload.rate_limits.rate_limit_reached_type")
+  jwant("timestamp,payload.type,payload.info.last_token_usage.total_tokens,payload.info.model_context_window,payload.rate_limits.limit_id,payload.rate_limits.primary.used_percent,payload.rate_limits.primary.window_minutes,payload.rate_limits.primary.resets_at,payload.rate_limits.secondary.used_percent,payload.rate_limits.secondary.window_minutes,payload.rate_limits.secondary.resets_at,payload.rate_limits.plan_type,payload.rate_limits.rate_limit_reached_type")
   n = 0
 }
 NR == 1 && skip { next }
@@ -2568,6 +2629,8 @@ END {
     }
     if (!rl && (("payload.rate_limits.primary.used_percent" in GOT) || ("payload.rate_limits.plan_type" in GOT))) {
       rl = 1
+      # The record time is when Codex learned these values (section 9.1).
+      at = isoepoch(GOT["timestamp"])
       id = GOT["payload.rate_limits.limit_id"]
       gsub(/[^A-Za-z0-9_.-]/, "", id)
       if (id == "") id = "codex"
@@ -2610,7 +2673,7 @@ END { if (inp != "") print inp, (mdl == "" ? "-" : mdl) }'
 STATUSLINE_LIMS=$JSON_FN'
 function lim(id, p, w, r) {
   if (!isdec(p) || !isnum(w) || !isnum(r) || r + 0 <= now + 0) return
-  printf " %s:%s:%s:%s", id, p, w, r
+  printf " %s:%s:%s:%s:statusline", id, p, w, r
 }
 BEGIN {
   jwant("context_window.context_window_size,rate_limits.five_hour.used_percentage,rate_limits.five_hour.resets_at,rate_limits.seven_day.used_percentage,rate_limits.seven_day.resets_at,rate_limits.spend_limit.used_percentage,rate_limits.spend_limit.resets_at,rate_limits.spend_limit.period")
@@ -2628,33 +2691,96 @@ END {
   printf "\n"
 }'
 
-# A usage line "<ctx> <win|-> <src> <est 0|1> <baseline|-> <plan|-> <reached
-# 0|1> [<id>:<pct>:<win min>:<reset epoch>]..." -> two lines: the OSC 9
-# body and the plaintext fields of the `usage` event.
+# A usage line "<ctx|-> <win|-> <src|-> <est 0|1> <baseline|-> <plan|->
+# <reached 0|1> [<id>:<pct>:<win min>:<reset epoch>[:<src>[:<at epoch>]]]..."
+# -> two lines: the OSC 9 body (v1; none without a context) and the v1
+# fields of the `usage` event, with each window's `src` and `at` (section
+# 9.1).
 USAGE_FMT='
 function num(v) { return v ~ /^[0-9]+$/ }
 function dec(v) { return v ~ /^[0-9]+([.][0-9]+)?$/ }
 NR == 1 {
-  if (!num($1) || !($3 ~ /^[a-z]+$/)) exit
-  osc = "simpleterm:usage v=1 agent=" app " ctx=" $1
-  js = ",\"ctx\":{\"used\":" $1
-  if (num($2)) { osc = osc " win=" $2; js = js ",\"win\":" $2 }
-  if (num($5)) js = js ",\"baseline\":" $5
-  osc = osc " src=" $3; js = js ",\"src\":\"" $3 "\""
-  if ($4 == 1) { osc = osc " est=1"; js = js ",\"est\":true" }
-  js = js "}"
-  la = ""
-  for (i = 8; i <= NF; i++) {
-    if (split($i, P, ":") != 4) continue
-    if (!(P[1] ~ /^[A-Za-z0-9_.-]+$/) || !dec(P[2]) || !num(P[3]) || !num(P[4])) continue
-    osc = osc " lim=" $i
-    la = la (la == "" ? "" : ",") "{\"id\":\"" P[1] "\",\"pct\":" P[2] ",\"win_min\":" P[3] ",\"resets_at\":" P[4] "}"
+  hc = num($1)
+  if (!hc && $1 != "-") exit
+  if (hc && !($3 ~ /^[a-z]+$/)) exit
+  osc = ""; js = ""
+  if (hc) {
+    osc = "simpleterm:usage v=1 agent=" app " ctx=" $1
+    js = ",\"ctx\":{\"used\":" $1
+    if (num($2)) { osc = osc " win=" $2; js = js ",\"win\":" $2 }
+    if (num($5)) js = js ",\"baseline\":" $5
+    osc = osc " src=" $3; js = js ",\"src\":\"" $3 "\""
+    if ($4 == 1) { osc = osc " est=1"; js = js ",\"est\":true" }
+    js = js "}"
   }
-  if ($7 == 1) { osc = osc " lim=reached"; la = la (la == "" ? "" : ",") "{\"id\":\"reached\"}" }
-  js = js ",\"lims\":[" la "]"
+  la = ""; nl = 0
+  for (i = 8; i <= NF; i++) {
+    n = split($i, P, ":")
+    if (n < 4 || n > 6) continue
+    if (!(P[1] ~ /^[A-Za-z0-9_.-]+$/) || !dec(P[2]) || !num(P[3]) || !num(P[4])) continue
+    if (n >= 5 && P[5] !~ /^(ask|file|statusline|hook)$/) continue
+    if (n == 6 && !num(P[6])) continue
+    if (hc) osc = osc " lim=" P[1] ":" P[2] ":" P[3] ":" P[4]
+    e = "{\"id\":\"" P[1] "\",\"pct\":" P[2] ",\"win_min\":" P[3] ",\"resets_at\":" P[4]
+    if (n >= 5) e = e ",\"src\":\"" P[5] "\""
+    if (n == 6) e = e ",\"at\":" P[6]
+    la = la (la == "" ? "" : ",") e "}"; nl++
+  }
+  if ($7 == 1) { if (hc) osc = osc " lim=reached"; la = la (la == "" ? "" : ",") "{\"id\":\"reached\"}"; nl++ }
+  # (As in v1, a report with a context always names its windows, [] too.)
+  if (hc || nl) js = js ",\"lims\":[" la "]"
   if ($6 ~ /^[A-Za-z0-9_-]+$/ && $6 != "-") js = js ",\"plan\":\"" $6 "\""
   print osc
   print js
+}'
+
+# Copilot session events (events.jsonl), the facts of its newest
+# model.model_call_success line that has quotaSnapshots -> usage line windows
+# "copilot.<item>:<pct>:<win>:<reset>:file:<at>" (section 9.3): an item
+# counts when it is not unlimited and has requests; pct is 100 less the
+# remaining percentage, the window the month before its reset.
+COPILOT_QUOTA=$ISO_FN'
+BEGIN { FS = "\t" }
+$1 == "timestamp" && $2 == "s" { ts = $3; next }
+index($1, "data.quotaSnapshots.") == 1 {
+  k = substr($1, 21); f = k; sub(/\..*/, "", k); sub(/^[^.]*\./, "", f)
+  if (!(k in SEEN)) { SEEN[k] = 1; K[++nk] = k }
+  if (!((k SUBSEP f) in Q)) Q[k, f] = $3
+}
+END {
+  at = isoepoch(ts); out = ""
+  for (i = 1; i <= nk; i++) {
+    k = K[i]; id = k; gsub(/[^A-Za-z0-9_.-]/, "", id)
+    if (id == "" || Q[k, "isUnlimitedEntitlement"] != "false") continue
+    if (Q[k, "entitlementRequests"] !~ /^[0-9]+$/ || Q[k, "entitlementRequests"] + 0 <= 0) continue
+    m = micro(Q[k, "remainingPercentage"])
+    if (m < 0 || m + 0 > 100000000) continue
+    r = isoepoch(Q[k, "resetDate"]); w = monthmin(Q[k, "resetDate"])
+    if (r < 0 || w <= 0) continue
+    out = out " copilot." id ":" unmicro(100000000 - m) ":" w ":" r ":file" (at >= 0 ? ":" at : "")
+  }
+  print substr(out, 2)
+}'
+
+# Grok usage.json (facts) or the OpenCode bridge (cost, tokens_in,
+# tokens_out) -> the `cost` object, or nothing (section 9.3).
+COST_FN=$ISO_FN'
+function costjson(usd, tin, tout,   s) {
+  s = ""
+  if (usd != "") s = s ",\"usd\":" usd
+  if (tin ~ /^[0-9]+$/) s = s ",\"tok_in\":" tin
+  if (tout ~ /^[0-9]+$/) s = s ",\"tok_out\":" tout
+  if (s == "") return ""
+  return ",\"cost\":{" substr(s, 2) ",\"scope\":\"session\"}"
+}'
+GROK_COST=$COST_FN'
+BEGIN { FS = "\t" }
+$2 == "r" && !($1 in G) { G[$1] = $3 }
+END {
+  # costUsdTicks: 10^-10 USD each (xAI cost_in_usd_ticks); micro-USD exact.
+  t = G["session.costUsdTicks"]; usd = ""
+  if (t ~ /^[0-9]+$/) { sub(/^0+/, "", t); usd = unmicro(length(t) > 4 ? substr(t, 1, length(t) - 4) : "0") }
+  printf "%s", costjson(usd, G["session.inputTokens"], G["session.outputTokens"])
 }'
 
 # A file path from the hook input (JSON-escaped) that can be read, or empty.
@@ -2711,10 +2837,32 @@ claude_window() { # model
   esac
 }
 
-# Sets U_LINE (see USAGE_FMT) for the current event, or leaves it empty.
+# Sets U_LINE (see USAGE_FMT) and U_COST (the `cost` object) for the
+# current event, or leaves them empty.
 usage_compute() {
-  U_LINE=''
+  U_LINE='' U_COST=''
   case $AGENT in
+    copilot)
+      # The quota of the newest model call in the session's events (file).
+      f=$(input_file "$TPATH")
+      [ -n "$f" ] || return 0
+      ql=$(tail -c 262144 "$f" 2>/dev/null | awk 'index($0, "\"quotaSnapshots\"") && index($0, "\"model.model_call_success\"") { l = $0 } END { print l }')
+      [ -n "$ql" ] || return 0
+      w=$(printf '%s\n' "$ql" | awk "$NORM_FN$JSON_FACTS" 2>/dev/null | awk "$COPILOT_QUOTA" 2>/dev/null)
+      [ -n "$w" ] && U_LINE="- - - 0 - - 0 $w"
+      ;;
+    grok)
+      # Tokens and cost of the session (usage.json; no limits).
+      is_id "$RAWSID" || return 0
+      uf=''
+      for d in "$HOME"/.grok/sessions/*/"$RAWSID"; do [ -f "$d/usage.json" ] && uf=$d/usage.json; done
+      [ -n "$uf" ] || return 0
+      U_COST=$(head -c 262144 "$uf" 2>/dev/null | awk "$NORM_FN$JSON_FACTS" 2>/dev/null | awk "$GROK_COST" 2>/dev/null)
+      ;;
+    opencode)
+      # Tokens and cost of the session, from the bridge (no limits).
+      U_COST=$(awk -v c="$OCCOST" -v i="$OCTIN" -v o="$OCTOUT" "$COST_FN"' BEGIN { m = micro(c); printf "%s", costjson(m >= 0 ? unmicro(m) : "", i, o) }' 2>/dev/null)
+      ;;
     claude)
       reached=0
       [ "$EVENT" = StopFailure ] && [ "$ERR" = rate_limit ] && reached=1
@@ -2787,27 +2935,324 @@ usage_compute() {
   esac
 }
 
-# Reports context and rate limits when they changed: an OSC 9 for the
-# terminal (Claude Code in SimpleTerm, USAGE_SEQ) and a `usage` event for the
-# SSH tunnel links. The relay gets none: it does not push them (an iOS push
-# is always an alert) and every request costs a function call.
+# Reports context, rate limits and cost when they changed: an OSC 9 for the
+# terminal (Claude Code in SimpleTerm, USAGE_SEQ; v1, context and windows
+# only) and a `usage` event for the SSH tunnel links (section 9.1). The relay
+# gets none: it does not push them (an iOS push is always an alert) and every
+# request costs a function call. At a turn's end it may also ask the agent
+# (usage_ask).
 usage_report() {
   USAGE_SEQ=''
   [ "$(conf_int usage 1)" = 0 ] && return 0
   usage_compute
-  [ -n "$U_LINE" ] || return 0
-  out=$(printf '%s\n' "$U_LINE" | awk -v app="$APP" "$USAGE_FMT" 2>/dev/null)
-  osc=$(printf '%s\n' "$out" | sed -n 1p)
-  USAGE_JSON=$(printf '%s\n' "$out" | sed -n 2p)
-  [ -n "$osc" ] && [ -n "$USAGE_JSON" ] || return 0
-  [ "$(cat "$RUN_DIR/$SID.usage" 2>/dev/null)" != "$osc" ] || return 0
+  osc='' USAGE_JSON=''
+  if [ -n "$U_LINE" ]; then
+    out=$(printf '%s\n' "$U_LINE" | awk -v app="$APP" "$USAGE_FMT" 2>/dev/null)
+    osc=$(printf '%s\n' "$out" | sed -n 1p)
+    USAGE_JSON=$(printf '%s\n' "$out" | sed -n 2p)
+  fi
+  usage_ask
+  [ -n "$USAGE_JSON$U_COST" ] || return 0
+  key=$osc$USAGE_JSON$U_COST
+  [ "$(cat "$RUN_DIR/$SID.usage" 2>/dev/null)" != "$key" ] || return 0
   # Recorded as sent only once SimpleTerm has it: on Claude Code's terminal
   # (printed below), or when a tunnel link took the event. Otherwise it goes
   # again next time, though unchanged, in case the app connects meanwhile.
-  USAGE_SEQ='\u001b]9;'$osc'\u0007'
-  [ "$AGENT" = claude ] && [ "${SIMPLETERM:-}" = 1 ] && printf '%s\n' "$osc" >"$RUN_DIR/$SID.usage" 2>/dev/null
-  urid=$(rand_hex 8)
-  is_hex "$urid" 16 && send_bg usage "$urid" tunnel "$RUN_DIR/$SID.usage" "$osc"
+  if [ -n "$osc" ]; then
+    USAGE_SEQ='\u001b]9;'$osc'\u0007'
+    [ "$AGENT" = claude ] && [ "${SIMPLETERM:-}" = 1 ] && printf '%s\n' "$key" >"$RUN_DIR/$SID.usage" 2>/dev/null
+  fi
+  usage_send "$(usage_rid)" "$U_COST" "$RUN_DIR/$SID.usage" "$key"
+}
+
+# A usage event's own rid (SIMPLETERM_HOOK_TEST_URID in tests).
+usage_rid() {
+  if [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ -n "${SIMPLETERM_HOOK_TEST_URID:-}" ]; then
+    printf '%s' "$SIMPLETERM_HOOK_TEST_URID"
+  else
+    rand_hex 8
+  fi
+}
+
+# The `usage` event (USAGE_JSON, then $2: uq, cost) to the tunnels, with the
+# common fields (section 9.1); $3 gets text $4 once a tunnel took it.
+usage_send() { # rid tail [file text]
+  is_hex "$1" 16 || return 0
+  us=$SPEC ux=$V2X um=$NOMSG
+  USAGE_V2=$2 NOMSG=1
+  v2_prep
+  send_bg usage "$1" tunnel "${3:-}" "${4:-}"
+  SPEC=$us V2X=$ux NOMSG=$um USAGE_V2=''
+}
+
+# --- usage asks (TDS_AGENT_EVENTS_V2 section 9.2) ----------------------------------
+
+# The agent versions whose ask was measured to make no model request
+# (2026-11-03, a local mock API, .hjc/research/2026-11-03-usage-ask of the
+# app): asks run from MIN up to, not including, BELOW. Another version is
+# not asked (its file values still go).
+ASK_CLAUDE_MIN=2.1.316 ASK_CLAUDE_BELOW=2.2.0
+ASK_CODEX_MIN=0.165.0 ASK_CODEX_BELOW=0.166.0
+# (Measured 0 model requests: Claude Code 2.1.316 and 2.1.317 in 22 asks,
+# Codex 0.165.0 in 11; the same harness caught 6 and 31 in real turns.)
+
+# A word value of agent-hook.conf, or $2.
+conf_word() { # key default
+  v=''
+  [ -f "$ST_DIR/agent-hook.conf" ] &&
+    v=$(head -c 4096 "$ST_DIR/agent-hook.conf" 2>/dev/null | sed -n "s/^$1=\\([A-Za-z0-9]*\\)\$/\\1/p" | head -n 1)
+  printf '%s' "${v:-$2}"
+}
+
+# True if the app is connected: a tunnel link whose last event got an HTTP
+# 200 within 10 minutes (ingest_raw records it). A tunnel file left behind
+# by a closed connection does not count.
+tunnel_live() {
+  tn=$(date +%s)
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    load_link "$f" || continue
+    [ "$L_KIND" = tunnel ] || continue
+    lt='' lc=''
+    read -r lt lc 2>/dev/null <"$RUN_DIR/tun.$(printf %.8s "$L_LINK").last" || continue
+    is_uint "$lt" && [ "$lc" = 200 ] && [ $((tn - lt)) -le 600 ] && [ $((lt - tn)) -le 60 ] && return 0
+  done <<EOF
+$LINKS
+EOF
+  return 1
+}
+
+# At the end of a turn, while the app is connected, at most every 5 minutes
+# per agent and settings folder: asks the agent for its limits in the
+# background (stdio closed, 20 seconds at most). After a failed sign-in it
+# asks again only once the agent's credentials file changed. usage_ask=off
+# in agent-hook.conf turns it off.
+usage_ask() {
+  case $(conf_word usage_ask on) in off | 0 | no | false) return 0 ;; esac
+  case $EVENT in Stop | StopFailure) ;; *) return 0 ;; esac
+  case $AGENT in
+    claude)
+      ab=claude cfg=${CLAUDE_CONFIG_DIR:-$HOME/.claude} amin=$ASK_CLAUDE_MIN abelow=$ASK_CLAUDE_BELOW
+      ind=$cfg/.credentials.json
+      ;;
+    codex)
+      ab=codex cfg=${CODEX_HOME:-$HOME/.codex} amin=$ASK_CODEX_MIN abelow=$ASK_CODEX_BELOW
+      ind=$cfg/auth.json
+      ;;
+    *) return 0 ;;
+  esac
+  [ -n "$LINKS" ] && tunnel_live || return 0
+  v2_common
+  case $AV in [0-9]*.[0-9]*) ;; *) return 0 ;; esac
+  ver_lt "$AV" "$amin" && return 0
+  ver_lt "$AV" "$abelow" || return 0
+  [ "$(cat "$RUN_DIR/ask.$AGENT.off" 2>/dev/null)" = "$AV" ] && return 0
+  af=$RUN_DIR/ask.$AGENT.$(printf '%s' "$cfg" | cksum | awk '{ print $1 }')
+  if [ -f "$af.auth" ]; then
+    [ -f "$ind" ] && [ "$ind" -nt "$af.auth" ] || return 0
+    rm -f "$af.auth"
+  fi
+  la=$(cat "$af" 2>/dev/null)
+  is_uint "$la" && [ $((NOW - la)) -lt 300 ] && [ $((la - NOW)) -le 60 ] && return 0
+  ap=$(command -v "$ab" 2>/dev/null)
+  case $ap in /*) ;; *) return 0 ;; esac
+  printf '%s\n' "$NOW" >"$af" 2>/dev/null || return 0
+  mkdir -p "$ST_DIR/probe" 2>/dev/null && chmod 700 "$ST_DIR/probe" 2>/dev/null || return 0
+  log "usage-ask $AGENT"
+  trap '' HUP
+  (ask_run "$ap" "$af") </dev/null >/dev/null 2>&1 &
+}
+
+# Runs command "$@" in ~/.simpleterm/probe with SIMPLETERM_PROBE=1, its
+# standard input the lines of file $AQ.in followed by the lines that
+# ask_more prints once file $AQ.out holds $AQ_WAIT1, then open until
+# $AQ.out holds $AQ_WAIT2 (or 20 seconds); its output in $AQ.out. Sets
+# AQ_RES: ok (got $AQ_WAIT2), gone (ended without it) or timeout.
+ask_pipe() { # command...
+  : >"$AQ.out"
+  rm -f "$AQ.done"
+  (
+    cd "$ST_DIR/probe" || exit 0
+    # The agent session's own variables (measured, Claude Code 2.1.316): the
+    # ask is not a child of that session.
+    unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_EXECPATH \
+      CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN \
+      CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS CLAUDE_EFFORT CLAUDE_PID AI_AGENT SIMPLETERM 2>/dev/null
+    SIMPLETERM_PROBE=1
+    export SIMPLETERM_PROBE
+    {
+      cat "$AQ.in"
+      if [ -n "$AQ_WAIT1" ]; then
+        aw=0
+        while [ "$aw" -lt 20 ] && [ ! -f "$AQ.done" ]; do
+          case $(head -c 1048576 "$AQ.out" 2>/dev/null) in *"$AQ_WAIT1"*) break ;; esac
+          sleep 1
+          aw=$((aw + 1))
+        done
+        cat "$AQ.more" 2>/dev/null
+      fi
+      aw=0
+      while [ "$aw" -lt 20 ] && [ ! -f "$AQ.done" ]; do sleep 1; aw=$((aw + 1)); done
+    } | "$@" >"$AQ.out" 2>/dev/null &
+    apid=$!
+    aw=0 res=timeout
+    while [ "$aw" -lt 20 ]; do
+      case $(head -c 1048576 "$AQ.out" 2>/dev/null) in *"$AQ_WAIT2"*) res=ok; break ;; esac
+      kill -0 "$apid" 2>/dev/null || { res=gone; break; }
+      sleep 1
+      aw=$((aw + 1))
+    done
+    case $(head -c 1048576 "$AQ.out" 2>/dev/null) in *"$AQ_WAIT2"*) res=ok ;; esac
+    printf '%s\n' "$res" >"$AQ.res"
+    : >"$AQ.done"
+    aw=0
+    while [ "$aw" -lt 3 ] && kill -0 "$apid" 2>/dev/null; do sleep 1; aw=$((aw + 1)); done
+    kill "$apid" 2>/dev/null
+  ) </dev/null >/dev/null 2>&1
+  AQ_RES=$(cat "$AQ.res" 2>/dev/null)
+}
+
+# The first line of $AQ.out holding $1, cut to 256 KiB, as facts.
+ask_facts() { # text
+  awk -v t="$1" 'index($0, t) { print; exit }' "$AQ.out" 2>/dev/null | head -c 262144 | awk "$NORM_FN$JSON_FACTS" 2>/dev/null
+}
+
+# Claude Code get_usage control response (facts) -> "OK <usage line>" or
+# "ERR <uq.err>" (section 9.3). at: the epoch the answer came. An answer
+# whose session shows any model spend (cost, API time or a model's usage;
+# measured 0 in every ask, 2.1.316 and 2.1.317) is "ERR spent": asks of that
+# version stop.
+CLAUDE_USAGE=$ISO_FN'
+BEGIN { FS = "\t" }
+!($1 in F) { F[$1] = $3; T[$1] = $2 }
+function win(id, p, w,   u, r) {
+  u = F[p ".utilization"]; r = isoepoch(F[p ".resets_at"])
+  if (T[p ".utilization"] != "r" || u !~ /^[0-9]+([.][0-9]+)?$/ || r < 0) return
+  out = out " " id ":" u ":" w ":" r ":ask:" at
+}
+END {
+  if (F["response.subtype"] != "success") {
+    e = tolower(F["response.error"])
+    print (e ~ /auth|log ?in|credential|oauth|unauthori|401|403/) ? "ERR auth" : "ERR failed"
+    exit
+  }
+  R = "response.response."
+  if (F[R "session.total_cost_usd"] !~ /^0([.]0+)?$/ || F[R "session.total_api_duration_ms"] !~ /^0([.]0+)?$/) { print "ERR spent"; exit }
+  for (p in F) if (index(p, R "session.model_usage.") == 1) { print "ERR spent"; exit }
+  if (F[R "rate_limits_available"] == "false") { print "ERR not-subscriber"; exit }
+  # Limits there but not known now (traffic turned off, a failed refresh):
+  # nothing to show, not 0 percent.
+  if (!((R "rate_limits.five_hour.utilization") in F) && !((R "rate_limits.seven_day.utilization") in F) && !((R "rate_limits.model_scoped.0.utilization") in F)) { print "ERR failed"; exit }
+  plan = F[R "subscription_type"]
+  if (T[R "subscription_type"] != "s" || plan !~ /^[A-Za-z0-9_-]+$/) plan = "-"
+  out = ""
+  win("five_hour", R "rate_limits.five_hour", 300)
+  win("seven_day", R "rate_limits.seven_day", 10080)
+  for (k = 0; k < 16 && ((R "rate_limits.model_scoped." k ".display_name") in F); k++) {
+    n = F[R "rate_limits.model_scoped." k ".display_name"]
+    gsub(/[^A-Za-z0-9._-]/, "-", n)
+    if (n != "") win(substr("seven_day." n, 1, 64), R "rate_limits.model_scoped." k, 10080)
+  }
+  print "OK - - - 0 - " plan " 0" out
+}'
+
+# Codex app-server account/rateLimits/read reply (facts) -> as CLAUDE_USAGE:
+# each RateLimitSnapshot of rateLimitsByLimitId (else rateLimits) as
+# <limitId>.primary and .secondary, the id as the rollout path makes it.
+CODEX_USAGE='
+BEGIN { FS = "\t" }
+!($1 in F) { F[$1] = $3; T[$1] = $2; O[++no] = $1 }
+function snap(b, key,   id) {
+  id = (T[b ".limitId"] == "s") ? F[b ".limitId"] : key
+  gsub(/[^A-Za-z0-9_.-]/, "", id)
+  if (id == "") id = "codex"
+  w(id ".primary", b ".primary"); w(id ".secondary", b ".secondary")
+  if (plan == "-" && T[b ".planType"] == "s" && F[b ".planType"] ~ /^[A-Za-z0-9_-]+$/) plan = F[b ".planType"]
+  if (T[b ".rateLimitReachedType"] == "s") reached = 1
+}
+function w(id, b,   p, m, r) {
+  p = F[b ".usedPercent"]; m = F[b ".windowDurationMins"]; r = F[b ".resetsAt"]
+  if (p !~ /^[0-9]+([.][0-9]+)?$/ || m !~ /^[0-9]+$/ || r !~ /^[0-9]+$/) return
+  out = out " " id ":" p ":" m ":" r ":ask:" at
+}
+END {
+  # Measured (0.165.0): -32600 "codex account authentication required to
+  # read rate limits" (signed out), -32600 "chatgpt authentication required
+  # to read rate limits" (an API key: no plan limits), -32603 "failed to
+  # fetch codex rate limits: GET .../wham/usage failed: 401 ..." (the
+  # backend refused). The message itself goes nowhere.
+  if ("error.message" in F || "error.code" in F) {
+    e = tolower(F["error.message"])
+    if (e ~ /chatgpt authentication required/) print "ERR not-subscriber"
+    else if (e ~ /authentication required|401|403/) print "ERR auth"
+    else print "ERR failed"
+    exit
+  }
+  plan = "-"; reached = 0; out = ""; nk = 0
+  B = "result.rateLimitsByLimitId."
+  for (i = 1; i <= no; i++) {
+    p = O[i]
+    if (index(p, B) != 1) continue
+    k = substr(p, length(B) + 1); sub(/\..*/, "", k)
+    if (k in SEEN) continue
+    SEEN[k] = 1; snap(B k, k); nk++
+  }
+  if (!nk) snap("result.rateLimits", "codex")
+  if (out == "" && plan == "-" && !reached && !("result.rateLimits.limitId" in F) && !nk) { print "ERR failed"; exit }
+  print "OK - - - 0 - " plan " " reached out
+}'
+
+# The time an answer came (SIMPLETERM_HOOK_TEST_TS in tests).
+ask_now() {
+  if [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ -n "${SIMPLETERM_HOOK_TEST_TS:-}" ]; then
+    printf '%s' "$SIMPLETERM_HOOK_TEST_TS"
+  else
+    date +%s
+  fi
+}
+
+# The ask itself (in the background): runs it, makes the `usage` event from
+# its answer (windows src ask, uq) and sends it to the tunnels.
+ask_run() { # agent-executable ask-file
+  AQ=$RUN_DIR/ask.$$.$(rand_hex 4) A=''
+  case $AGENT in
+    claude)
+      printf '%s\n' '{"type":"control_request","request_id":"1","request":{"subtype":"get_usage","skip_behaviors":true}}' >"$AQ.in"
+      AQ_WAIT1='' AQ_WAIT2='"type":"control_response"'
+      ask_pipe "$1" -p --input-format stream-json --output-format stream-json --verbose --safe-mode \
+        --strict-mcp-config --no-session-persistence --include-hook-events
+      at=$(ask_now)
+      [ "$AQ_RES" = ok ] && A=$(ask_facts '"type":"control_response"' | awk -v at="$at" "$CLAUDE_USAGE" 2>/dev/null)
+      ;;
+    codex)
+      printf '%s\n' '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"simpleterm","version":"'"$HOOK_VERSION"'"}}}' >"$AQ.in"
+      printf '%s\n' '{"method":"initialized"}' '{"id":2,"method":"account/rateLimits/read"}' >"$AQ.more"
+      AQ_WAIT1='"id":1,' AQ_WAIT2='"id":2,'
+      ask_pipe "$1" app-server
+      at=$(ask_now)
+      [ "$AQ_RES" = ok ] && A=$(ask_facts '"id":2,' | awk -v at="$at" "$CODEX_USAGE" 2>/dev/null)
+      ;;
+  esac
+  rm -f "$AQ".* 2>/dev/null
+  case $A in
+    'OK '*) err='' ;;
+    'ERR '*) err=${A#ERR } ;;
+    *) if [ "$AQ_RES" = timeout ]; then err=timeout; else err=failed; fi ;;
+  esac
+  if [ "$err" = spent ]; then
+    # The ask cost a model call: no more asks of this version.
+    printf '%s\n' "$AV" >"$RUN_DIR/ask.$AGENT.off" 2>/dev/null
+    err=failed
+  fi
+  log "usage-ask $AGENT ${err:-ok}"
+  [ "$err" = auth ] && : >"$2.auth"
+  TS=$at NOW=$at USAGE_JSON=''
+  [ -z "$err" ] && USAGE_JSON=$(printf '%s\n' "${A#OK }" | awk -v app="$APP" "$USAGE_FMT" 2>/dev/null | sed -n 2p)
+  uq=',"uq":{"src":"ask","at":'$at',"ok":'
+  if [ -z "$err" ]; then uq=$uq'true}'; else uq=$uq'false,"err":"'$err'"}'; fi
+  RID_USED=1
+  usage_send "$(usage_rid)" "$uq"
+  wait
 }
 
 # --- the `simpleterm` command --------------------------------------------------
@@ -3013,7 +3458,7 @@ case $AGENT in
     # v2 (TDS_AGENT_EVENTS_V2 section 10.1): turn, permission mode, the
     # subagent's type, a session's end; from the OpenCode bridge its request
     # id, version family, parent session, message id and session title.
-    WANT=$WANT',prompt_id,permission_mode,agent_type,reason,request_id,oc,parent_session_id,message_id,title'
+    WANT=$WANT',prompt_id,permission_mode,agent_type,reason,request_id,oc,parent_session_id,message_id,title,cost,tokens_in,tokens_out'
     for i in 0 1 2 3 4 5 6 7 8 9; do WANT=$WANT,background_tasks.$i.id,background_tasks.$i.type,background_tasks.$i.description,background_tasks.$i.command; done
     for i in 0 1 2 3 4; do WANT=$WANT,session_crons.$i.id,session_crons.$i.schedule,session_crons.$i.prompt; done
     ;;
@@ -3047,7 +3492,7 @@ esac
 EVENT='' NTYPE='' TOOL='' DETAIL='' DESC='' SID='' CWD='' LAST='' ERR='' QTEXT='' FIRSTIN='' NTYPE2=''
 TPATH='' CTXTOK='' MODEL='' GTYPE='' FULLYIDLE='' TERMREASON='' EXTRA='' GKEY='' REASON=''
 PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS='' REQIDIN='' TOOLUSEID=''
-OCTITLE='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX=''
+OCTITLE='' OCCOST='' OCTIN='' OCTOUT='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX=''
 BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_SEQ=''
 BG_SVC=0 BG_IDMAP='' BG_KEEP='' BG_SHELLS='' BG_IDS='' BG_NOID=0 BG_M=''
 CRON_N=0 CRON_SCHED='' CRON_SUMS=''
@@ -3579,6 +4024,9 @@ while IFS= read -r kv; do
     request_id=*) REQIDIN=${kv#*=} ;;
     oc=*) OCV=${kv#*=} ;;
     parent_session_id=*) SUBPAR_SESSION=${kv#*=} ;;
+    cost=*) OCCOST=${kv#*=} ;;
+    tokens_in=*) OCTIN=${kv#*=} ;;
+    tokens_out=*) OCTOUT=${kv#*=} ;;
     title=*) OCTITLE=${kv#*=} ;;
     toolName=*) [ -n "$TOOL" ] || TOOL=${kv#*=} ;;
     toolUseId=*) TOOLUSEID=${kv#*=} ;;
@@ -3938,7 +4386,8 @@ print_running() {
 # A turn ended: housekeeping.
 turn_end() {
   ensure_cli
-  find "$RUN_DIR" -type f -mtime +0 -exec rm -f {} + 2>/dev/null
+  # (A failed sign-in of a usage ask holds until the credentials change.)
+  find "$RUN_DIR" -type f -mtime +0 ! -name 'ask.*.auth' ! -name 'ask.*.off' -exec rm -f {} + 2>/dev/null
 }
 
 # --- who started a turn, and what ran before it ------------------------------
