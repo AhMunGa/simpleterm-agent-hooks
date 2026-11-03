@@ -4396,7 +4396,8 @@ print_running() {
 # A turn ended: housekeeping.
 turn_end() {
   ensure_cli
-  # (A failed sign-in of a usage ask holds until the credentials change.)
+  # (Kept: the hold after an ask got auth or not-subscriber, until the
+  # credentials change, and the version whose ask spent.)
   find "$RUN_DIR" -type f -mtime +0 ! -name 'ask.*.auth' ! -name 'ask.*.off' -exec rm -f {} + 2>/dev/null
 }
 

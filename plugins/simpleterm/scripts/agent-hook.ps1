@@ -3006,8 +3006,9 @@ function Find-AskAgent([string]$name) {
 
 # At the end of a turn, while the app is connected, at most every 5 minutes
 # per agent and settings folder: asks the agent for its limits in a detached
-# child (stdio closed, 20 seconds at most). After a failed sign-in it asks
-# again only once the agent's credentials file changed. usage_ask=off in
+# child (stdio closed, 20 seconds at most). After a failed sign-in or an
+# answer of no plan limits (not-subscriber) it asks again only once the
+# agent's credentials file changed. usage_ask=off in
 # agent-hook.conf turns it off; Codex only with usage_ask_codex=on (its
 # app-server writes its own state, syncs its plugins and may refresh an
 # expired sign-in). As usage_ask in agent-hook.sh.
@@ -4793,7 +4794,8 @@ function Invoke-TurnEnd {
     try {
         $now = [DateTime]::UtcNow
         foreach ($f in [IO.Directory]::GetFiles($RunDir)) {
-            # (A failed sign-in of a usage ask holds until the credentials change.)
+            # (Kept: the hold after an ask got auth or not-subscriber, until the
+            # credentials change, and the version whose ask spent.)
             if ([IO.Path]::GetFileName($f) -cmatch '\Aask\..*\.(auth|off)\z') { continue }
             if (($now - [IO.File]::GetLastWriteTimeUtc($f)).TotalDays -ge 1) { Remove-FileQ $f }
         }
