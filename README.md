@@ -236,6 +236,7 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | Codex `Stop` | `done`, none while a `/goal` is active; a `question` (plan) when the turn ended on "Implement this plan?" | none |
 | Codex `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | none (session records; `state` `running`) | none |
 | Codex `SessionStart` (resumed or forked session), `PostCompact` | none (context) | none |
+| Codex `SessionEnd` (0.5.1) | `state` `ended` (SSH tunnel only) and the session record's `.ended`. Codex runs it when it exits normally (`/quit`, Ctrl+D, Ctrl+C, the end of `codex exec`), not when killed by a signal (an SSH drop); by default (its shared daemon) only when the conversation is closed there, about 30 minutes later, or the daemon stops. It gives the hook 3 seconds at most | none |
 | Gemini `Notification` (`ToolPermission`) | `question` (`approve <tool>: <command or file>`) | none |
 | Gemini `AfterAgent` | `done` (at once); `error` when the turn had no response text (API error, cancel, loop) | none |
 | agy `PreToolUse` `run_command`, `write_file`, `edit_file`, `call_mcp_tool`, `read_file` outside the workspace (only with `agy_wait` and no app connected) | `permission` | none |
@@ -428,6 +429,22 @@ app; in short:
   so nothing you press on another device goes unheard; only when no tunnel answers is the relay
   asked, and the hook waits there. A link answering `sent` (also an older app's tunnel) is waited
   for, other answers end that link only.
+- **A request held back for a wait** (0.5.1, SimpleTerm issue #414): while you look at an agent's
+  own prompt in SimpleTerm, the app shows no second card for a request that asks the same; its
+  tunnel answers `suppressed` with `"held":true`. If that request was in fact another session's
+  (another SSH client in the same folder), it would stay off the device after you answer the tab's
+  prompt. So for a Claude Code permission request (the hook and Claude's prompt wait together) the
+  hook stays while Claude's own session record (`sessions/<pid>.json` under `CLAUDE_CONFIG_DIR` or
+  `~/.claude`) says that very prompt is still open (this session, `waiting` on a `permission
+  prompt`, its `statusUpdatedAt` unchanged) and no other permission hook of the session waits on
+  that same prompt (parallel tool calls share one prompt, "1 of 2", and the record does not change
+  between them), and sends the request to every tunnel that held it, at once and under one new rid,
+  about every 5 seconds: a new rid and nonce, the same request id. The app holds it again while the
+  wait it was held for is open and shows it, with its buttons, only when it comes more than 1.5 s
+  after that wait ended; once the prompt closes (answered in the terminal, or another one comes)
+  nothing more is sent and the hook ends as before. Older apps never say `held` and older hooks
+  ignore it. Other agents' requests are not sent again: their hooks do not wait, and no record of
+  theirs tells an open prompt (SimpleTerm `TDS_AGENT_EVENTS_V2.md` section 4.6, R16, issue #446).
 - **Ends and states**: a turn's end carries how it ended, who started it, whether its last message
   asks you something, its last message (tunnel), the background work still running (new this turn
   or older, services), the schedules and an active Codex goal. To the SSH tunnel only: `state`
@@ -728,6 +745,14 @@ Not tested on Windows yet.
 - **OpenCode 2.x questions are alerts** (its input forms are answered over its HTTP server, which a
   plugin cannot reach yet), and OpenCode's last message is not in a turn's end.
 - **Claude Code MCP forms** are alerts without the server's name (the `Notification` has none).
+- **Codex's daemon mode** (its default): hooks run in Codex's shared daemon with the environment of
+  the terminal that started it, so `SIMPLETERM` (session records) and `TMUX`/`STY` (`mux`) may be
+  another session's; a Codex session's end comes when the daemon closes the conversation (about 30
+  minutes after you quit or the SSH connection drops). `codex --no-daemon` runs hooks in the session
+  itself. SimpleTerm `TDS_AGENT_EVENTS_V2.md` R17, issue #447.
+- **A held request is told again for Claude Code only.** Other agents' requests held back for a wait
+  you are looking at stay off the device once you answer that wait (their hooks do not wait, and no
+  record of theirs tells an open prompt; other devices get the relay's push; SimpleTerm issue #446).
 - **Background work that never ends.** A dev server the table of services does not know, or
   another endless job left in the background, never wakes the agent: `done` comes only after
   `bg_done_after` (default 10 minutes), and the badge stays `background` until the next turn
@@ -821,8 +846,9 @@ cp plugins/simpleterm/scripts/agent-hook.sh plugins/simpleterm/scripts/simpleter
 
 Test-only variables: with `SIMPLETERM_HOOK_TEST=1`, `SIMPLETERM_HOOK_TEST_IV`, `_NONCE`, `_RID`,
 `_TS` and `_TMS` replace the random values so the envelope can be compared with the protocol test
-vectors, and `SIMPLETERM_HOOK_TEST_PLAIN=<folder>` keeps each plaintext before it is sealed (one
-file per event and link). They are ignored otherwise.
+vectors, `SIMPLETERM_HOOK_TEST_PLAIN=<folder>` keeps each plaintext before it is sealed (one
+file per event and link), and `SIMPLETERM_HOOK_TEST_PROC=<folder>` stands in for Linux's `/proc`
+(the agent's pid where `ps` is missing). They are ignored otherwise.
 
 `tests/fixtures/v2/cases.json` holds hook inputs per agent and version, `expected.json` the
 plaintext every link gets, byte for byte; the sh hook and, for the agents it serves (Claude Code,

@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.5.1 - 2026-11-04
+
+A request held back for a wait is told again while it is still open (SimpleTerm
+`docs/tech_specs/TDS_AGENT_EVENTS_V2.md` section 4.6 "보류한 요청 다시 알리기", D23, issue
+AhMunGa/simple-term#414), and Codex session ends are recorded (section 8, R7).
+- **Held requests told again**: a SimpleTerm tunnel answers `suppressed` with `"held":true` for a
+  request it held back because the user is looking at an agent's own prompt that asks the same. For
+  a Claude Code permission request (tool approvals, plans, questions; the hook waits beside Claude's
+  prompt), the hook then stays while Claude's own session record (`sessions/<pid>.json` under
+  `CLAUDE_CONFIG_DIR` or `~/.claude`) says this session still waits on that very permission prompt
+  (`status` `waiting`, `waitingFor` `permission prompt`, `statusUpdatedAt` as first seen, taken only
+  if written no later than 2 s after the hook's start) and no other permission hook of the session
+  waits on that same prompt (a `run/perm.<session>.<pid>` mark of a live hook holding the
+  `statusUpdatedAt` it first saw: parallel tool calls share one prompt, "1 of 2", and Claude's
+  record does not change from one item to the next, measured on 2.1.316; the hook of an earlier
+  prompt that has not ended yet holds another value and does not count), and sends the request to
+  that tunnel again about every 5 seconds (4 to 6: whole seconds): one new rid for every held tunnel
+  in a round, sent to all of them at once, a nonce each, the same request id, a fresh `ts` and
+  `tms`. Each round's events are sealed first; then the hook checks the terminal answer
+  (`PostToolUse`, turn notes) and that the agent lives, and last the window, and posts at once (tens
+  of ms from the check). A tunnel that then answers `sent` is waited on as usual; one that no longer
+  answers `held` gets nothing more. Once the prompt closes or another one takes its place, or the
+  record cannot be read (5 seconds after the hook's start before it is first seen, then 3 reads in a
+  row), nothing more is sent and the hook ends as before (`resolved` `window`, or `terminal` from
+  `PostToolUse` and turn notes as before). The cap stays `claude_wait`. Older apps never say `held`,
+  so the hook behaves as 0.5.0 there; other agents' requests are not sent again.
+- **The agent's pid without `ps`**: where `ps` is missing or may not run (some containers), the hook
+  reads the command name and parent from Linux's `/proc` (agent-gone checks and the held resend need
+  it). Without either, the held resend stays off.
+- **Codex `SessionEnd`** (Codex 0.165.0, measured): registered (no matcher: its only `reason` is
+  `other`; timeout 3, Codex's most). The hook writes the session record's `.ended` first (only for a
+  session with a record: one quit before any prompt left a lone mark the keep never counted), then
+  sends `state` `ended` to the tunnels, and does not wait for the send (the PowerShell hook hands it
+  to a child there too): Codex ends the hook's process group after the timeout and keeps the
+  children of a hook that ended in time. Codex runs it on a normal exit and at the end of `codex
+  exec`, not on a signal (an SSH drop); in its default daemon mode only when the conversation is
+  closed there (about 30 minutes later) or the daemon stops. In daemon mode every Codex hook gets
+  the environment of the terminal that started the daemon (SimpleTerm `TDS_AGENT_EVENTS_V2.md` R17,
+  issue AhMunGa/simple-term#447); this release does not change that. The PowerShell hook also writes
+  the end mark before sending (Claude Code, Grok Build, Codex).
+- **PowerShell: a request that runs out its wait is logged as a timeout**: the PowerShell hook ran its
+  once-a-second checks on a timer, so a poll that ended at the deadline sometimes ended the request
+  as `permission no-decision` instead of `permission timeout` (the answer to the agent was the same,
+  none). The checks also run as soon as the deadline has come, as in `agent-hook.sh`.
+
 ## 0.5.0 - 2026-11-03
 
 Usage v2 (SimpleTerm `docs/tech_specs/TDS_AGENT_EVENTS_V2.md` section 9, issue

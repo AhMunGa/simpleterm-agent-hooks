@@ -411,7 +411,7 @@ def t_timeout(s):
     rc, out, err, el = s.run("claude", perm_input())
     s.check("timeout: no decision", out.strip() == "", out)
     s.check("timeout: honours claude_wait", 1.5 < el < 9, "%.2fs" % el)
-    s.check("timeout: logged", "permission timeout" in s.log_text(), s.log_text())
+    s.check("timeout: logged", "permission timeout" in s.log_text(), "rc=%s %.2fs err=%r log=%s" % (rc, el, err[-300:], s.log_text()))
     s.check("timeout: polled", len(s.records("/v1/decision")) >= 1)
 
 
@@ -480,14 +480,17 @@ def t_tunnel(s):
         tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T)}})
         stop = json.dumps({"session_id": "s3", "cwd": "/w/proj", "hook_event_name": "Stop",
                            "stop_hook_active": False, "last_assistant_message": "done"})
-        t0 = time.time()
         s.run("claude", stop)
         got = wait_for(lambda: [r for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest"], 10, 0.05)
-        el = time.time() - t0
+        rel = wait_for(lambda: [r for r in s.records("/v1/ingest") if "responded" in r], 20)
+        # An order, not a time limit (a loaded machine does not change it): the tunnel's copy came
+        # before the relay answered (it holds its answer 3 s). Sent after the relay's answer, it
+        # would come later.
         s.check("tunnel first: background event reaches the tunnel before the relay answers",
-                got and el < 2.5, "%.2fs" % el)
-        s.check("tunnel first: relay still gets it",
-                wait_for(lambda: s.records("/v1/ingest"), 20), str(s.records())[:200])
+                got and rel and got[0]["received"] < rel[0]["responded"],
+                "tunnel %s relay %s" % ([round(r["received"] - rel[0]["received"], 2) for r in got] if got and rel else got,
+                                         round(rel[0]["responded"] - rel[0]["received"], 2) if rel else rel))
+        s.check("tunnel first: relay still gets it", rel, str(s.records())[:200])
     finally:
         tun.terminate()
         tun.wait(5)
@@ -1484,6 +1487,9 @@ AGENT_PY = (
     "print(p.pid, flush=True)\n"
     "p.wait()\n"
 )
+# The same, but it starts the hook only once a line comes on its stdin: the test first writes what
+# the agent records before it runs a hook (Claude Code's session file, sessions/<pid>.json).
+AGENT_GATED_PY = "import sys\nsys.stdin.readline()\n" + AGENT_PY
 
 
 def t_agent_gone(s):
@@ -2098,7 +2104,12 @@ def t_codex_hooks(s):
     # Codex runs `$SHELL -c '<command>'` with ${PLUGIN_ROOT} replaced (the shell under test here).
     noisy = s.tmp / "noisy-plugin"
     write(noisy / "scripts" / "agent-hook.sh", "echo noise\n")
-    for ev in ("SessionStart", "PostCompact", "Stop"):
+    # SessionEnd (R7): Codex 0.165 runs it for every reason ("other" only), at most 3 seconds (more
+    # is cut to 3 with a warning) and ends the hook's process group then (measured).
+    se = hooks["SessionEnd"][0]
+    s.check("codex hooks: SessionEnd for every end, within Codex's 3-second limit",
+            not se.get("matcher") and se["hooks"][0]["timeout"] <= 3, str(se))
+    for ev in ("SessionStart", "PostCompact", "Stop", "SessionEnd"):
         cmd = hooks[ev][0]["hooks"][0]["command"].replace("${PLUGIN_ROOT}", str(noisy))
         p = s.proc_run([s.argv[0], "-c", cmd], input=b"{}", capture_output=True, env=s.env(), timeout=20)
         s.check("codex hooks: %s command prints nothing, whatever the script writes" % ev,
@@ -3768,6 +3779,222 @@ def t_v2_link_waits(s):
         tun.wait(5)
 
 
+def t_v2_held(s):
+    """Section 4.6 "보류한 요청 다시 알리기" (#414): a v2 app's tunnel that holds a request back for
+    a wait the user is looking at answers suppressed with held:true. While Claude Code's session file
+    (sessions/<agent pid>.json) says this session still waits on a permission prompt, the same one
+    (statusUpdatedAt unchanged), the hook sends the request to that tunnel again every 5 seconds:
+    a new rid and nonce, the same req.id. A tunnel that then answers sent is waited on and decides.
+    The prompt closed or replaced, another session's file, no file, plain suppressed or a tunnel
+    without fmt=2: nothing again, and the hook ends as 0.5.0 did."""
+    tun, tctl = s.spawn_mock()
+    sessions = s.home / ".claude" / "sessions"
+    try:
+        def setup(push_seq, fmt=2, decision=None):
+            s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": fmt})], conf={"claude_wait": 40})
+            tctl("/_ctl/reset", {})
+            opts = dict(LINK_T, unknown_error="unknown", max_body=65536, push=push_seq[-1], push_seq=list(push_seq))
+            if decision:
+                opts.update(decision=decision, after=0)
+            tctl("/_ctl/config", {"links": {LINK_T["id"]: opts}})
+            shutil.rmtree(sessions, ignore_errors=True)
+            sessions.mkdir(parents=True)
+
+        def perms():
+            return [r for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and r["body"]["ev"] == "permission"]
+
+        def results():
+            return [((r.get("plain_json") or {}).get("res") or {}) for r in tctl("/_ctl/records")["records"]
+                    if r["path"] == "/v1/ingest" and r["body"]["ev"] == "resolved"]
+
+        def state(pid, session="held-1", status="waiting", waiting_for="permission prompt", at=1793232000123):
+            f = sessions / ("%d.json" % pid)
+            tmp = sessions / ("%d.json.tmp" % pid)
+            tmp.write_text(json.dumps({"pid": pid, "sessionId": session, "cwd": "/home/u/api", "status": status,
+                                       "waitingFor": waiting_for, "statusUpdatedAt": at, "updatedAt": at}))
+            os.replace(tmp, f)
+
+        def start(session="held-1", env=None, proc=None, file_session=None, **st):
+            """The stand-in agent (its pid names the session file) and the hook under it. Claude Code
+            records the prompt in that file 5 to 45 ms before the hook starts (3 ms after it at the
+            latest; TDS_AGENT_EVENTS_V2 M31), and the hook gives a file it cannot read 5 seconds.
+            The agent starts the hook only once the file is there, so a loaded test machine cannot
+            turn those milliseconds into seconds."""
+            cmd = [sys.executable, "-I", "-c", AGENT_GATED_PY, v2_perm(session=session)] + list(s.argv) + ["claude"]
+            agent = s.popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=s.env(env), cwd=str(s.tmp))
+            if proc:  # a /proc of the agent for a hook without ps
+                (proc / str(agent.pid)).mkdir(parents=True, exist_ok=True)
+                (proc / str(agent.pid) / "comm").write_text("claude\n")
+            if st.get("status") != "none":
+                state(agent.pid, session=file_session or session, **st)
+            agent.stdin.write(b"go\n")
+            agent.stdin.close()
+            agent.stdin = None
+            hook = int(agent.stdout.readline())
+            return agent, hook
+
+        def finished(agent, timeout=40):
+            try:
+                out = agent.communicate(timeout=timeout)[0]
+                return True, out.decode(errors="replace")
+            except subprocess.TimeoutExpired:
+                return False, ""
+
+        # Open: told again (held, held), then the app shows it (sent) and the user approves there.
+        setup(["held", "held", "sent"], decision="allow")
+        t0 = time.time()
+        agent, hook = start()
+        done, out = finished(agent)
+        el = time.time() - t0
+        got = perms()
+        plains = [r.get("plain_json") or {} for r in got]
+        s.check("held: told again every 5 s while the prompt is open, then decided there",
+                done and behavior(out).get("behavior") == "allow" and len(got) == 3 and 8 <= el < 30,
+                "%s %.1fs n=%d %s" % (out, el, len(got), s.log_text()[-400:]))
+        s.check("held: a new rid and nonce each time, the same req.id",
+                len({r["body"]["rid"] for r in got}) == 3 and len({p.get("nonce") for p in plains}) == 3
+                and len({(p.get("req") or {}).get("id") for p in plains}) == 1 and all(r["body"].get("nh") for r in got),
+                str(plains)[:400])
+        res = results()
+        s.check("held: the request's result names the last rid", wait_for(lambda: results(), 5)
+                and results()[-1].get("out") == "applied" and results()[-1].get("rrid") == got[-1]["body"]["rid"], str(res)[:300])
+
+        # Answered at the terminal (the prompt closes: busy): nothing again; the hook ends at once.
+        setup(["held"])
+        agent, hook = start()
+        # (Waits end when the posts come; 30 s only bounds a machine too loaded to keep the hook's 5 s.)
+        s.check("held: told again once", wait_for(lambda: len(perms()) >= 2, 30), "%d %s" % (len(perms()), s.log_text()[-300:]))
+        n0 = len(perms())
+        state(agent.pid, status="busy", waiting_for=None, at=1793232009000)
+        done, out = finished(agent, 15)
+        n = len(perms())
+        time.sleep(1)
+        s.check("held: the prompt closed: no more, the hook ends with no decision",
+                done and out.strip() == "" and n == n0 and len(perms()) == n0 and "held: the window is not open" in s.log_text(),
+                "%r n=%d of %d %s" % (out, n, n0, s.log_text()[-300:]))
+        s.check("held: its result says window (not terminal: the prompt may be the session's next one)",
+                wait_for(lambda: results(), 5) and results()[-1].get("out") == "window", str(results())[:300])
+
+        # Another prompt in its place (statusUpdatedAt changed): stop.
+        setup(["held"])
+        agent, hook = start()
+        s.check("held: another prompt: told again first", wait_for(lambda: len(perms()) >= 2, 30), "%d %s" % (len(perms()), s.log_text()[-300:]))
+        n0 = len(perms())
+        state(agent.pid, at=1793232011111)
+        done, out = finished(agent, 15)
+        s.check("held: another prompt (statusUpdatedAt changed): no more", done and len(perms()) == n0,
+                "%d of %d %s" % (len(perms()), n0, s.log_text()[-300:]))
+
+        # Nothing to tell by: another session's file, no file, plain suppressed, a tunnel without fmt=2,
+        # or another permission hook of the session waiting (parallel tool calls: Claude shows them in
+        # one window, "1 of 2", and its session file stays the same between the items [measured]).
+        for name, push, fmt, st in (("another session", "held", 2, {"session": "other"}), ("no session file", "held", 2, {"status": "none"}),
+                                    ("plain suppressed", "suppressed", 2, {}), ("no fmt=2", "held", None, {}),
+                                    ("another permission hook waiting", "held", 2, {"sibling": True})):
+            setup([push], fmt=fmt)
+            run = s.home / ".simpleterm" / "run"
+            run.mkdir(parents=True, exist_ok=True)
+            for old in run.glob("perm.*"):
+                old.unlink()
+            if st.pop("sibling", False):
+                # A live process (this runner) waiting on the same window (statusUpdatedAt).
+                (run / ("perm.held-1.%d" % os.getpid())).write_text("1793232000123\n")
+            t0 = time.time()
+            agent, hook = start(file_session=st.get("session"), **{k: v for k, v in st.items() if k != "session"})
+            done, out = finished(agent, 20)
+            el = time.time() - t0
+            s.check("held: %s: not told again, ends with no decision" % name,
+                    done and out.strip() == "" and len(perms()) == 1 and el < 15, "%r %.1fs n=%d" % (out, el, len(perms())))
+
+        # A hook of the session's earlier window that has not ended yet (it checks once a second)
+        # holds another statusUpdatedAt: the window open now is still told again (E2E E4d).
+        setup(["held"])
+        run = s.home / ".simpleterm" / "run"
+        run.mkdir(parents=True, exist_ok=True)
+        for old in run.glob("perm.*"):
+            old.unlink()
+        (run / ("perm.held-1.%d" % os.getpid())).write_text("1793231999000\n")
+        agent, hook = start()
+        s.check("held: an earlier window's hook does not stop it", wait_for(lambda: len(perms()) >= 2, 30), str(len(perms())))
+        state(agent.pid, status="idle", waiting_for=None, at=1793232009000)
+        finished(agent, 15)
+        (run / ("perm.held-1.%d" % os.getpid())).unlink()
+        # A window first written well after the hook started is not taken for its own: the user may
+        # have answered this request and the next prompt come (TDS section 4.6).
+        setup(["held"])
+        agent, hook = start(at=int(time.time() + 30) * 1000)
+        done, out = finished(agent, 20)
+        s.check("held: a window recorded after the hook's start + 2 s is not its own: not told again",
+                done and len(perms()) == 1, "%d %s" % (len(perms()), s.log_text()[-200:]))
+        # Two tunnels hold it: one round is one rid for both, sent at once (the slower tunnel's answer
+        # does not hold back the other's copy; its link file sorts first).
+        tun2, tctl2 = s.spawn_mock()
+        try:
+            link_s = {"id": "b9" * 16, "secret": "c8" * 32, "enc": "d7" * 32, "mac": "e6" * 32, "label": "dev-box"}
+            s.setup([(link_s, {"kind": "tunnel", "relay_url": tctl2.url, "fmt": 2}), (LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})],
+                    conf={"claude_wait": 40})
+            for ctl, link, delay in ((tctl2, link_s, 3), (tctl, LINK_T, 0)):
+                ctl("/_ctl/reset", {})
+                ctl("/_ctl/config", {"links": {link["id"]: dict(link, unknown_error="unknown", max_body=65536, push="held", ingest_delay=delay)}})
+            shutil.rmtree(sessions, ignore_errors=True)
+            sessions.mkdir(parents=True)
+            agent, hook = start()
+            def both():
+                a = [r for r in tctl2("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and r["body"]["ev"] == "permission"]
+                b = perms()
+                return (a, b) if len(a) >= 2 and len(b) >= 2 else None
+            got = wait_for(both, 25)
+            state(agent.pid, status="idle", waiting_for=None, at=1793232009000)
+            finished(agent, 20)
+            if got:
+                a, b = got
+                s.check("held: two tunnels: one rid a round for both, a nonce each",
+                        a[1]["body"]["rid"] == b[1]["body"]["rid"] and a[1]["body"]["rid"] != a[0]["body"]["rid"]
+                        and (a[1].get("plain_json") or {}).get("nonce") != (b[1].get("plain_json") or {}).get("nonce"), str([a[1]["body"]["rid"], b[1]["body"]["rid"]]))
+                # Sent at once: the other tunnel's copy came while the slow one still held its own
+                # (it answers 3 s after it came). One after the other, it would come after that
+                # answer. An order, not a time limit: a loaded machine does not change it.
+                s.check("held: two tunnels: sent at once (the slow tunnel does not delay the other)",
+                        b[1]["received"] < a[1]["responded"],
+                        "the other copy came %.2f s after the slow one, which answered after %.2f s"
+                        % (b[1]["received"] - a[1]["received"], a[1]["responded"] - a[1]["received"]))
+            else:
+                s.check("held: two tunnels: both told again", False, "%d %d" % (len(perms()), len(tctl2("/_ctl/records")["records"])))
+        finally:
+            tun2.terminate()
+            tun2.wait(5)
+        # Codex hides its prompt while a hook waits (hidden): even a held answer is not told again.
+        setup(["held"])
+        codex = json.dumps({"session_id": "held-1", "turn_id": "t1", "transcript_path": None, "cwd": "/w/repo", "hook_event_name": "PermissionRequest",
+                            "tool_name": "Bash", "tool_input": {"command": "make"}})
+        rc, out, err, el = s.run("codex", codex)
+        s.check("held: a Codex (hidden) request is not told again", len(perms()) == 1 and el < 15, "%d %.1fs" % (len(perms()), el))
+        if s.kind == "sh":
+            # No ps (some containers): the agent's pid from /proc instead (Linux).
+            nops = s.tmp / "nops"
+            if not nops.exists():
+                nops.mkdir()
+                for e in s.bin.iterdir():
+                    if e.name != "ps":
+                        os.symlink(os.path.realpath(e), nops / e.name)  # a stand-in agent is a file, not a link
+            for name, proc in (("from /proc", s.tmp / "fakeproc"), ("not at all", None)):
+                setup(["held"])
+                shutil.rmtree(s.tmp / "fakeproc", ignore_errors=True)
+                env = {"PATH": str(nops)}
+                if proc:
+                    env.update(SIMPLETERM_HOOK_TEST="1", SIMPLETERM_HOOK_TEST_PROC=str(proc))
+                agent, hook = start(env=env, proc=proc)
+                if proc:
+                    s.check("held: without ps, the agent found %s: told again" % name, wait_for(lambda: len(perms()) >= 2, 30), str(len(perms())))
+                    state(agent.pid, status="idle", waiting_for=None, at=1793232009000)
+                done, out = finished(agent, 20)
+                if not proc:
+                    s.check("held: without ps or /proc: not told again, ends", done and len(perms()) == 1, "%d %s" % (len(perms()), s.log_text()[-200:]))
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+
 def t_v2_not_sent(s):
     """Section 4.6: requests that may never show a prompt are not sent. Copilot permissionRequest: nothing
     and an empty output; Antigravity run_command: only with agy_wait > 0 and when no tunnel answers the
@@ -3924,6 +4151,20 @@ def t_v2_sessions(s):
     os.utime(beat, (fut, fut))
     s.run("claude", ev("SessionEnd", reason="exit"), env)
     s.check("session: a late SessionEnd (newer .beat) does not mark it ended", not (sd / (sid + ".ended")).exists())
+    # Codex 0.165's SessionEnd (R7): session_id, transcript_path, cwd, hook_event_name and reason
+    # ("other", the only value) [measured]; nothing printed.
+    cd = s.home / ".simpleterm" / "sessions" / "codex"
+    cx = "019a5c3e-0000-7000-8000-00000000c0de"
+    cev = lambda name, **kw: json.dumps(dict({"session_id": cx, "transcript_path": None, "cwd": "/w/repo", "hook_event_name": name}, **kw))
+    s.run("codex", cev("UserPromptSubmit", turn_id="t1", prompt="Fix it", model="gpt-5.5", permission_mode="default"), env)
+    rc, out, err, el = s.run("codex", cev("SessionEnd", reason="other"), env)
+    s.check("session: codex .ended at SessionEnd, nothing printed",
+            (cd / (cx + ".json")).exists() and (cd / (cx + ".ended")).exists() and out.strip() == "" and el < 3, "%r %.2fs" % (out, el))
+    # Quit before any prompt: SessionEnd only, no record, no lone mark (the keep counts records).
+    nr = "019a5c3e-0000-7000-8000-00000000beef"
+    s.run("codex", json.dumps({"session_id": nr, "transcript_path": None, "cwd": "/w/repo", "hook_event_name": "SessionEnd", "reason": "other"}), env)
+    s.check("session: no .ended for a session without a record", not (cd / (nr + ".ended")).exists())
+    shutil.rmtree(cd, ignore_errors=True)  # the retention case below counts every agent's records
     s.run("claude", json.dumps({"session_id": "s:1", "cwd": "/w", "hook_event_name": "UserPromptSubmit", "prompt": "x"}), env)
     name = hashlib.sha256(b"s:1").hexdigest()[:32]
     s.check("session: an id with ':' -> sha256 name", (sd / (name + ".json")).exists() and json.loads((sd / (name + ".json")).read_text()).get("sid") == "s:1")
@@ -4391,7 +4632,7 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js,
-         t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_usage_ask_gate, t_conf_vectors, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_not_sent,
+         t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_usage_ask_gate, t_conf_vectors, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_held, t_v2_not_sent,
          t_v2_state, t_v2_sessions, t_v2_opencode_js, t_copilot_hooks, t_copilot,
          t_v2_versions, t_v2_claude_question_once]
 
@@ -4440,7 +4681,7 @@ def ps_parse_check(pwsh):
 # Tests that keep the CPU busy (t_service_shells: some 200 Stop hooks, about 40 s of CPU a suite):
 # at most two suites run one at a time, so the others' timed checks do not run on a machine loaded
 # far past its cores (the full matrix runs ten suites at once).
-HEAVY = {"t_service_shells": threading.Semaphore(2)}
+HEAVY = {"t_service_shells": threading.Semaphore(2), "t_v2_held": threading.Semaphore(3)}
 
 
 def ours(groups, marks):

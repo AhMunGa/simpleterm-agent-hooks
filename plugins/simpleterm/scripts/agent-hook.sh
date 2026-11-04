@@ -51,7 +51,7 @@ LOGGED=0
 MAX_INPUT=262144
 MAX_LINKS=16
 # The plugin release of this script (the manifests carry the same).
-HOOK_VERSION=0.5.0
+HOOK_VERSION=0.5.1
 # Bumped when the ~/.simpleterm/bin/simpleterm wrapper must be rewritten.
 CLI_REV=2
 CR=$(printf '\r')
@@ -482,9 +482,20 @@ plaintext() { # rid ev nonce
 }
 
 # Sends one event to one link; prints "<push result or http<code>> <http
-# code> <error code or ->". ING_MT caps the relay's time (the tunnel's is 5).
+# code> <error code, held (an HTTP 200 with "held":true) or ->". ING_MT caps
+# the relay's time (the tunnel's is 5).
 ingest_raw() { # rid ev nonce outfile
-  nh=''
+  if ! ingest_seal "$1" "$2" "$3"; then
+    printf 'seal 000 -'
+    return 1
+  fi
+  ingest_post "$1" "$2" "$4"
+}
+
+# The request body of event $2 (rid $1, nonce $3) for the loaded link, in
+# BODY_ (the envelope sealed); 1 if it could not be sealed.
+ingest_seal() { # rid ev nonce
+  nh='' BODY_=''
   [ -n "$3" ] && nh=$(sha256_hex "$3")
   pt=$(plaintext "$1" "$2" "$3")
   # Test only: the plaintext before it is sealed, to compare the sh and the
@@ -494,26 +505,36 @@ ingest_raw() { # rid ev nonce outfile
     printf '%s' "$pt" >"$SIMPLETERM_HOOK_TEST_PLAIN/$(printf %.8s "$L_LINK").$2.$1.$$"
   if [ -z "$pt" ] || ! seal "$pt"; then
     log "seal-failed link=$(printf %.8s "$L_LINK")"
-    printf 'seal 000 -'
     return 1
   fi
-  body='{"v":1,"rid":"'$1'","ev":"'$2'"'
-  [ -n "$nh" ] && body=$body',"nh":"'$nh'"'
-  body=$body',"env":'$ENV_JSON'}'
+  BODY_='{"v":1,"rid":"'$1'","ev":"'$2'"'
+  [ -n "$nh" ] && BODY_=$BODY_',"nh":"'$nh'"'
+  BODY_=$BODY_',"env":'$ENV_JSON'}'
+}
+
+# Posts BODY_ (event $2, rid $1) to the loaded link; prints as ingest_raw.
+ingest_post() { # rid ev outfile
   # A tunnel answers at once or not at all (a dead port may belong to
   # something else by now); the relay may hold the request a few seconds.
   mt=${ING_MT:-20}
   is_uint "$mt" && [ "$mt" -ge 1 ] || mt=1
   [ "$mt" -le 20 ] || mt=20
   [ "$L_KIND" = tunnel ] && [ "$mt" -gt 5 ] && mt=5
-  code=$(http POST /v1/ingest "$body" "$mt" "$4")
+  code=$(http POST /v1/ingest "$BODY_" "$mt" "$3")
   push='' err=''
   case $code in
-    200) push=$(resp_get "$4" push | sed -n 's/^push=//p' | tr -cd 'a-z-') ;;
+    200)
+      ig=$(resp_get "$3" push,held)
+      push=$(printf '%s\n' "$ig" | sed -n 's/^push=//p' | tr -cd 'a-z-')
+      # The app holds the request back for a wait the user is looking at
+      # and wants it again while it is open (TDS_AGENT_EVENTS_V2 section
+      # 4.6 "held"): the third field says so.
+      case $ig in *held=true*) err=held ;; esac
+      ;;
     410) printf '' 2>/dev/null >"$RUN_DIR/$L_LINK.revoked" ;;
-    400) err=$(resp_get "$4" error | sed -n 's/^error=//p' | tr -cd 'a-zA-Z-') ;;
+    400) err=$(resp_get "$3" error | sed -n 's/^error=//p' | tr -cd 'a-zA-Z-') ;;
   esac
-  rm -f "$4"
+  rm -f "$3"
   # The last event to a tunnel and its answer: a usage ask needs the app
   # connected (an HTTP 200 within 10 minutes, section 9.2).
   [ "$L_KIND" = tunnel ] && printf '%s %s\n' "$(date +%s)" "$code" >"$RUN_DIR/tun.$(printf %.8s "$L_LINK").last" 2>/dev/null
@@ -1787,6 +1808,9 @@ sess_start() { # [prompt]
 # event (it was resumed meanwhile: a late end must not mark it ended).
 sess_end() {
   sess_ok || return 0
+  # Not for a session without a record (Codex quit before any prompt): the
+  # keep (sess_keep) counts records, and a lone mark would stay.
+  [ -f "$SESS.json" ] || [ -f "$SESS.beat" ] || return 0
   [ -f "$SESS.beat" ] && [ -f "$RUN_DIR/t0.$$" ] && [ "$SESS.beat" -nt "$RUN_DIR/t0.$$" ] && return 0
   mkdir -p "$SESS_DIR" 2>/dev/null && chmod 700 "$ST_DIR/sessions" "$SESS_DIR" 2>/dev/null
   printf '' 2>/dev/null >"$SESS.ended"
@@ -2012,15 +2036,31 @@ poll_link() { # rid nonce outfile deadline
 agent_pid() {
   ap=$PPID n=0
   while [ "$n" -lt 4 ] && is_uint "$ap" && [ "$ap" -gt 1 ]; do
-    comm=$(ps -o comm= -p "$ap" 2>/dev/null) || { ap=''; break; }
+    comm=$(proc_comm "$ap")
+    [ -n "$comm" ] || { ap=''; break; }
     case ${comm##*/} in
       sh | -sh | bash | -bash | dash | zsh | -zsh | ksh | mksh | ash | fish | -fish | busybox) ;;
       *) break ;;
     esac
-    ap=$(ps -o ppid= -p "$ap" 2>/dev/null | tr -d ' ')
+    ap=$(proc_ppid "$ap")
     n=$((n + 1))
   done
   is_uint "$ap" && [ "$ap" -gt 1 ] && printf '%s' "$ap"
+}
+
+# The command name and the parent of process $1: from ps, else from Linux's
+# /proc (a container without ps, or a ps that may not run).
+PROC_DIR=/proc
+[ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ -n "${SIMPLETERM_HOOK_TEST_PROC:-}" ] && PROC_DIR=$SIMPLETERM_HOOK_TEST_PROC
+proc_comm() { # pid
+  pc=$(ps -o comm= -p "$1" 2>/dev/null) && [ -n "$pc" ] && { printf '%s' "$pc"; return 0; }
+  [ -r "$PROC_DIR/$1/comm" ] && head -c 64 "$PROC_DIR/$1/comm" 2>/dev/null | tr -d '\n'
+}
+proc_ppid() { # pid
+  pp=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')
+  is_uint "$pp" && { printf '%s' "$pp"; return 0; }
+  # stat is "pid (comm) state ppid ...": the comm may hold blanks and parens.
+  [ -r "$PROC_DIR/$1/stat" ] && head -c 512 "$PROC_DIR/$1/stat" 2>/dev/null | sed 's/.*) //' | awk '{ print $2 }'
 }
 
 # True if the agent moved on from request $1 (answered at the terminal).
@@ -2326,7 +2366,21 @@ rq_send() { # i file rid ev dec waitov maxtime pass
     rp=${ri%% *} rc=${ri#* }
     rc=${rc%% *}
   fi
-  printf '%s %s %s %s %s %s %s\n' "$rp" "${rn:--}" "$3" "$rd" "${L_KIND:-relay}" "$rc" "${L_FMT:-1}" >"$RUN_DIR/rq.$$.$1.st"
+  rq_note "$1" "$rp" "$rn" "$3" "$rd" "$rc" "$re"
+}
+
+# What link index $1 answered (the loaded link): rq.$$.$1.st "<push>
+# <nonce|-> <rid> <dec> <kind> <http code> <fmt>", and rq.$$.$1.held when a
+# v2 app's tunnel holds a decidable shared request back for a wait the user
+# is looking at (held, section 4.6): it hears the request again while the
+# agent's window for it is open (rq_held).
+rq_note() { # i push nonce rid dec code err
+  printf '%s %s %s %s %s %s %s\n' "$2" "${3:--}" "$4" "$5" "${L_KIND:-relay}" "$6" "${L_FMT:-1}" >"$RUN_DIR/rq.$$.$1.st"
+  rm -f "$RUN_DIR/rq.$$.$1.held"
+  if [ "$6" = 200 ] && [ "$7" = held ] && [ "$2" = suppressed ] && [ "$5" = 1 ] && [ "$L_KIND" = tunnel ] &&
+    [ "$L_FMT" = 2 ] && [ "${RQ_MODE:-}" = shared ]; then
+    printf '' >"$RUN_DIR/rq.$$.$1.held"
+  fi
 }
 
 # Starts the poller of link index $1 if it took the request to wait on.
@@ -2362,6 +2416,12 @@ rq_result() { # i scope out rrid [act|win]
 # Ends the request: the request-level result to every tunnel that took it,
 # in the background ($1 out, $2 the link index whose decision applied).
 rq_finish() { # out [i] [act]
+  [ -n "${RQ_MARK:-}" ] && rm -f "$RQ_MARK" 2>/dev/null
+  # A held round's posts in flight (a signal during rq_held's wait): their
+  # answers first (5 s at most each, in parallel), so that the results name
+  # the rids they got and no rq file is left behind.
+  for p in ${RQ_FIRE:-}; do wait "$p" 2>/dev/null; done
+  RQ_FIRE=''
   for p in $PIDS; do kill "$p" 2>/dev/null; done
   PIDS=''
   [ -n "${REQ_ID:-}" ] || return 0
@@ -2410,6 +2470,172 @@ rq_reject() { # i bad|changed
   is_hex "$xnr" 16 || return 0
   rq_send "$1" "$(cat "$RUN_DIR/rq.$$.$1.f")" "$xnr" "$RQ_EV" 1 '' 5 tunnel
   rq_poll "$1"
+}
+
+# Whether the agent's own window for this request is still open, as far as
+# the hook can tell for sure (TDS_AGENT_EVENTS_V2 section 4.6, the
+# open-window check): 0 open, 1 not (closed, another one, or nothing to tell
+# by), 2 not known yet (the agent may record its window a moment after the
+# hook starts). Claude Code only: its session file (sessions/<agent pid>.json
+# under CLAUDE_CONFIG_DIR or ~/.claude, the first 8 KiB) says this session
+# (sessionId) waits on a permission prompt, the one first seen there
+# (statusUpdatedAt unchanged, RQ_WAT — the first one seen, written no later
+# than 2 s after the hook's start), and no other permission hook of this
+# session waits on that same window (rq_alone; without a mark of its own the
+# hook cannot be counted by the others: not confirmed).
+rq_window() {
+  [ "$AGENT" = claude ] && [ -n "$AGENT_PID" ] && [ -n "$RQ_MARK" ] || return 1
+  wv=$(head -c 8192 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/$AGENT_PID.json" 2>/dev/null |
+    awk -v want=sessionId,status,waitingFor,statusUpdatedAt "$JSON_GET" 2>/dev/null)
+  wsid='' wst='' wfor='' wat=''
+  while IFS= read -r kv; do
+    case $kv in
+      sessionId=*) wsid=${kv#*=} ;;
+      status=*) wst=${kv#*=} ;;
+      waitingFor=*) wfor=${kv#*=} ;;
+      statusUpdatedAt=*) wat=${kv#*=} ;;
+    esac
+  done <<EOF
+$wv
+EOF
+  case $wat in '' | *[!0-9]*) wat='' ;; esac
+  # Not read (no file yet, or caught while it was written): not known.
+  [ -n "$wst" ] && [ -n "$wat" ] || return 2
+  wopen=0
+  [ -n "$RAWSID" ] && [ "$wsid" = "$RAWSID" ] && [ "$wst" = waiting ] && [ "$wfor" = 'permission prompt' ] || wopen=1
+  if [ -z "$RQ_WAT" ]; then
+    [ "$wopen" = 0 ] || return 2
+    # The window shown when the hook started (it starts 5 to 45 ms after
+    # Claude records it, 3 ms before at the earliest [measured 2.1.316]): a
+    # later one may come after the user answered this request.
+    [ "$wat" -le $(((start + 2) * 1000)) ] || return 1
+    RQ_WAT=$wat
+    [ -n "$RQ_MARK" ] && printf '%s\n' "$wat" 2>/dev/null >"$RQ_MARK"
+  fi
+  [ "$wopen" = 0 ] && [ "$wat" = "$RQ_WAT" ] || return 1
+  rq_alone
+}
+
+# Whether no other permission hook of this session waits on the same window
+# (perm.<session>.<pid> of a live hook holds the statusUpdatedAt its hook first
+# saw; RQ_MARK is this hook's): 0 alone, 1 not (the same window), 2 not known
+# yet (a hook that has not read the window yet). Claude Code shows the
+# requests of parallel tool calls in one window ("1 of 2") and its session
+# file stays as it was from one item to the next [measured 2.1.316]: which one
+# is open cannot be told. A hook of an earlier window that has not ended yet
+# (it checks once a second) holds another value and does not count.
+rq_alone() {
+  ra=0
+  for mf in "$RUN_DIR"/perm."$SID".*; do
+    [ -e "$mf" ] || continue
+    [ "$mf" = "$RQ_MARK" ] && continue
+    mp=${mf##*.}
+    is_uint "$mp" && kill -0 "$mp" 2>/dev/null || continue
+    mv=$(head -c 32 "$mf" 2>/dev/null | tr -cd '0-9')
+    [ -n "$mv" ] || { ra=2; continue; }
+    [ "$mv" = "$RQ_WAT" ] && return 1
+  done
+  return "$ra"
+}
+
+# Tunnels that hold the request back for a wait the user is looking at
+# (rq.$$.<i>.held, section 4.6): while the agent's own window for the request
+# is open (rq_window), the hook goes on and sends it to them again every 5
+# seconds (RQ_AGAIN), checked just before: one new rid for them all (one
+# event, section 3; the app shows a rid once), a new nonce each. A tunnel
+# that now answers sent is waited on (rq_poll); one that no longer answers
+# held is dropped (rq_send). True while one is kept.
+rq_held() {
+  set -- "$RUN_DIR"/rq."$$".*.held
+  [ -e "$1" ] || return 1
+  if [ "$AGENT" != claude ]; then
+    log "held: no record of $AGENT's window to tell it by (stop)"
+    rm -f "$@"
+    return 1
+  fi
+  rq_window
+  hw=$?
+  if [ "$hw" = 2 ]; then
+    # Not known: a few seconds for the agent to record its window, then a
+    # few reads that fail in a row; nothing is sent meanwhile.
+    RQ_MISS=$((RQ_MISS + 1))
+    if [ -z "$RQ_WAT" ]; then [ $(($(date +%s) - start)) -lt 5 ] && return 0
+    else [ "$RQ_MISS" -lt 3 ] && return 0
+    fi
+  fi
+  [ "$hw" = 0 ] && RQ_MISS=0
+  if [ "$hw" != 0 ]; then
+    log "held: the window is not open (stop)"
+    rm -f "$@"
+    return 1
+  fi
+  [ "$(date +%s)" -ge "$RQ_AGAIN" ] || return 0
+  RQ_AGAIN=$(($(date +%s) + 5))
+  # A fresh ts and tms: the tunnel takes events within 5 minutes of now.
+  TS=$(date +%s)
+  is_uint "$TS" || TS=0
+  v2_spec "$V2X@.tms${TAB}s$TAB$(v2_tms)$NL"
+  hr=$(rand_hex 8)
+  is_hex "$hr" 16 || return 0
+  # Every tunnel's event is sealed first, so that the check below comes
+  # right before the sends (section 4.6, the delta's grounds).
+  hready=''
+  for hf in "$@"; do
+    [ -e "$hf" ] || continue
+    hi=${hf%.held}
+    hi=${hi##*.}
+    load_link "$(cat "$RUN_DIR/rq.$$.$hi.f" 2>/dev/null)" || { rm -f "$hf"; continue; }
+    hn=$(rand_hex 16)
+    [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ -n "${SIMPLETERM_HOOK_TEST_NONCE:-}" ] && hn=$SIMPLETERM_HOOK_TEST_NONCE
+    is_hex "$hn" 32 || continue
+    METAF=$RUN_DIR/rq.$$.$hi.meta WAITOV='' ING_MT=5
+    ingest_seal "$hr" "$RQ_EV" "$hn" || continue
+    printf '%s' "$BODY_" >"$RUN_DIR/rq.$$.$hi.body" && printf '%s\n' "$hn" >"$RUN_DIR/rq.$$.$hi.rn" || continue
+    hready="$hready $hi"
+  done
+  [ -n "$hready" ] || return 0
+  # Answered at the terminal, or the agent gone: not sent; the main loop
+  # ends the request with what it finds. Then the window, at once before
+  # the sends.
+  answered_locally "$start" "$FP" && return 0
+  [ -n "$AGENT_PID" ] && ! kill -0 "$AGENT_PID" 2>/dev/null && return 0
+  rq_window
+  case $? in
+    0) ;;
+    2) return 0 ;;
+    *)
+      log "held: the window is not open (stop)"
+      rm -f "$@"
+      return 1
+      ;;
+  esac
+  # One round, one rid, to every tunnel at once: the app judges the first
+  # copy that comes.
+  RQ_FIRE=''
+  for hi in $hready; do
+    log "held link-$hi: again"
+    (rq_fire "$hi" "$hr") </dev/null >/dev/null 2>&1 &
+    RQ_FIRE="$RQ_FIRE $!"
+  done
+  for p in $RQ_FIRE; do wait "$p" 2>/dev/null; done
+  RQ_FIRE=''
+  for hi in $hready; do rq_poll "$hi"; done
+  return 0
+}
+
+# Posts link index $1's sealed event of the held round (rid $2): what it
+# answered goes to rq.$$.$1.st and .held (rq_note).
+rq_fire() { # i rid
+  load_link "$(cat "$RUN_DIR/rq.$$.$1.f" 2>/dev/null)" || return 0
+  fn=$(cat "$RUN_DIR/rq.$$.$1.rn" 2>/dev/null)
+  BODY_=$(cat "$RUN_DIR/rq.$$.$1.body" 2>/dev/null)
+  rm -f "$RUN_DIR/rq.$$.$1.body" "$RUN_DIR/rq.$$.$1.rn"
+  [ -n "$BODY_" ] && is_hex "$fn" 32 || return 0
+  ING_MT=5
+  fres=$(ingest_post "$2" "$RQ_EV" "$RUN_DIR/ing.$$.$1")
+  fp=${fres%% *} fc=${fres#* }
+  fe=${fc#* } fc=${fc%% *}
+  rq_note "$1" "$fp" "$fn" "$2" 1 "$fc" "$fe"
 }
 
 # True if a tunnel answered the probe (section 4.6): HTTP 404 with error
@@ -2473,6 +2699,12 @@ request_flow() { # ev mode
   # nothing and leave the decision to the agent.
   rq_sig=gone
   [ "$AGENT" = opencode ] && rq_sig=terminal
+  RQ_AGAIN=$((start + 5)) RQ_WAT='' RQ_MISS=0 RQ_MARK='' RQ_FIRE=''
+  # This session's waiting permission hooks, for rq_alone.
+  if [ "$AGENT" = claude ]; then
+    RQ_MARK=$RUN_DIR/perm.$SID.$$
+    printf '' 2>/dev/null >"$RQ_MARK" || RQ_MARK=''
+  fi
   trap 'rq_finish $rq_sig; log "permission signal"; finish' TERM INT HUP
 
   while IFS= read -r f; do
@@ -2549,6 +2781,7 @@ EOF
       fi
       case $JV in bad | changed) rq_reject "$i" "$JV" ;; esac
     done
+    rq_held && waiting=1
     [ "$waiting" = 1 ] || break
     if answered_locally "$start" "$FP"; then
       log "permission answered-at-terminal"
@@ -5139,7 +5372,7 @@ case $AGENT:$EVENT in
       sess_ok && [ ! -f "$SESS.json" ] && sess_turn idle
     fi
     ;;
-  claude:SessionEnd | grok:SessionEnd | copilot:sessionEnd)
+  claude:SessionEnd | grok:SessionEnd | copilot:sessionEnd | codex:SessionEnd)
     if [ "$AGENT" = copilot ] && [ "$REASON" = error ]; then
       # The session ended on an error (its last try, kept above).
       e=$(cat "$RUN_DIR/$SID.cerr" 2>/dev/null)
@@ -5151,12 +5384,16 @@ case $AGENT:$EVENT in
     fi
     rm -f "$RUN_DIR/$SID.cerr" 2>/dev/null
     printf '' 2>/dev/null >"$RUN_DIR/t0.$$"
-    send_state ended
+    # The record first: Codex gives this hook 3 seconds at most and then
+    # ends its process group (0.165.0, measured).
     sess_end
+    send_state ended
     rm -f "$RUN_DIR/t0.$$" 2>/dev/null
     # The agent is exiting and may take its hooks' children with it
-    # (measured with Copilot -p): the sends finish first.
-    wait
+    # (measured with Copilot -p): the sends finish first. Codex keeps the
+    # children of a hook that ended in time, and ends the whole group of
+    # one that did not (measured), so its hook does not wait.
+    [ "$AGENT" = codex ] || wait
     ;;
   claude:SubagentStart | claude:SubagentStop | grok:SubagentStart | grok:SubagentStop | copilot:subagentStart | copilot:subagentStop)
     case $EVENT in *Start | *start) send_state sub_start ;; *) send_state sub_stop ;; esac
