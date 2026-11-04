@@ -480,14 +480,17 @@ def t_tunnel(s):
         tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T)}})
         stop = json.dumps({"session_id": "s3", "cwd": "/w/proj", "hook_event_name": "Stop",
                            "stop_hook_active": False, "last_assistant_message": "done"})
-        t0 = time.time()
         s.run("claude", stop)
         got = wait_for(lambda: [r for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest"], 10, 0.05)
-        el = time.time() - t0
+        rel = wait_for(lambda: [r for r in s.records("/v1/ingest") if "responded" in r], 20)
+        # An order, not a time limit (a loaded machine does not change it): the tunnel's copy came
+        # before the relay answered (it holds its answer 3 s). Sent after the relay's answer, it
+        # would come later.
         s.check("tunnel first: background event reaches the tunnel before the relay answers",
-                got and el < 2.5, "%.2fs" % el)
-        s.check("tunnel first: relay still gets it",
-                wait_for(lambda: s.records("/v1/ingest"), 20), str(s.records())[:200])
+                got and rel and got[0]["received"] < rel[0]["responded"],
+                "tunnel %s relay %s" % ([round(r["received"] - rel[0]["received"], 2) for r in got] if got and rel else got,
+                                         round(rel[0]["responded"] - rel[0]["received"], 2) if rel else rel))
+        s.check("tunnel first: relay still gets it", rel, str(s.records())[:200])
     finally:
         tun.terminate()
         tun.wait(5)
