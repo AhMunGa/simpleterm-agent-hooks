@@ -4391,7 +4391,10 @@ function Invoke-RequestFlow([string]$ev, [string]$mode) {
         if ($ended) { break }
         if (Test-RqHeld $links $start $agentPid) { $waiting = $true }
         if (-not $waiting) { break }
-        if ([DateTime]::UtcNow -ge $nextCheck) {
+        # Once a second, and at once when the deadline has come: a poll that
+        # ended at the deadline is a timeout (as in agent-hook.sh), not a
+        # request nothing waits on.
+        if ([DateTime]::UtcNow -ge $nextCheck -or (Now-Epoch) -ge $deadline) {
             $nextCheck = [DateTime]::UtcNow.AddSeconds(1)
             if (Test-AnsweredLocally $start $Script:Fp) {
                 Write-Log 'permission answered-at-terminal'
