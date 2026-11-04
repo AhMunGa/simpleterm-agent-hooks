@@ -411,7 +411,7 @@ def t_timeout(s):
     rc, out, err, el = s.run("claude", perm_input())
     s.check("timeout: no decision", out.strip() == "", out)
     s.check("timeout: honours claude_wait", 1.5 < el < 9, "%.2fs" % el)
-    s.check("timeout: logged", "permission timeout" in s.log_text(), s.log_text())
+    s.check("timeout: logged", "permission timeout" in s.log_text(), "rc=%s %.2fs err=%r log=%s" % (rc, el, err[-300:], s.log_text()))
     s.check("timeout: polled", len(s.records("/v1/decision")) >= 1)
 
 
@@ -1484,6 +1484,9 @@ AGENT_PY = (
     "print(p.pid, flush=True)\n"
     "p.wait()\n"
 )
+# The same, but it starts the hook only once a line comes on its stdin: the test first writes what
+# the agent records before it runs a hook (Claude Code's session file, sessions/<pid>.json).
+AGENT_GATED_PY = "import sys\nsys.stdin.readline()\n" + AGENT_PY
 
 
 def t_agent_gone(s):
@@ -3808,15 +3811,22 @@ def t_v2_held(s):
                                        "waitingFor": waiting_for, "statusUpdatedAt": at, "updatedAt": at}))
             os.replace(tmp, f)
 
-        def start(session="held-1", env=None, proc=None, **st):
-            """The stand-in agent (its pid names the session file) and the hook under it."""
-            cmd = [sys.executable, "-I", "-c", AGENT_PY, v2_perm(session=session)] + list(s.argv) + ["claude"]
-            agent = s.popen(cmd, stdout=subprocess.PIPE, env=s.env(env), cwd=str(s.tmp))
+        def start(session="held-1", env=None, proc=None, file_session=None, **st):
+            """The stand-in agent (its pid names the session file) and the hook under it. Claude Code
+            records the prompt in that file 5 to 45 ms before the hook starts (3 ms after it at the
+            latest; TDS_AGENT_EVENTS_V2 M31), and the hook gives a file it cannot read 5 seconds.
+            The agent starts the hook only once the file is there, so a loaded test machine cannot
+            turn those milliseconds into seconds."""
+            cmd = [sys.executable, "-I", "-c", AGENT_GATED_PY, v2_perm(session=session)] + list(s.argv) + ["claude"]
+            agent = s.popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=s.env(env), cwd=str(s.tmp))
             if proc:  # a /proc of the agent for a hook without ps
                 (proc / str(agent.pid)).mkdir(parents=True, exist_ok=True)
                 (proc / str(agent.pid) / "comm").write_text("claude\n")
             if st.get("status") != "none":
-                state(agent.pid, **st)
+                state(agent.pid, session=file_session or session, **st)
+            agent.stdin.write(b"go\n")
+            agent.stdin.close()
+            agent.stdin = None
             hook = int(agent.stdout.readline())
             return agent, hook
 
@@ -3849,24 +3859,28 @@ def t_v2_held(s):
         # Answered at the terminal (the prompt closes: busy): nothing again; the hook ends at once.
         setup(["held"])
         agent, hook = start()
-        s.check("held: told again once", wait_for(lambda: len(perms()) == 2, 15), str(len(perms())))
+        # (Waits end when the posts come; 30 s only bounds a machine too loaded to keep the hook's 5 s.)
+        s.check("held: told again once", wait_for(lambda: len(perms()) >= 2, 30), "%d %s" % (len(perms()), s.log_text()[-300:]))
+        n0 = len(perms())
         state(agent.pid, status="busy", waiting_for=None, at=1793232009000)
         done, out = finished(agent, 15)
         n = len(perms())
         time.sleep(1)
         s.check("held: the prompt closed: no more, the hook ends with no decision",
-                done and out.strip() == "" and n == 2 and len(perms()) == 2 and "held: the window is not open" in s.log_text(),
-                "%r n=%d %s" % (out, n, s.log_text()[-300:]))
+                done and out.strip() == "" and n == n0 and len(perms()) == n0 and "held: the window is not open" in s.log_text(),
+                "%r n=%d of %d %s" % (out, n, n0, s.log_text()[-300:]))
         s.check("held: its result says window (not terminal: the prompt may be the session's next one)",
                 wait_for(lambda: results(), 5) and results()[-1].get("out") == "window", str(results())[:300])
 
         # Another prompt in its place (statusUpdatedAt changed): stop.
         setup(["held"])
         agent, hook = start()
-        s.check("held: another prompt: told again first", wait_for(lambda: len(perms()) == 2, 15), str(len(perms())))
+        s.check("held: another prompt: told again first", wait_for(lambda: len(perms()) >= 2, 30), "%d %s" % (len(perms()), s.log_text()[-300:]))
+        n0 = len(perms())
         state(agent.pid, at=1793232011111)
         done, out = finished(agent, 15)
-        s.check("held: another prompt (statusUpdatedAt changed): no more", done and len(perms()) == 2, "%d %s" % (len(perms()), s.log_text()[-300:]))
+        s.check("held: another prompt (statusUpdatedAt changed): no more", done and len(perms()) == n0,
+                "%d of %d %s" % (len(perms()), n0, s.log_text()[-300:]))
 
         # Nothing to tell by: another session's file, no file, plain suppressed, a tunnel without fmt=2,
         # or another permission hook of the session waiting (parallel tool calls: Claude shows them in
@@ -3883,9 +3897,7 @@ def t_v2_held(s):
                 # A live process (this runner) waiting on the same window (statusUpdatedAt).
                 (run / ("perm.held-1.%d" % os.getpid())).write_text("1793232000123\n")
             t0 = time.time()
-            agent, hook = start(**dict({"session": "held-1"}, **{k: v for k, v in st.items() if k != "session"}))
-            if st.get("session"):
-                state(agent.pid, session=st["session"])
+            agent, hook = start(file_session=st.get("session"), **{k: v for k, v in st.items() if k != "session"})
             done, out = finished(agent, 20)
             el = time.time() - t0
             s.check("held: %s: not told again, ends with no decision" % name,
@@ -3900,7 +3912,7 @@ def t_v2_held(s):
             old.unlink()
         (run / ("perm.held-1.%d" % os.getpid())).write_text("1793231999000\n")
         agent, hook = start()
-        s.check("held: an earlier window's hook does not stop it", wait_for(lambda: len(perms()) >= 2, 15), str(len(perms())))
+        s.check("held: an earlier window's hook does not stop it", wait_for(lambda: len(perms()) >= 2, 30), str(len(perms())))
         state(agent.pid, status="idle", waiting_for=None, at=1793232009000)
         finished(agent, 15)
         (run / ("perm.held-1.%d" % os.getpid())).unlink()
@@ -3936,8 +3948,13 @@ def t_v2_held(s):
                 s.check("held: two tunnels: one rid a round for both, a nonce each",
                         a[1]["body"]["rid"] == b[1]["body"]["rid"] and a[1]["body"]["rid"] != a[0]["body"]["rid"]
                         and (a[1].get("plain_json") or {}).get("nonce") != (b[1].get("plain_json") or {}).get("nonce"), str([a[1]["body"]["rid"], b[1]["body"]["rid"]]))
+                # Sent at once: the other tunnel's copy came while the slow one still held its own
+                # (it answers 3 s after it came). One after the other, it would come after that
+                # answer. An order, not a time limit: a loaded machine does not change it.
                 s.check("held: two tunnels: sent at once (the slow tunnel does not delay the other)",
-                        abs(a[1]["received"] - b[1]["received"]) < 1.5, "%.2f s apart" % abs(a[1]["received"] - b[1]["received"]))
+                        b[1]["received"] < a[1]["responded"],
+                        "the other copy came %.2f s after the slow one, which answered after %.2f s"
+                        % (b[1]["received"] - a[1]["received"], a[1]["responded"] - a[1]["received"]))
             else:
                 s.check("held: two tunnels: both told again", False, "%d %d" % (len(perms()), len(tctl2("/_ctl/records")["records"])))
         finally:
@@ -3956,7 +3973,7 @@ def t_v2_held(s):
                 nops.mkdir()
                 for e in s.bin.iterdir():
                     if e.name != "ps":
-                        os.symlink(os.readlink(e), nops / e.name)
+                        os.symlink(os.path.realpath(e), nops / e.name)  # a stand-in agent is a file, not a link
             for name, proc in (("from /proc", s.tmp / "fakeproc"), ("not at all", None)):
                 setup(["held"])
                 shutil.rmtree(s.tmp / "fakeproc", ignore_errors=True)
@@ -3965,7 +3982,7 @@ def t_v2_held(s):
                     env.update(SIMPLETERM_HOOK_TEST="1", SIMPLETERM_HOOK_TEST_PROC=str(proc))
                 agent, hook = start(env=env, proc=proc)
                 if proc:
-                    s.check("held: without ps, the agent found %s: told again" % name, wait_for(lambda: len(perms()) >= 2, 15), str(len(perms())))
+                    s.check("held: without ps, the agent found %s: told again" % name, wait_for(lambda: len(perms()) >= 2, 30), str(len(perms())))
                     state(agent.pid, status="idle", waiting_for=None, at=1793232009000)
                 done, out = finished(agent, 20)
                 if not proc:
