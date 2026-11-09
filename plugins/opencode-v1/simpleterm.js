@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 const HOOK = join(dirname(fileURLToPath(import.meta.url)), "simpleterm-agent-hook.sh");
 
 // The session's tokens and cost as OpenCode keeps them (session info `cost`
-// and `tokens`), for the usage event's `cost` (TDS_AGENT_EVENTS_V2 section 9.3).
+// and `tokens`), for the usage event's `cost` (SimpleTerm if/usage-report#agents).
 function usage(info) {
   const out = {};
   if (typeof info?.cost === "number" && Number.isFinite(info.cost) && info.cost >= 0) out.cost = info.cost;
@@ -67,8 +67,7 @@ function runHook(event, cwd, waits, key) {
   });
 }
 
-// Open permission requests per session, for the hook (TDS_AGENT_EVENTS_V2
-// sections 4.5, 5.5): in 1.19 a `reject` or `always` also settles the
+// Open permission requests per session, for the hook (SimpleTerm if/event-v2-request#affects, if/event-decision#validation): in 1.19 a `reject` or `always` also settles the
 // session's other open requests. Kept in ~/.simpleterm/run/oc.<session>.pending.
 function pendingFile(sessionID) {
   const st = join(process.env.HOME || homedir(), ".simpleterm");
@@ -170,7 +169,7 @@ export const SimpleTermAgentHooks = async ({ client, directory }) => {
             cwd: directory,
             tool_name: p.permission || p.type || "permission",
             tool_input: { command: String(detail || "") },
-            // event format v2 (TDS_AGENT_EVENTS_V2 sections 4, 10.2)
+            // event format v2 (SimpleTerm if/event-v2-request#fields, if/hook-events#request-source)
             oc: v19 ? "1.19" : "1.0",
             request_id: String(p.id || ""),
             patterns: patterns.filter(Boolean).map(String),

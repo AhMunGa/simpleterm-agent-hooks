@@ -1,9 +1,10 @@
 # SimpleTerm agent hook (Windows PowerShell 5.1+ and PowerShell 7), part of the
-# simpleterm-agent-hooks plugin; see README.md and, in the SimpleTerm app
-# repository, docs/tech_specs/TDS_AGENT_ALERTS.md (sections 5 and 6: relay
-# protocol v1, hooks, SSH tunnel) and docs/tech_specs/TDS_AGENT_EVENTS_V2.md
-# (event and decision format v2: request contents, decision lists, decision
-# extensions, results, states, session records) for the contract.
+# simpleterm-agent-hooks plugin; see README.md and, in the SimpleTerm app repository (AhMunGa/simple-term),
+# the SimpleTerm spec IDs index/if-agent-relay (relay protocol v1),
+# index/if-agent-host (hooks, SSH tunnel) and index/if-agent-events (event and
+# decision format v2: request contents, decision lists, decision extensions,
+# results, states, session records) for the contract; main files: if/relay-http,
+# if/event-envelope, if/event-v2, if/event-decision.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File agent-hook.ps1 claude
 #   ... agent-hook.ps1 claude signal     Claude Code PermissionRequest status only
@@ -14,7 +15,7 @@
 # The same behavior as agent-hook.sh for Claude Code, Codex and Grok Build (run
 # with `claude` and GROK_HOOK_EVENT set), using only .NET (Aes CBC/PKCS7,
 # HMACSHA256, HttpWebRequest): for the same input it makes the same event
-# plaintext, byte for byte (TDS_AGENT_EVENTS_V2 section 2.2). Gemini CLI,
+# plaintext, byte for byte (SimpleTerm if/event-v2-limits#shrinking). Gemini CLI,
 # Antigravity, OpenCode and GitHub Copilot CLI are sh-only (run by Copilot,
 # COPILOT_CLI=1, it does nothing). It never evaluates its input, prints only
 # agent-defined JSON on stdout, and always exits 0. Keep this file ASCII:
@@ -28,8 +29,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-# A usage ask runs the agent with SIMPLETERM_PROBE=1 (TDS_AGENT_EVENTS_V2
-# section 9.2): hooks it runs do nothing, or the ask would make sessions and
+# A usage ask runs the agent with SIMPLETERM_PROBE=1 (SimpleTerm if/usage-ask#run): hooks it runs do nothing, or the ask would make sessions and
 # alerts of its own.
 if ($env:SIMPLETERM_PROBE -ceq '1') { exit 0 }
 
@@ -329,8 +329,7 @@ function Get-Hex4([string]$s, [int]$i) {
     return [Convert]::ToInt32($h, 16)
 }
 
-# jnorm: JSON-escaped string content, normalized (TDS_AGENT_EVENTS_V2 section
-# 2.2): escapes stay as received; control characters and the escapes that
+# jnorm: JSON-escaped string content, normalized (SimpleTerm if/event-v2-limits#shrinking): escapes stay as received; control characters and the escapes that
 # stand for them become a space ($keepnl keeps \n, \t, \u000a and \u0009);
 # lone surrogates and bytes that are not UTF-8 become a space; a broken escape
 # ends the text.
@@ -546,7 +545,7 @@ function Test-UInt([string]$s) {
     return ($null -ne $s -and $s -cmatch '\A[0-9]{1,12}\z')
 }
 
-# is_id: the section 3 id format.
+# is_id: the id format of SimpleTerm if/event-v2#fields.
 function Test-Id([string]$s) {
     return ($null -ne $s -and $s -cmatch '\A[A-Za-z0-9._:-]+\z' -and $s.Length -le 128)
 }
@@ -595,7 +594,7 @@ function Test-SameHex([string]$a, [string]$b) {
     return ($diff -eq 0)
 }
 
-# Returns the section 5.2 envelope JSON of plaintext $plain (a byte string)
+# Returns the envelope JSON (SimpleTerm if/event-envelope#envelope) of plaintext $plain (a byte string)
 # for $link, or $null.
 function New-Envelope([string]$plain, $link) {
     $iv = New-RandomHex 16
@@ -615,7 +614,7 @@ function New-Envelope([string]$plain, $link) {
     return '{"v":1,"iv":"' + $iv + '","ct":"' + $ct + '","mac":"' + $mac + '"}'
 }
 
-# Opens a decision extension (section 5.1): its plaintext (the first 4096
+# Opens a decision extension (SimpleTerm if/event-decision#format): its plaintext (the first 4096
 # bytes, line breaks dropped) or '' if it does not decrypt.
 function Open-Dext($link, [string]$iv, [string]$ct) {
     try {
@@ -655,7 +654,7 @@ function Read-Link([string]$file) {
         # kind=tunnel: the app's end of its SSH connection on a loopback port.
         if ($link.kind -cne 'tunnel') { $link.kind = '' }
         # fmt=2: the receiver takes decision extensions and decidable questions
-        # (TDS_AGENT_EVENTS_V2 section 1.2). Anything else is an older receiver.
+        # (SimpleTerm if/event-v2#announce). Anything else is an older receiver.
         if ($link.fmt -cne '2') { $link.fmt = '' }
         if (-not ((Test-Hex $link.link 32) -and (Test-Hex $link.secret 64) -and (Test-Hex $link.enc 64) -and (Test-Hex $link.mac 64))) {
             Write-Log 'link-skip fields'; return $null
@@ -689,8 +688,7 @@ function Get-LinkFiles {
     return $files
 }
 
-# conf_val: the value of $key in ~/.simpleterm/agent-hook.conf (section 9.2
-# D21, its first 4 KiB; a UTF-8 BOM at the start of the file is dropped):
+# conf_val: the value of $key in ~/.simpleterm/agent-hook.conf (SimpleTerm if/hook-conf-file#reading, hist/usage-ask#d21, its first 4 KiB; a UTF-8 BOM at the start of the file is dropped):
 # the first line `key=value` of that key decides,
 # blanks allowed around the line and the `=`. From the value a CR, a comment
 # (from the first `#`), the blanks around it and one pair of quotes around all
@@ -701,8 +699,7 @@ function Get-ConfVal([string]$key) {
     try {
         if ([IO.File]::Exists($path)) {
             $text = Read-HeadB $path 4096
-            # A UTF-8 BOM at the start of the file is dropped (TDS_AGENT_ALERTS
-            # section 6.7; conf_val).
+            # A UTF-8 BOM at the start of the file is dropped (SimpleTerm if/hook-conf-file#reading; conf_val).
             if ($text.StartsWith([string][char]0xEF + [char]0xBB + [char]0xBF, $Ord)) { $text = $text.Substring(3) }
             foreach ($line in $text.Split([char]10)) {
                 $e = $line.IndexOf('=')
@@ -726,7 +723,7 @@ function Get-ConfInt([string]$key, [int64]$default) {
     return $default
 }
 
-# What the hook does with each key (TDS_AGENT_ALERTS section 6.7; as in
+# What the hook does with each key (SimpleTerm if/hook-conf-file#keys; as in
 # agent-hook.sh): the device-wait cap of agent $agent (<agent>_wait, at most
 # 540; conf_wait_cap).
 function Get-ConfWaitCap([string]$agent) {
@@ -842,11 +839,10 @@ function Format-Code([int]$code) { return $code.ToString('000', $Inv) }
 
 # --- event format v2: the spec (V2_SPEC) -------------------------------------------
 
-# The v2 fields of an event (TDS_AGENT_EVENTS_V2 section 3) as spec lines
+# The v2 fields of an event (SimpleTerm if/event-v2#fields) as spec lines
 # `path TAB o|a|s|r TAB value`, from the facts and `@.<key>` parameters
-# (strings, JSON-escaped): common fields, the request (section 4; rkind names
-# how this agent asked), the end of a turn (section 6.1), a state (6.2) or a
-# result (5.6). Lines starting with # are notes for the waiting hook (#smap:
+# (strings, JSON-escaped): common fields, the request (SimpleTerm if/event-v2-request#fields; rkind names
+# how this agent asked), the end of a turn (SimpleTerm if/event-v2-turn#turn), a state (SimpleTerm if/event-v2-turn#state) or a result (SimpleTerm if/ssh-tunnel-wait#resolved). Lines starting with # are notes for the waiting hook (#smap:
 # the original index of each Claude scope). The port of V2_SPEC in
 # agent-hook.sh, for the request kinds of the agents this hook serves.
 function SpFs([string]$p) {
@@ -1235,9 +1231,7 @@ function Get-Spec([string]$text) {
 # --- event format v2: the plaintext of one link (V2_BUILD) ---------------------------
 
 # Builds the plaintext for one link from the v1 fields and the spec
-# (TDS_AGENT_EVENTS_V2 sections 2.1, 2.2, 3): the link's variant of the
-# request (section 4.3), then the field limits and the deterministic cuts of
-# section 2.2, the same bytes as agent-hook.sh. Returns @{ plain; meta } (meta:
+# (SimpleTerm if/event-v2-limits#path-limits, if/event-v2-limits#shrinking, if/event-v2#fields): the link's variant of the request (SimpleTerm if/event-v2-request#can), then the field limits and the deterministic cuts of SimpleTerm if/event-v2-limits#shrinking, the same bytes as agent-hook.sh. Returns @{ plain; meta } (meta:
 # the META line, then the spec's notes).
 function New-PlainV2($link, [string]$rid, [string]$ev, [string]$nonce) {
     $kind = 'relay'
@@ -1251,7 +1245,7 @@ function New-PlainV2($link, [string]$rid, [string]$ev, [string]$nonce) {
     [void]$sb.Append('=host' + $Tab + (ConvertTo-JsonB $link.label 100000 100000) + $Nl + '=cwd' + $Tab + $Script:CwdBaseF + $Nl)
     if (-not $Script:NoMsg) { [void]$sb.Append('=msg' + $Tab + $Script:MsgF + $Nl) }
     # A usage event's own fields: v1 ones (ctx, lims, plan) after cwd, uq and
-    # cost before ts (section 9.1).
+    # cost before ts (SimpleTerm if/usage-report#v2-fields).
     if ($ev -ceq 'usage') { [void]$sb.Append('=uv1' + $Tab + [string]$Script:UsageJson + $Nl + '=uv2' + $Tab + [string]$Script:UsageV2 + $Nl) }
     [void]$sb.Append('=xflags' + $Tab + $vx + $Nl + '=nonce' + $Tab + $nonce + $Nl + '=ts' + $Tab + $Script:Ts + $Nl)
     [void]$sb.Append([string]$Script:Spec + $Nl)
@@ -1329,7 +1323,7 @@ function New-PlainV2($link, [string]$rid, [string]$ev, [string]$nonce) {
         if ($o) { [void]$x.Append('}') } else { [void]$x.Append(']') }
         return $x.ToString()
     }
-    # The cut record (section 2.2 step 6).
+    # The cut record (SimpleTerm if/event-v2-limits#shrinking step 6).
     $CK = New-Object 'System.Collections.Generic.List[string]'
     $CV = New-Object 'System.Collections.Generic.List[string]'
     $CDEAD = New-Object 'System.Collections.Generic.List[bool]'
@@ -1400,7 +1394,7 @@ function New-PlainV2($link, [string]$rid, [string]$ev, [string]$nonce) {
         return $c
     }
 
-    # Section 2.2 field limits: "tunnel relay" bytes (- not sent to the relay),
+    # Field limits (SimpleTerm if/event-v2-limits#field-limits): "tunnel relay" bytes (- not sent to the relay),
     # CNT the same for arrays.
     $STR = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     $CNT = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
@@ -1429,7 +1423,7 @@ function New-PlainV2($link, [string]$rid, [string]$ev, [string]$nonce) {
 
     $budget = 2048
     if ($kind -ceq 'tunnel') { $budget = 32768 }
-    # variant of this link (section 4.3)
+    # variant of this link (SimpleTerm if/event-v2-request#can)
     if ($Script:WaitOv.Length -gt 0) { $i = BNode 'req.wait'; if ($i) { $NV[$i] = $Script:WaitOv } }
     if (-not $dec) { BDrop 'req.can'; BDrop 'req.scopes'; BDrop 'req.modes'; BDrop 'req.affects'; BDrop 'req.others' }
     elseif (-not $fmt2) {
@@ -1570,13 +1564,13 @@ function Get-InputFile([string]$raw) {
 }
 
 # MSG (v1, cut) and MSGF (whole: the v2 builder cuts it and records the cut,
-# TDS_AGENT_EVENTS_V2 section 2.2) from JSON-escaped text (setmsg).
+# SimpleTerm if/event-v2-limits#shrinking) from JSON-escaped text (setmsg).
 function Set-Msg([string]$text) {
     $Script:MsgF = $text
     $Script:Msg = Limit-Json $text 200 800
 }
 
-# The section 5.2 (v1) plaintext for $link: notify and test, and every event
+# The v1 plaintext (SimpleTerm if/event-envelope#plaintext) for $link: notify and test, and every event
 # before the v2 fields are prepared (a usage event has them: Send-Usage).
 # `usage` carries UsageJson instead of a message; `notify` adds a title.
 function New-PlainV1($link, [string]$rid, [string]$ev, [string]$nonce) {
@@ -1610,7 +1604,7 @@ function New-Ingest($link, [string]$rid, [string]$ev, [string]$nonce) {
     $pt = Get-Plaintext $link $rid $ev $nonce
     $meta = $Script:LastMeta
     # Test only: the plaintext before it is sealed, to compare the sh and the
-    # PowerShell hook byte for byte (TDS_AGENT_EVENTS_V2 section 2.2): one
+    # PowerShell hook byte for byte (SimpleTerm if/event-v2-limits#shrinking): one
     # file per event and link in directory SIMPLETERM_HOOK_TEST_PLAIN.
     if ($env:SIMPLETERM_HOOK_TEST -eq '1' -and $env:SIMPLETERM_HOOK_TEST_PLAIN -and [IO.Directory]::Exists($env:SIMPLETERM_HOOK_TEST_PLAIN)) {
         [void](Write-FileB (Join-Path $env:SIMPLETERM_HOOK_TEST_PLAIN ((Short $link.link) + '.' + $ev + '.' + $rid + '.' + $PID)) $pt)
@@ -1652,7 +1646,7 @@ function Start-Ingest($link, [string]$rid, [string]$ev, [string]$nonce) {
 # Finishes an ingest: @{ push (the push result or http<code>); code (3 digits); err;
 # held (an HTTP 200 with "held":true - the app holds the request back for a
 # wait the user is looking at and wants it again while it is open,
-# TDS_AGENT_EVENTS_V2 section 4.6) }.
+# SimpleTerm if/ssh-tunnel-wait#held) }.
 function Complete-Ingest($op) {
     if ($op.seal) { return @{ push = 'seal'; code = '000'; err = '-'; held = $false } }
     $r = Complete-Relay $op 4096
@@ -1668,7 +1662,7 @@ function Complete-Ingest($op) {
     elseif ($r.code -eq 400) { $err = [regex]::Replace((Get-Field (Get-JsonKV $r.body @('error')) 'error'), '[^a-zA-Z-]', '') }
     $code = Format-Code $r.code
     # The last event to a tunnel and its answer: a usage ask needs the app
-    # connected (an HTTP 200 within 10 minutes, section 9.2).
+    # connected (an HTTP 200 within 10 minutes, SimpleTerm if/usage-ask#conditions).
     if ($op.link.kind -ceq 'tunnel') { [void](Write-FileB (Join-Path $RunDir ('tun.' + (Short $op.link.link) + '.last')) ([string](Now-Epoch) + ' ' + $code + "`n")) }
     $shown = $push
     if (-not $shown) { $shown = '-' }
@@ -1932,7 +1926,7 @@ function Update-Spec([string]$extra) {
     $Script:V2 = $true
 }
 
-# The agent's version for a cached `--version` (D13): its executable's path and
+# The agent's version for a cached `--version` (SimpleTerm hist/event-v2#d13): its executable's path and
 # the version, in run/ver.<name>; run again by a child when the executable is
 # newer than the cache or moved. The first dotted number of the output is taken.
 function Update-VerCache([string]$name) {
@@ -2042,7 +2036,7 @@ function Get-TopVersion([string]$s) {
     return ''
 }
 
-# AV and AVS: the agent's version and where it came from (section 10.1).
+# AV and AVS: the agent's version and where it came from (SimpleTerm if/hook-events#identification).
 function Get-AgentVersion {
     $Script:AV = ''
     $Script:AVS = ''
@@ -2097,7 +2091,7 @@ function Get-CodexPm {
     return $pm
 }
 
-# The common fields (section 3) as @-parameters, once per run.
+# The common fields (SimpleTerm if/event-v2#fields) as @-parameters, once per run.
 function Initialize-Common {
     if ($Script:V2C) { return }
     $Script:V2C = $true
@@ -2154,7 +2148,7 @@ function Initialize-V2([string]$extra) {
     Update-Spec ($extra + '@.tms' + $Tab + 's' + $Tab + (Get-Tms) + $Nl)
 }
 
-# --- states and results to the tunnel (sections 6.2, 5.6) -----------------------
+# --- states and results to the tunnel (SimpleTerm if/event-v2-turn#state, if/ssh-tunnel-wait#resolved) -----------------------
 
 function Test-HasTunnel {
     foreach ($f in $Script:LinkFiles) {
@@ -2163,7 +2157,7 @@ function Test-HasTunnel {
     return $false
 }
 
-# A state event (section 6.2) to the tunnels, when the session's state
+# A state event (SimpleTerm if/event-v2-turn#state) to the tunnels, when the session's state
 # changed, one a second at most (a change within the second goes a second later
 # unless another replaced it). A subagent's start or stop is an event of its
 # own: sent each time, at once, and it neither replaces a session state nor is
@@ -2221,7 +2215,7 @@ function Send-State([string]$st, [string]$extra, [switch]$Sync) {
     $Script:NoMsg = $sm
 }
 
-# A result event (section 5.6) to the tunnel $link: scope, out, the request
+# A result event (SimpleTerm if/ssh-tunnel-wait#resolved) to the tunnel $link: scope, out, the request
 # event's rid, decision id or window kind. Sent and finished here.
 function Send-Result($link, [string]$scope, [string]$out, [string]$rrid, [string]$aw) {
     if ($null -eq $link -or $link.kind -cne 'tunnel') { return }
@@ -2247,7 +2241,7 @@ function Send-Result($link, [string]$scope, [string]$out, [string]$rrid, [string
     $Script:Ts = $save[4]
 }
 
-# --- session records (section 8.2) --------------------------------------------
+# --- session records (SimpleTerm if/session-record#files) --------------------------------------------
 
 # Only sessions started in SimpleTerm (SIMPLETERM=1), with an id that can be
 # resumed. The file name is the id, or the start of its SHA-256 when it has
@@ -2287,7 +2281,7 @@ function Update-SessBeat([switch]$Force) {
     if (Set-Touch ($Script:Sess + '.beat')) { [void](Write-FileB $bt ([string]$Script:Now + "`n")) }
 }
 
-# The session's title and where it came from (section 10.7): SessTitle
+# The session's title and where it came from (SimpleTerm if/hook-events-turn#session-fields): SessTitle
 # (JSON-escaped), SessTsrc.
 function Get-SessTitle {
     $Script:SessTitle = ''
@@ -2404,7 +2398,7 @@ function Stop-Sess([DateTime]$since) {
 }
 
 # Keeps records whose last activity (.beat or the record, the later) is within
-# 30 days, 200 at most (D11); at most once in ten minutes.
+# 30 days, 200 at most (SimpleTerm hist/session-record#d11); at most once in ten minutes.
 function Invoke-SessKeep {
     $kf = Join-Path $RunDir 'sessions.keep'
     $t = Read-LineB $kf 0
@@ -2595,7 +2589,7 @@ function Get-ClaudeUsage([string]$path) {
 }
 
 # ISO 8601 date-time (YYYY-MM-DDTHH:MM:SS, a fraction, Z or +-HH:MM) to epoch
-# seconds; -1 if it is not one (section 9.1 `at`, the windows' resets). The
+# seconds; -1 if it is not one (SimpleTerm if/usage-report#v2-fields `at`, the windows' resets). The
 # port of isoepoch (ISO_FN) in agent-hook.sh, its int() truncations included.
 function Get-IsoEpoch([string]$t) {
     if ($t -cnotmatch '\A[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt ][0-9]{2}:[0-9]{2}:[0-9]{2}') { return [int64]-1 }
@@ -2708,7 +2702,7 @@ function Get-CodexUsageTail([string]$text, [bool]$skip) {
         }
         if (-not $rl -and ($kv.got.ContainsKey('payload.rate_limits.primary.used_percent') -or $kv.got.ContainsKey('payload.rate_limits.plan_type'))) {
             $rl = $true
-            # The record time is when Codex learned these values (section 9.1).
+            # The record time is when Codex learned these values (SimpleTerm if/usage-report#v2-fields).
             $at = Get-IsoEpoch (Get-Field $kv 'timestamp')
             $id = [regex]::Replace((Get-Field $kv 'payload.rate_limits.limit_id'), '[^A-Za-z0-9_.-]', '')
             # (A null limit_id is Codex's own: the ask names it codex too.)
@@ -2788,7 +2782,7 @@ function Get-CostJson([string]$usd, [string]$tin, [string]$tout) {
 }
 
 # Grok Build: tokens and cost of the session from its usage.json (no limits;
-# GROK_COST, section 9.3), the last of ~/.grok/sessions/*/<session>/usage.json.
+# GROK_COST, SimpleTerm if/usage-report-agents#agent-grok), the last of ~/.grok/sessions/*/<session>/usage.json.
 # costUsdTicks: 10^-10 USD each (xAI cost_in_usd_ticks); micro-USD exact.
 function Get-GrokCost {
     if (-not (Test-Id $Script:RawSid)) { return '' }
@@ -2918,7 +2912,7 @@ function Test-AwkOne([string]$v) {
 
 # A usage line (see Get-UsageLine) -> @{ osc (the OSC 9 body: v1, none
 # without a context); json (the v1 fields of the `usage` event, with each
-# window's `src` and `at`, section 9.1) } (USAGE_FMT).
+# window's `src` and `at`, SimpleTerm if/usage-report#v2-fields) } (USAGE_FMT).
 function Format-UsageLine([string]$line) {
     $r = @{ osc = ''; json = '' }
     $k = $line.IndexOf([char]10)
@@ -2976,7 +2970,7 @@ function Format-UsageLine([string]$line) {
 
 # Reports context, rate limits and cost when they changed: an OSC 9 for the
 # terminal (Claude Code in SimpleTerm, UsageSeq; v1, context and windows only)
-# and a `usage` event for the SSH tunnel links (section 9.1). The relay gets
+# and a `usage` event for the SSH tunnel links (SimpleTerm if/usage-report#v2-fields). The relay gets
 # none: it does not push them (an iOS push is always an alert) and every
 # request costs a function call. At a turn's end it may also ask the agent
 # (Invoke-UsageAsk). As usage_report in agent-hook.sh.
@@ -3018,7 +3012,7 @@ function Get-UsageRid {
 }
 
 # The `usage` event (UsageJson, then $tail: uq, cost) to the tunnels, with the
-# common fields (section 9.1); once a tunnel took it, $markText goes to the
+# common fields (SimpleTerm if/usage-report#v2-fields); once a tunnel took it, $markText goes to the
 # run file $markName (usage_send). -Sync sends from this process (a usage
 # ask's child, already in the background).
 function Send-Usage([string]$rid, [string]$tail, [string]$markName, [string]$markText, [switch]$Sync) {
@@ -3037,9 +3031,9 @@ function Send-Usage([string]$rid, [string]$tail, [string]$markName, [string]$mar
     $Script:UsageV2 = ''
 }
 
-# --- usage asks (TDS_AGENT_EVENTS_V2 section 9.2) ----------------------------------
+# --- usage asks (SimpleTerm if/usage-ask#conditions) ----------------------------------
 
-# Every version and OS is asked (D22, 2026-11-03 user decision). Measured
+# Every version and OS is asked (SimpleTerm hist/usage-ask#d22, 2026-11-03 user decision). Measured
 # against a local mock API (2026-11-03, .hjc/research/2026-11-03-usage-ask of
 # the app): 0 model requests in 22 asks of Claude Code 2.1.316 and 2.1.317 and
 # 11 of Codex 0.165.0 on macOS (the same harness caught 6 and 31 in real
@@ -3155,7 +3149,7 @@ function Add-AskStopped([string]$v) {
     [void](Write-FileB $off ($old + $v + "`n"))
 }
 
-# The failed asks in a row of executable version $v (D22; ask_fails): the first
+# The failed asks in a row of executable version $v (SimpleTerm hist/usage-ask#d22; ask_fails): the first
 # line of run/ask.<agent>.fail (its first 4 KiB), `<version> <count>`; 0 if it
 # is another version or not of that form.
 function Get-AskFails([string]$v) {
@@ -3168,7 +3162,7 @@ function Get-AskFails([string]$v) {
 # After an ask: an answer clears the count; a failed one (failed, timeout;
 # $failed) adds one, from 1 for another version, written whole to
 # run/ask.<agent>.fail.<pid> and renamed over the file (not counted if that
-# fails); the third stops that version (D22; ask_fail_count). Sign-in results
+# fails); the third stops that version (SimpleTerm hist/usage-ask#d22; ask_fail_count). Sign-in results
 # (auth, not-subscriber) do not come here.
 function Update-AskFails([string]$v, [bool]$failed) {
     $ff = Join-Path $RunDir ('ask.' + $Script:Agent + '.fail')
@@ -3227,11 +3221,10 @@ function New-AskPsi([string]$exe, [string]$argLine) {
     return $psi
 }
 
-# The version of agent executable $exe, which the ask would run (section 9.2
-# condition 6, D21, D22; ask_bin_version): @{ bv; exe }, exe the file that the
+# The version of agent executable $exe, which the ask would run (SimpleTerm if/usage-ask#conditions condition 6, hist/usage-ask#d21, hist/usage-ask#d22; ask_bin_version): @{ bv; exe }, exe the file that the
 # ask then runs. Its links are followed to the end: .../versions/<version> (a
 # native Claude Code install) gives the version. Otherwise run/ver.<agent>
-# (D13, section 10.1: that file's path, and its --version's first dotted
+# (SimpleTerm hist/event-v2#d13, if/hook-events#version-cache: that file's path, and its --version's first dotted
 # number or an empty line if it gave none) is used for the same file while the
 # file is not newer: `unknown` if it holds no version. Else a child measures it
 # again (15 seconds at most) and bv stays '': no ask this turn.
@@ -3279,7 +3272,7 @@ function Get-AskBinVersion([string]$exe) {
     return $res
 }
 
-# True if $v is a version as av is written (section 3): [0-9A-Za-z.+_-]{1,32}
+# True if $v is a version as av is written (SimpleTerm if/event-v2#fields): [0-9A-Za-z.+_-]{1,32}
 # (ask_ver_ok).
 function Test-AskVer([string]$v) {
     return ($v -cmatch '\A[0-9A-Za-z.+_-]{1,32}\z')
@@ -3320,7 +3313,7 @@ function Invoke-AskVerChild($job) {
 # At the end of a turn, while the app is connected, at most every 5 minutes
 # per agent and settings folder: asks Claude Code or Codex for its limits in a
 # detached child (stdio closed, 20 seconds at most), unless asks of the version
-# of the executable that the ask runs were stopped (section 9.2, D21, D22).
+# of the executable that the ask runs were stopped (SimpleTerm if/usage-ask#failures, hist/usage-ask#d21, hist/usage-ask#d22).
 # After a failed sign-in or an answer of no plan limits (not-subscriber) it
 # asks again only once the agent's credentials file changed. usage_ask=off in
 # agent-hook.conf turns it off; usage_ask_codex=off turns off Codex's only
@@ -3524,7 +3517,7 @@ function Get-ClaudeAskWin($m, [string]$id, [string]$p, [string]$w, [string]$at) 
 }
 
 # Claude Code get_usage control response (facts) -> "OK <usage line>" or "ERR
-# <uq.err>" (section 9.3; CLAUDE_USAGE). $at: the epoch the answer came. An
+# <uq.err>" (SimpleTerm if/usage-report-agents#agent-claude; CLAUDE_USAGE). $at: the epoch the answer came. An
 # answer whose session shows any model spend (cost, API time or a model's
 # usage; measured 0 in every ask, 2.1.316 and 2.1.317) is "ERR spent": asks
 # of that version stop.
@@ -3638,7 +3631,7 @@ function Invoke-AskChild($job) {
             @('{"type":"control_request","request_id":"1","request":{"subtype":"get_usage","skip_behaviors":true}}') @() '' $w2
         # A hook ran in the ask (--include-hook-events shows it; measured 0):
         # the probe guard did not hold or the ask ran as a turn, so as with
-        # spend (D21).
+        # spend (SimpleTerm hist/usage-ask#d21).
         $head = Get-AskHead $q
         foreach ($k in @('hook_started', 'hook_progress', 'hook_response')) {
             if ($head.Contains('{"type":"system","subtype":"' + $k + '"')) { $hk = $true }
@@ -3662,7 +3655,7 @@ function Invoke-AskChild($job) {
     if ($hk) { $err = 'spent' }
     if ($err -ceq 'spent') {
         # The ask cost a model call: no more asks of this executable version
-        # (added to the set, D21); a failed ask too.
+        # (added to the set, SimpleTerm hist/usage-ask#d21); a failed ask too.
         Add-AskStopped $bv
         $err = 'failed'
         Update-AskFails $bv $true
@@ -3741,7 +3734,7 @@ function Test-Once([string]$key) {
     return $false
 }
 
-# --- decisions (TDS_AGENT_EVENTS_V2 section 5) -----------------------------------
+# --- decisions (SimpleTerm if/event-decision#format) -----------------------------------
 
 # A reason the user typed, wrapped as Claude Code reads a user's rejection: a
 # bare reason is read as script output and ignored [measured].
@@ -3758,8 +3751,8 @@ function Write-Decision([string]$d) {
     }
 }
 
-# Prints decision $act (a decision id, section 4.3) in the agent's format, with
-# X* from its extension (section 5.4). False if there is nothing to print for
+# Prints decision $act (a decision id, SimpleTerm if/event-v2-request#can) in the agent's format, with
+# X* from its extension (SimpleTerm hist/response#e11). False if there is nothing to print for
 # it here.
 function Write-V2Decision([string]$act) {
     $a = $Script:Agent
@@ -3807,13 +3800,13 @@ function Split-Fact([string]$line) {
 # The answers of an `answer` decision (E: the event's facts, X: the
 # extension's) in Claude Code's form, or BAD (ANSWER_AWK): an object
 # {question: answer} (a choice by its label, several as an array, typed text as
-# it is, both joined with ", "). Every question must be answered (M11), choices
+# it is, both joined with ", "). Every question must be answered (SimpleTerm hist/event-decision#m11), choices
 # index the original list, typed text only where the question takes it.
 function Get-Answers([string]$factsE, [string]$factsX, [string]$qp, [string]$fq, [string]$fl, [bool]$free, [double]$nq) {
     $E = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     $X = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     $XT = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
-    # (a key given twice counts with its first value, section 5.5; sh: ANSWER_AWK)
+    # (a key given twice counts with its first value, SimpleTerm if/event-v2-limits#same-key; sh: ANSWER_AWK)
     foreach ($line in $factsE.Split([char]10)) { $f = Split-Fact $line; if (-not $E.ContainsKey($f[0])) { $E[$f[0]] = $f[2] } }
     foreach ($line in $factsX.Split([char]10)) { $f = Split-Fact $line; if (-not $X.ContainsKey($f[0])) { $X[$f[0]] = $f[2]; $XT[$f[0]] = $f[1] } }
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
@@ -3867,7 +3860,7 @@ function Get-Answers([string]$factsE, [string]$factsX, [string]$qp, [string]$fq,
     return ($o + '}')
 }
 
-# Judges the decision that link $L brought (section 5.5, rq_judge): JV apply
+# Judges the decision that link $L brought (SimpleTerm if/event-decision#validation, rq_judge): JV apply
 # (JA the decision id), window (nothing to print: a v1 allow of a question),
 # bad (1, 2, 4), changed (3, 5) or none (the wait ended without one).
 function Invoke-Judge($L) {
@@ -3899,7 +3892,7 @@ function Invoke-Judge($L) {
     if ($jd -cne 'allow' -and $jd -cne 'deny') { return }
     if ($jx -ceq 'bad') { $Script:JV = 'bad'; return }
     if ($jx -cne 'ok') {
-        # No extension (an older app, a relay before R2, an alert's quick
+        # No extension (an older app, a relay before R2 (SimpleTerm hist/relay-http#r-changes), an alert's quick
         # action): the decision's default meaning for the request.
         if ($jd -ceq 'deny') { $Script:JA = 'deny' }
         elseif ($jwin -ceq 'question') { $Script:JV = 'window'; return }
@@ -3910,7 +3903,7 @@ function Invoke-Judge($L) {
         $Script:JV = 'apply'
         return
     }
-    # The extension (section 5.2).
+    # The extension (SimpleTerm if/event-decision#dext-plaintext).
     $xv = ''; $xr = ''; $xn = ''; $xd = ''; $xq = ''; $xa = ''; $xs = ''; $xm = ''; $xseen = ''
     $xfacts = (Get-Facts $jp '') -join "`n"
     $xks = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
@@ -3918,7 +3911,7 @@ function Invoke-Judge($L) {
         if (-not $line) { continue }
         $f = Split-Fact $line
         $xk = $f[0]
-        # A key given twice counts with its first value (section 5.5).
+        # A key given twice counts with its first value (SimpleTerm if/event-v2-limits#same-key).
         if (-not $xks.Add($xk)) { continue }
         if ($xk -ceq 'v') { $xv = $f[2] }
         elseif ($xk -ceq 'rid') { $xr = $f[2] }
@@ -3934,7 +3927,7 @@ function Invoke-Judge($L) {
     $nonce = $L.poll.nonce
     if (-not $nonce) { $nonce = '-' }
     if ($xv -cne '1' -or $xr -cne $L.poll.rid -or $xn -cne $nonce -or $xd -cne $jd) { $Script:JV = 'bad'; return }
-    # N10: the request the user saw.
+    # SimpleTerm hist/event-decision#n10: the request the user saw.
     if (-not $jrq -or $xq -cne $jrq) { $Script:JV = 'changed'; return }
     if (-not (',' + $jcan + ',').Contains(',' + $xa + ',')) { $Script:JV = 'bad'; return }
     if (@('allow', 'allow_scope', 'allow_edit', 'answer', 'plan_approve', 'form_accept') -ccontains $xa) {
@@ -3957,7 +3950,7 @@ function Invoke-Judge($L) {
         $Script:XAnswers = Get-Answers ([string]$Script:FactsText) $xfacts 'tool_input.questions' 'question' 'label' $true ([double]$jnq)
         if (-not $Script:XAnswers -or $Script:XAnswers -ceq 'BAD') { $Script:XAnswers = ''; $Script:JV = 'bad'; return }
     }
-    # N10: the other requests that this decision also settles were all seen
+    # SimpleTerm hist/event-decision#n10: the other requests that this decision also settles were all seen
     # (OpenCode only: no other requests here).
     if ((',' + $jaff + ',').Contains(',' + $xa + ',')) {
         if (-not (' ' + $xseen + ' ').Contains(' ' + $jrq + ' ')) { $Script:JV = 'changed'; return }
@@ -3966,7 +3959,7 @@ function Invoke-Judge($L) {
     $Script:JV = 'apply'
 }
 
-# --- waiting for a decision (section 4.6) --------------------------------------
+# --- waiting for a decision (SimpleTerm spec/request-wait#hook-wait) --------------------------------------
 
 # Sends the request in SPEC as event $ev to the links of $links whose kind is
 # $pass (tunnel, relay or all), all at once: rid $rid, decidable $dec (with a
@@ -3982,7 +3975,7 @@ function Send-RqPass($links, [string]$pass, [bool]$dec, [string]$waitov, [string
         $rd = $dec
         $rw = $waitov
         # A question is decidable only where the receiver takes decisions on
-        # questions (fmt=2; for the relay that is R1). Elsewhere it is an alert,
+        # questions (fmt=2; for the relay that is R1, SimpleTerm hist/relay-http#r-changes). Elsewhere it is an alert,
         # and one whose window would hide while the hook waits does not wait.
         if ($ev -ceq 'question' -and $link.fmt -cne '2' -and $rd) {
             $rd = $false
@@ -4005,8 +3998,8 @@ function Send-RqPass($links, [string]$pass, [bool]$dec, [string]$waitov, [string
         $r = Complete-Ingest $p.op
         $meta = $p.op.meta
         if ($r.code -ceq '400' -and $r.err -ceq 'invalid-nh' -and $p.rn -and $p.link.kind -cne 'tunnel') {
-            # The relay lost R1 (rolled back): the same rid once more, not
-            # decidable, and no wait there (section 2.4).
+            # The relay lost R1 (SimpleTerm hist/relay-http#r-changes; rolled back): the same rid once more, not
+            # decidable, and no wait there (SimpleTerm hist/relay-http#r-changes).
             Write-Log ('ingest invalid-nh link=' + (Short $p.link.link) + ': again without a nonce')
             $p.rd = $false
             $p.rn = ''
@@ -4027,7 +4020,7 @@ function Send-RqPass($links, [string]$pass, [bool]$dec, [string]$waitov, [string
         $p.L.meta = $meta
         $p.L.link = $p.link
         # A v2 app's tunnel that holds a decidable request back for a wait the
-        # user is looking at (held, section 4.6): it hears the request again
+        # user is looking at (held, SimpleTerm if/ssh-tunnel-wait#held): it hears the request again
         # while the agent's window for it is open (Test-RqHeld).
         $p.L.held = ($r.code -ceq '200' -and $r.held -and $r.push -ceq 'suppressed' -and $p.rd -and $kind -ceq 'tunnel' -and
             $fmt -ceq '2' -and $Script:RqMode -ceq 'shared')
@@ -4119,7 +4112,7 @@ function Step-RqPoll($L, [int64]$deadline, [int64]$pollWait) {
 }
 
 # Whether the agent's own window for this request is still open, as far as the
-# hook can tell for sure (TDS_AGENT_EVENTS_V2 section 4.6, the open-window check): 0
+# hook can tell for sure (SimpleTerm if/ssh-tunnel-wait#open-window, the open-window check): 0
 # open, 1 not (closed, another one, or nothing to tell by), 2 not known yet
 # (the agent may record its window a moment after the hook starts). Claude
 # Code only: its session file (sessions\<agent pid>.json under
@@ -4178,10 +4171,10 @@ function Get-RqAlone {
 }
 
 # Tunnels that hold the request back for a wait the user is looking at
-# ($L.held, section 4.6): while the agent's own window for the request is open
+# ($L.held, SimpleTerm if/ssh-tunnel-wait#held): while the agent's own window for the request is open
 # (Get-RqWindow, read once a second), the hook goes on and sends it to them
 # again every 5 seconds, checked just before: one new rid for them all (one
-# event, section 3; the app shows a rid once), a new nonce each. A tunnel that
+# event, SimpleTerm if/event-v2#fields; the app shows a rid once), a new nonce each. A tunnel that
 # now answers sent is waited on; one that no longer answers held is dropped.
 # True while one is kept (rq_held).
 function Test-RqHeld($links, [int64]$start, [int]$agentPid) {
@@ -4216,7 +4209,7 @@ function Test-RqHeld($links, [int64]$start, [int]$agentPid) {
     $nr = New-RandomHex 8
     if (-not (Test-Hex $nr 16)) { return $true }
     # Every tunnel's event is sealed first, so that the check below comes right
-    # before the sends (section 4.6, the delta's grounds).
+    # before the sends (SimpleTerm if/ssh-tunnel-wait#held, the delta's grounds).
     $preps = New-Object 'System.Collections.Generic.List[object]'
     $Script:WaitOv = ''
     $Script:IngMt = '5'
@@ -4264,7 +4257,7 @@ function Test-RqHeld($links, [int64]$start, [int]$agentPid) {
     return $true
 }
 
-# A decision from link $L was dropped (bad or changed, section 5.5): that
+# A decision from link $L was dropped (bad or changed, SimpleTerm if/event-decision#link-result): that
 # link's wait ends; a tunnel of a v2 app hears it at once and gets the request
 # again under a new rid (3 times at most) (rq_reject).
 function Invoke-RqReject($L, [string]$why, [int64]$start) {
@@ -4303,7 +4296,7 @@ function Complete-Request($links, [string]$out, $dl, [string]$act) {
     Start-Child $job
 }
 
-# Sends the request in SPEC (ev $ev) the way $mode says (section 4.6) and
+# Sends the request in SPEC (ev $ev) the way $mode says (SimpleTerm if/ssh-tunnel-wait#link-wait) and
 # waits per link; then prints the agent's answer, or nothing (its safe
 # no-decision), and tells the tunnels how the request ended (request_flow).
 #   shared   every link at once, decidable (Claude Code)
@@ -4315,7 +4308,7 @@ function Invoke-RequestFlow([string]$ev, [string]$mode) {
     $cap = Get-ConfWaitCap $Script:Agent
     $pollWait = Get-ConfPollWait
     # The cap counts from the hook's start (the tunnel's 5 seconds and the
-    # relay's ingest included, section 4.6).
+    # relay's ingest included, SimpleTerm spec/request-wait-link#send-order).
     $start = $Script:T0
     $Script:ResBase = Get-ResLineCount
     $deadline = $start + $cap
@@ -5068,7 +5061,7 @@ function Write-TurnMark {
     [void](Write-FileB (Join-Path $RunDir ($Script:Sid + '.turn')) ($who + "`n" + $ids + "`n"))
 }
 
-# TurnAt: @-parameters of the end of a turn (TDS_AGENT_EVENTS_V2 section 6.1):
+# TurnAt: @-parameters of the end of a turn (SimpleTerm if/event-v2-turn#turn):
 # end, asks (true|false), late. Who started the turn is the turn's mark; the
 # background tasks and schedules come from the event's facts.
 function Set-TurnAt([string]$end, [string]$asks, [string]$late) {
@@ -5089,7 +5082,7 @@ function Set-TurnAt([string]$end, [string]$asks, [string]$late) {
     $Script:TurnAt = $t
 }
 
-# The request kind parameter lines (TDS_AGENT_EVENTS_V2 section 4).
+# The request kind parameter lines (SimpleTerm if/event-v2-request#fields).
 function Set-RkAt([string]$kind, [string]$extra) {
     $Script:RkAt = '@.rkind' + $Tab + 's' + $Tab + $kind + $Nl + '@.rid' + $Tab + 's' + $Tab + $Script:Rid + $Nl + $extra
 }
@@ -5347,7 +5340,7 @@ function Invoke-StopFlow {
 }
 
 # Codex: the plan of turn Tid from the rollout (`item_completed` with item.type
-# Plan, measured on 0.165.0, M2): its text, JSON-escaped, or $null.
+# Plan, measured on 0.165.0, SimpleTerm hist/event-v2-turn#m2): its text, JSON-escaped, or $null.
 function Get-CodexPlan([string]$path) {
     if (-not $path -or -not (Test-Id $Script:Tid)) { return $null }
     $tid = '"turn_id":"' + $Script:Tid + '"'
@@ -5490,7 +5483,7 @@ function Invoke-Event {
         if ($Script:Agent -ceq 'codex') { $rk = 'codex_perm' }
         Set-RkAt $rk ('@.oc' + $Tab + 's' + $Tab + $Nl)
         if ($Script:Tool -ceq 'AskUserQuestion') {
-            # The question's decidable report (section 10.3): this one, not the
+            # The question's decidable report (SimpleTerm if/hook-events#can): this one, not the
             # PreToolUse before it, which waits ask_delay seconds for it.
             $q = $Script:QText
             if (-not $q) { $q = $Script:Desc }
@@ -5504,7 +5497,7 @@ function Invoke-Event {
             if (-not $d) { $d = $Script:Desc }
             Set-Msg ('approve ' + $Script:Tool + ': ' + $d)
             Initialize-V2 $Script:RkAt
-            # Codex hides its prompt while the hook waits (section 4.6).
+            # Codex hides its prompt while the hook waits (SimpleTerm spec/request-wait#hook-wait).
             $w = 'shared'
             if ($Script:Agent -ceq 'codex') { $w = 'hidden' }
             if ($Script:LinkFiles.Count -gt 0) { Invoke-RequestFlow 'permission' $w }
@@ -5625,7 +5618,7 @@ function Invoke-Event {
         if ($Script:Agent -ceq 'codex') {
             $plan = Get-CodexPlan $gf
             if ($null -ne $plan) {
-                # The turn ended on Codex's "Implement this plan?" (M2): a question,
+                # The turn ended on Codex's "Implement this plan?" (SimpleTerm hist/event-v2-turn#m2): a question,
                 # not a done; answered in Codex's window (keys).
                 Set-Msg $plan
                 Set-RkAt 'codex_plan' ('@.plan' + $Tab + 's' + $Tab + $plan + $Nl)
@@ -5683,7 +5676,7 @@ function Invoke-Event {
         return
     }
     if ($ev -ceq 'codex:PreToolUse' -or $ev -ceq 'codex:PostToolUse') {
-        # Registered for the session record's heartbeat only (section 8.3).
+        # Registered for the session record's heartbeat only (SimpleTerm if/session-record#files).
         return
     }
     if ($ev -ceq 'codex-notify:notify') {
@@ -5696,7 +5689,7 @@ function Invoke-Event {
     }
     if ($ev -ceq 'grok:PreToolUse') {
         # Which tool asks next: the Notification of a permission prompt names
-        # none (section 10.2).
+# none (SimpleTerm if/hook-events#request-source).
         Save-FactsKeep 'pre.' 'grokpre' '^(toolName|toolUseId|toolInput)'
         return
     }
@@ -5765,7 +5758,7 @@ try {
     $Script:Agent0 = $Agent
     # Tests only (SIMPLETERM_HOOK_TEST=1): `agent-hook.ps1 <agent> __conf <key>`
     # prints what the hook does with key <key> of agent-hook.conf (the read
-    # vectors of TDS_AGENT_ALERTS section 6.7; as in agent-hook.sh).
+    # vectors of SimpleTerm if/hook-conf-vectors#read-vectors; as in agent-hook.sh).
     if ($env:SIMPLETERM_HOOK_TEST -eq '1' -and $Mode -ceq '__conf' -and $ScriptArgs.Count -gt 2) {
         $k = [string]$ScriptArgs[2]
         $o = ''
@@ -5858,7 +5851,7 @@ try {
         $Script:InputB = $Latin1.GetString($buf, 0, $total).Replace([string][char]0, '').TrimEnd([char]10)
     }
     # Codex runs PreToolUse and PostToolUse hooks for the session record's
-    # heartbeat only (TDS_AGENT_EVENTS_V2 section 8.3): their large tool input
+    # heartbeat only (SimpleTerm if/session-record#files): their large tool input
     # or output is not read, only its start (session_id and the event come
     # first).
     if ($Agent -ceq 'codex' -and $Script:InputB.Length -gt 4096) {
@@ -5965,7 +5958,7 @@ try {
     if ($Script:Sid.Length -gt 80) { $Script:Sid = $Script:Sid.Substring(0, 80) }
     if (-not $Script:Sid) { $Script:Sid = 'nosession' }
     $Script:DirV = $Script:Cwd
-    # A subagent (its own hook events carry its id; section 7).
+    # A subagent (its own hook events carry its id; SimpleTerm if/event-v2-turn#sub).
     $Script:SubId = ''
     if (Test-Id $Script:AgentId) { $Script:SubId = $Script:AgentId }
     $Script:CwdBase = Limit-Json $Script:Cwd 64 256 -Base
@@ -5983,7 +5976,7 @@ try {
     if (@('claude:Stop', 'codex:Stop', 'grok:Stop') -cnotcontains $ev0 -and $Script:HookEvent -cne 'SessionEnd' -and -not $Script:AgentId) {
         Remove-FileQ (Join-Path $RunDir ($Script:Sid + '.pend'))
     }
-    # The heartbeat of the session's record (section 8.2): every hook event.
+    # The heartbeat of the session's record (SimpleTerm if/session-record#files): every hook event.
     if (@('UserPromptSubmit', 'SessionStart', 'SessionEnd') -cnotcontains $Script:HookEvent) { Update-SessBeat }
     Invoke-Event
 } catch {

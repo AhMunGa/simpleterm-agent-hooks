@@ -1,5 +1,5 @@
 {
- "source": "SimpleTerm docs/tech_specs/TDS_AGENT_ALERTS.md section 6.7, read vectors R1-R48 (main 5f524ec1)",
+ "source": "SimpleTerm if/hook-conf-vectors#read-vectors, read vectors R1-R48 (main 5f524ec1)",
  "vectors": [
   {
    "id": "R1",
@@ -251,7 +251,7 @@
    "file_hex": "",
    "key": "usage_ask_codex",
    "want": "on",
-   "what": "기본(D22)"
+   "what": "기본(SimpleTerm hist/usage-ask#d22)"
   },
   {
    "id": "R37",

@@ -52,12 +52,12 @@ const replied = (globalThis.__simpletermReplied ??= new Set());
 // in OpenCode 2.x a `reject` or `always` also settles the session's other
 // open requests, so a request carries them (`others`) and the hook checks,
 // when a decision comes, that the user saw every one still open
-// (TDS_AGENT_EVENTS_V2 sections 4.5, 5.5). The hook reads them from
+// (SimpleTerm if/event-v2-request#affects, if/event-decision#validation). The hook reads them from
 // ~/.simpleterm/run/oc.<session>.pending.
 const pending = (globalThis.__simpletermPending ??= new Map());
 
 // The session's tokens and cost as OpenCode keeps them (session info `cost`
-// and `tokens`), for the usage event's `cost` (TDS_AGENT_EVENTS_V2 section 9.3).
+// and `tokens`), for the usage event's `cost` (SimpleTerm if/usage-report#agents).
 function usage(info) {
   const out = {};
   if (typeof info?.cost === "number" && Number.isFinite(info.cost) && info.cost >= 0) out.cost = info.cost;
@@ -323,7 +323,7 @@ export default {
               cwd,
               tool_name: d.action || "permission",
               tool_input: { command: detail },
-              // event format v2 (TDS_AGENT_EVENTS_V2 sections 4, 10.2)
+              // event format v2 (SimpleTerm if/event-v2-request#fields, if/hook-events#request-source)
               oc: "2",
               request_id: d.id,
               ...(Array.isArray(d.save) ? { save: d.save.map(String) } : {}),
@@ -365,7 +365,7 @@ export default {
         case "form.created": {
           // data: { form: { id, sessionID, title, metadata: {kind}, fields, ... } }:
           // a question (kind question) is answered in the terminal until the
-          // plugin can reply to a form (M8); the alert carries its fields.
+          // plugin can reply to a form (SimpleTerm hist/event-decision#m8); the alert carries its fields.
           const form = d.form || d;
           const fields = Array.isArray(form.fields) ? form.fields : [];
           await runHook(
