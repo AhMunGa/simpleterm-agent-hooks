@@ -1,10 +1,11 @@
 #!/bin/sh
 # SimpleTerm agent hook (POSIX sh), part of the simpleterm-agent-hooks
-# plugin; see README.md and, in the SimpleTerm app repository,
-# docs/tech_specs/TDS_AGENT_ALERTS.md (sections 5 and 6: relay protocol v1,
-# hooks, SSH tunnel) and docs/tech_specs/TDS_AGENT_EVENTS_V2.md (event and
+# plugin; see README.md and, in the SimpleTerm app repository (AhMunGa/simple-term),
+# the SimpleTerm spec IDs index/if-agent-relay (relay protocol v1),
+# index/if-agent-host (hooks, SSH tunnel) and index/if-agent-events (event and
 # decision format v2: request contents, decision lists, decision extensions,
-# results, states, session records) for the contract.
+# results, states, session records) for the contract; main files: if/relay-http,
+# if/event-envelope, if/event-v2, if/event-decision.
 #
 #   sh agent-hook.sh claude          Claude Code hook (event JSON on stdin). Run
 #                                    by Grok Build (GROK_HOOK_EVENT set) it acts
@@ -34,8 +35,7 @@ umask 077
 LC_ALL=C
 export LC_ALL
 
-# A usage ask runs the agent with SIMPLETERM_PROBE=1 (TDS_AGENT_EVENTS_V2
-# section 9.2): hooks it runs do nothing, or the ask would make sessions and
+# A usage ask runs the agent with SIMPLETERM_PROBE=1 (SimpleTerm if/usage-ask#run): hooks it runs do nothing, or the ask would make sessions and
 # alerts of its own.
 [ "${SIMPLETERM_PROBE:-}" = 1 ] && exit 0
 
@@ -247,7 +247,7 @@ function hexv(h,   k, v, c) {
 }'
 
 # MSG (v1, cut) and MSGF (whole: the v2 builder cuts it and records the
-# cut, TDS_AGENT_EVENTS_V2 section 2.2) from JSON-escaped text.
+# cut, SimpleTerm if/event-v2-limits#shrinking) from JSON-escaped text.
 setmsg() {
   MSGF=$1
   MSG=$(json_trim "$1" 200 800)
@@ -354,7 +354,7 @@ hmac_hex() { # key-hex message
     openssl dgst -sha256 2>/dev/null | awk '{ print $NF }'
 }
 
-# Sets ENV_JSON to the section 5.2 envelope of $1 (plaintext) for the loaded link.
+# Sets ENV_JSON to the envelope (SimpleTerm if/event-envelope#envelope) of $1 (plaintext) for the loaded link.
 seal() {
   ENV_JSON=''
   iv=$(rand_hex 16)
@@ -394,10 +394,10 @@ load_link() { # file
   done <"$1"
   [ "$L_V" = 1 ] || { log "link-skip version"; return 1; }
   # kind=tunnel: the app's end of its SSH connection, forwarded to a loopback
-  # port for as long as that connection lives (TDS section 6.5).
+  # port for as long as that connection lives (SimpleTerm if/link-files#tunnel-variant).
   [ "$L_KIND" = tunnel ] || L_KIND=''
   # fmt=2: the receiver takes decision extensions and decidable questions
-  # (TDS_AGENT_EVENTS_V2 section 1.2). Anything else is an older receiver.
+  # (SimpleTerm if/event-v2#announce). Anything else is an older receiver.
   [ "$L_FMT" = 2 ] || L_FMT=''
   is_hex "$L_LINK" 32 && is_hex "$L_SECRET" 64 && is_hex "$L_ENC" 64 && is_hex "$L_MAC" 64 ||
     { log "link-skip fields"; return 1; }
@@ -459,8 +459,8 @@ resp_get() { # file wanted-paths
 
 # --- event payload ---------------------------------------------------------
 
-# Builds the plaintext for the loaded link: the section 5.2 (v1) fields
-# only for notify, usage and test; the v2 fields (TDS_AGENT_EVENTS_V2) too
+# Builds the plaintext for the loaded link: the v1 fields (SimpleTerm if/event-envelope#fields)
+# only for notify, usage and test; the v2 fields (SimpleTerm if/event-v2#fields) too
 # for every other event once V2=1 (SPEC). `usage` carries USAGE_JSON instead
 # of a message; `notify` adds a title.
 plaintext() { # rid ev nonce
@@ -499,7 +499,7 @@ ingest_seal() { # rid ev nonce
   [ -n "$3" ] && nh=$(sha256_hex "$3")
   pt=$(plaintext "$1" "$2" "$3")
   # Test only: the plaintext before it is sealed, to compare the sh and the
-  # PowerShell hook byte for byte (TDS_AGENT_EVENTS_V2 section 2.2): one
+  # PowerShell hook byte for byte (SimpleTerm if/event-v2-limits#shrinking): one
   # file per event and link in directory SIMPLETERM_HOOK_TEST_PLAIN.
   [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ -n "${SIMPLETERM_HOOK_TEST_PLAIN:-}" ] && [ -d "$SIMPLETERM_HOOK_TEST_PLAIN" ] &&
     printf '%s' "$pt" >"$SIMPLETERM_HOOK_TEST_PLAIN/$(printf %.8s "$L_LINK").$2.$1.$$"
@@ -527,8 +527,7 @@ ingest_post() { # rid ev outfile
       ig=$(resp_get "$3" push,held)
       push=$(printf '%s\n' "$ig" | sed -n 's/^push=//p' | tr -cd 'a-z-')
       # The app holds the request back for a wait the user is looking at
-      # and wants it again while it is open (TDS_AGENT_EVENTS_V2 section
-      # 4.6 "held"): the third field says so.
+      # and wants it again while it is open (SimpleTerm if/ssh-tunnel-wait#held): the third field says so.
       case $ig in *held=true*) err=held ;; esac
       ;;
     410) printf '' 2>/dev/null >"$RUN_DIR/$L_LINK.revoked" ;;
@@ -536,7 +535,7 @@ ingest_post() { # rid ev outfile
   esac
   rm -f "$3"
   # The last event to a tunnel and its answer: a usage ask needs the app
-  # connected (an HTTP 200 within 10 minutes, section 9.2).
+  # connected (an HTTP 200 within 10 minutes, SimpleTerm if/usage-ask#conditions).
   [ "$L_KIND" = tunnel ] && printf '%s %s\n' "$(date +%s)" "$code" >"$RUN_DIR/tun.$(printf %.8s "$L_LINK").last" 2>/dev/null
   log "ingest ev=$2 link=$(printf %.8s "$L_LINK") http=$code push=${push:--}"
   printf '%s %s %s' "${push:-http$code}" "$code" "${err:--}"
@@ -582,12 +581,12 @@ send_bg() { # ev [rid] [all|tunnel|relay] [file text]
   ) </dev/null >/dev/null 2>&1 &
 }
 
-# --- event format v2 (TDS_AGENT_EVENTS_V2) ---------------------------------------
+# --- event format v2 (SimpleTerm if/event-v2) ---------------------------------------
 
 TAB=$(printf '\t')
 NL='
 '
-# Normalizing and cutting JSON-escaped text (section 2.2), shared by the
+# Normalizing and cutting JSON-escaped text (SimpleTerm if/event-v2-limits#shrinking), shared by the
 # programs below; CTRLRE is set in their BEGIN.
 NORM_FN='
 function nhex(h,   k, v, c) {
@@ -600,8 +599,7 @@ function nhex(h,   k, v, c) {
   }
   return v
 }
-# JSON-escaped string content s, normalized (TDS_AGENT_EVENTS_V2 section
-# 2.2): escapes stay as received; control characters and the escapes that
+# JSON-escaped string content s, normalized (SimpleTerm if/event-v2-limits#shrinking): escapes stay as received; control characters and the escapes that
 # stand for them become a space (keepnl keeps \n, \t, \u000a and \u0009);
 # lone surrogates and bytes that are not well-formed UTF-8 (overlong forms,
 # encoded surrogates included) become a space, one per byte; a broken
@@ -795,10 +793,10 @@ END {
 }
 '
 
-# The v2 fields of an event (section 3) as spec lines `path TAB o|a|s|r TAB
+# The v2 fields of an event (SimpleTerm if/event-v2#fields) as spec lines `path TAB o|a|s|r TAB
 # value`, from the facts and `@.<key>` parameters (strings, JSON-escaped):
-# common fields, the request (section 4; rkind names how this agent asked),
-# the end of a turn (section 6.1), a state (6.2) or a result (5.6). Lines
+# common fields, the request (SimpleTerm if/event-v2-request#fields; rkind names how this agent asked),
+# the end of a turn (SimpleTerm if/event-v2-turn#turn), a state (SimpleTerm if/event-v2-turn#state) or a result (SimpleTerm if/ssh-tunnel-wait#resolved). Lines
 # starting with # are notes for the waiting hook (#smap: the original index
 # of each Claude scope).
 V2_SPEC='
@@ -1088,7 +1086,7 @@ function req(rk,   id, win, tool, wait, can, t, v, others, no, k, oc, aff) {
   scopes()
   if (win == "plan" && rk == "claude_perm") { A("req.modes"); out("req.modes.0", "s", "default"); out("req.modes.1", "s", "accept_edits") }
   # OpenCode 1.19 and 2.x: always, also with no other request open now, as
-  # one may open before the decision comes (section 4.5).
+  # one may open before the decision comes (SimpleTerm if/event-v2-request#affects).
   if (rk == "oc_perm" && P("oc") != "1.0") {
     aff = ""
     if (inlist(can, "allow_scope")) aff = "allow_scope"
@@ -1168,11 +1166,11 @@ END {
 '
 
 # Builds the plaintext for one link from the v1 fields (`=key TAB value`) and
-# the spec: the link's variant of the request (section 4.3), then the field
-# limits and the deterministic cuts of section 2.2 (the PowerShell hook does
+# the spec: the link's variant of the request (SimpleTerm if/event-v2-request#can), then the field
+# limits and the deterministic cuts of SimpleTerm if/event-v2-limits#shrinking (the PowerShell hook does
 # the same, byte for byte). Prints the plaintext, then META lines.
 V2_BUILD='
-# V2 plaintext builder (TDS_AGENT_EVENTS_V2 sections 2.1, 2.2, 3): the v1
+# V2 plaintext builder (SimpleTerm if/event-v2-limits#path-limits, if/event-v2-limits#shrinking, if/event-v2#fields): the v1
 # fields (lines "=key TAB value") and the v2 spec (lines "path TAB type TAB
 # value", types o a s r) for one link (kind tunnel|relay, fmt2, dec: whether
 # it carries a nonce, waitov) in; the plaintext out, and META lines.
@@ -1203,7 +1201,7 @@ function ser(i,   s, k, c, f) {
   }
   return s ((NT[i] == "o") ? "}" : "]")
 }
-# The cut record (section 2.2 step 6).
+# The cut record (SimpleTerm if/event-v2-limits#shrinking step 6).
 function rec(path, val) {
   if (path in REC) return
   REC[path] = 1
@@ -1258,7 +1256,7 @@ function hascan(d,   i, k) {
   return 0
 }
 function drop(p) { if (node(p)) kill(IDX[p]) }
-# Section 2.2 field limits: STR[generic path] "tunnel relay" bytes (- not
+# Field limits (SimpleTerm if/event-v2-limits#field-limits): STR[generic path] "tunnel relay" bytes (- not
 # sent to the relay), CNT the same for arrays.
 function limits() {
   split("", STR); split("", CNT)
@@ -1310,7 +1308,7 @@ BEGIN { FS = "\t"; N = 0; NT[0] = "o"; NC[0] = 0 }
 END {
   limits()
   budget = (kind == "tunnel") ? 32768 : 2048
-  # variant of this link (section 4.3)
+  # variant of this link (SimpleTerm if/event-v2-request#can)
   if (waitov != "" && node("req.wait")) NV[IDX["req.wait"]] = waitov
   if (!dec) { drop("req.can"); drop("req.scopes"); drop("req.modes"); drop("req.affects"); drop("req.others") }
   else if (!fmt2) {
@@ -1443,7 +1441,7 @@ v2_plain() { # rid ev nonce
     printf '=rid\t%s\n=ev\t%s\n=app\t%s\n=host\t%s\n=cwd\t%s\n' "$1" "$2" "$APP" "$(json_text "$L_LABEL" 100000 100000)" "$CWD_BASEF"
     [ -n "$NOMSG" ] || printf '=msg\t%s\n' "$MSGF"
     # A usage event's own fields: v1 ones (ctx, lims, plan) after cwd, uq and
-    # cost before ts (section 9.1).
+    # cost before ts (SimpleTerm if/usage-report#v2-fields).
     [ "$2" = usage ] && printf '=uv1\t%s\n=uv2\t%s\n' "$USAGE_JSON" "$USAGE_V2"
     printf '=xflags\t%s\n=nonce\t%s\n=ts\t%s\n' "$vx" "$3" "$TS"
     printf '%s\n' "$SPEC"
@@ -1452,10 +1450,10 @@ v2_plain() { # rid ev nonce
   printf '%s\n' "$vo" | sed -n 1p
 }
 
-# The agent's version for a cached `--version` (D13): its executable's path
+# The agent's version for a cached `--version` (SimpleTerm hist/event-v2#d13): its executable's path
 # and the version, in run/ver.<name>; run again in the background when the
 # executable is newer than the cache or moved. The output format is not
-# measured (M16): the first dotted number is taken.
+# measured (SimpleTerm hist/event-v2#m16): the first dotted number is taken.
 ver_cache() { # executable-name
   vb=$(command -v "$1" 2>/dev/null) || return 0
   case $vb in /*) ;; *) return 0 ;; esac
@@ -1515,7 +1513,7 @@ END {
   }
 }'
 
-# AV and AVS: the agent's version and where it came from (section 10.1).
+# AV and AVS: the agent's version and where it came from (SimpleTerm if/hook-events#identification).
 v2_version() {
   AV='' AVS=''
   case $AGENT in
@@ -1543,7 +1541,7 @@ v2_version() {
   [ "${#AV}" -le 32 ] || AV=''
 }
 
-is_id() { # value: section 3 id format
+is_id() { # value: id format of SimpleTerm if/event-v2#fields
   case $1 in '' | *[!A-Za-z0-9._:-]*) return 1 ;; esac
   [ "${#1}" -le 128 ]
 }
@@ -1563,7 +1561,7 @@ codex_pm() {
     END { print pm }'
 }
 
-# The common fields (section 3) as @-parameters, once per run.
+# The common fields (SimpleTerm if/event-v2#fields) as @-parameters, once per run.
 v2_common() {
   [ "$V2C" = 1 ] && return 0
   V2C=1
@@ -1629,7 +1627,7 @@ v2_prep() { # [extra lines]
   v2_spec "$V2X@.tms${TAB}s$TAB$(v2_tms)$NL"
 }
 
-# --- states and results to the tunnel (sections 6.2, 5.6) -----------------------
+# --- states and results to the tunnel (SimpleTerm if/event-v2-turn#state, if/ssh-tunnel-wait#resolved) -----------------------
 
 has_tunnel() {
   while IFS= read -r f; do
@@ -1641,7 +1639,7 @@ EOF
   return 1
 }
 
-# A state event (section 6.2) to the tunnels, when the session's state
+# A state event (SimpleTerm if/event-v2-turn#state) to the tunnels, when the session's state
 # changed, one a second at most (a change within the second goes a second
 # later unless another replaced it). A subagent's start or stop is an event
 # of its own: sent each time, at once, and it neither replaces a session
@@ -1685,10 +1683,10 @@ send_state() { # st [extra]
   SPEC=$ss V2X=$sx NOMSG=$sm
 }
 
-# --- session records (section 8.2) --------------------------------------------
+# --- session records (SimpleTerm if/session-record#files) --------------------------------------------
 
 # Only sessions started in SimpleTerm (SIMPLETERM=1), with an id that can
-# be resumed; OpenCode 2.x not at all (D14: its service's environment is the
+# be resumed; OpenCode 2.x not at all (SimpleTerm hist/session-record#d14: its service's environment is the
 # first TUI's).
 sess_ok() {
   [ "${SIMPLETERM:-}" = 1 ] || return 1
@@ -1717,7 +1715,7 @@ sess_beat() { # [force]
   touch "$SESS.beat" 2>/dev/null && printf '%s\n' "$NOW" >"$bt" 2>/dev/null
 }
 
-# The session's title and where it came from (section 10.7): SESS_TITLE
+# The session's title and where it came from (SimpleTerm if/hook-events-turn#session-fields): SESS_TITLE
 # (JSON-escaped), SESS_TSRC.
 sess_title() {
   SESS_TITLE='' SESS_TSRC=''
@@ -1817,7 +1815,7 @@ sess_end() {
 }
 
 # Keeps records whose last activity (.beat or the record, the later) is
-# within 30 days, 200 at most (D11); at most once in ten minutes.
+# within 30 days, 200 at most (SimpleTerm hist/session-record#d11); at most once in ten minutes.
 sess_keep() {
   kf=$RUN_DIR/sessions.keep
   t=$(cat "$kf" 2>/dev/null)
@@ -1862,9 +1860,8 @@ state_json() { # running|waiting|done -> ,"terminalSequence":... or nothing
 
 # --- permission flow -------------------------------------------------------
 
-# The value of key $1 in agent-hook.conf (section 9.2 D21, its first 4 KiB;
-# a UTF-8 BOM at the start of the file is dropped, TDS_AGENT_ALERTS section
-# 6.7): the first line `key=value` of that key decides, blanks allowed
+# The value of key $1 in agent-hook.conf (SimpleTerm if/hook-conf-file#reading, hist/usage-ask#d21, its first 4 KiB;
+# a UTF-8 BOM at the start of the file is dropped, SimpleTerm if/hook-conf-file#reading): the first line `key=value` of that key decides, blanks allowed
 # around the line and the `=`. From the value a CR, a comment (from the first `#`), the
 # blanks around it and one pair of quotes around all of it are taken away
 # (`usage_ask = "off"  # never`). Empty: the default.
@@ -1887,15 +1884,14 @@ conf_int() { # key default
   v=$(conf_val "$1")
   is_uint "$v" || v=$2
   # Decimal, as the app and the PowerShell hook read it: no leading zeros
-  # ($(( )) reads 060 as octal 48 and fails on 0090; TDS_AGENT_ALERTS
-  # section 6.7 R13).
+  # ($(( )) reads 060 as octal 48 and fails on 0090; SimpleTerm if/hook-conf-vectors#read-vectors R13).
   while :; do
     case $v in 0[0-9]*) v=${v#0} ;; *) break ;; esac
   done
   printf '%s' "$v"
 }
 
-# What the hook does with each key (TDS_AGENT_ALERTS section 6.7):
+# What the hook does with each key (SimpleTerm if/hook-conf-file#keys):
 # the device-wait cap of agent $1 (<agent>_wait, at most 540; agy at most
 # 110: its hook's timeout is 120 seconds).
 conf_wait_cap() { # agent
@@ -1924,7 +1920,7 @@ conf_done_delay() { # agent
   conf_int done_delay $c
 }
 
-# True unless usage (the v1 key) is 0 as a number (00 too, R27): context
+# True unless usage (the v1 key) is 0 as a number (00 too, SimpleTerm if/hook-conf-vectors#read-vectors R27): context
 # and limits are reported.
 conf_usage_on() {
   [ "$(conf_int usage 1)" -ne 0 ]
@@ -1938,7 +1934,7 @@ conf_on() { # key
 }
 
 # The decision response $1: DST DDEC DMAC and the decision extension's
-# envelope DXV DXIV DXCT DXMAC (section 5.1; at the end of the response, so
+# envelope DXV DXIV DXCT DXMAC (SimpleTerm if/event-decision#format; at the end of the response, so
 # the first 8 KiB are read; an older hook reads only 4 KiB).
 resp_decision() {
   DST='' DDEC='' DMAC='' DXV='' DXIV='' DXCT='' DXMAC=''
@@ -2082,7 +2078,7 @@ EOF
   return 1
 }
 
-# --- decisions (TDS_AGENT_EVENTS_V2 section 5) -----------------------------------
+# --- decisions (SimpleTerm if/event-decision#format) -----------------------------------
 
 # A reason the user typed, wrapped as Claude Code reads a user's rejection:
 # a bare reason is read as script output and ignored [measured].
@@ -2117,11 +2113,11 @@ emit_decision() {
 # extension's) in the agent's form, or BAD: Claude Code takes an object
 # {question: answer} (a choice by its label, several as an array, typed text
 # as it is, both joined with ", "), the OpenCode bridge a list per question.
-# Every question must be answered (M11), choices index the original list,
+# Every question must be answered (SimpleTerm hist/event-decision#m11), choices index the original list,
 # typed text only where the question takes it.
 ANSWER_AWK='
 BEGIN { FS = "\t" }
-# (a key given twice counts with its first value, section 5.5)
+# (a key given twice counts with its first value, SimpleTerm if/event-v2-limits#same-key)
 $1 == "E" { if (!($2 in E)) E[$2] = substr($0, length($1) + length($2) + length($3) + 4); next }
 $1 == "X" { if (!($2 in X)) { X[$2] = substr($0, length($1) + length($2) + length($3) + 4); XT[$2] = $3 }; next }
 function lab(q, v,   b) { b = qp "." q ".options." v; return ((b "." fl) in E) ? E[b "." fl] : E[b] }
@@ -2174,8 +2170,8 @@ END {
   }
 }'
 
-# Prints decision $1 (a decision id, section 4.3) in the agent's format,
-# with X_* from its extension (section 5.4). Returns 1 if there is nothing
+# Prints decision $1 (a decision id, SimpleTerm if/event-v2-request#can) in the agent's format,
+# with X_* from its extension (SimpleTerm hist/response#e11). Returns 1 if there is nothing
 # to print for it here.
 v2_emit() { # act
   case $AGENT:$1 in
@@ -2228,7 +2224,7 @@ open_others() { # request id
   done
 }
 
-# Judges the decision that link $1 (rq.$$.$1.*) brought (section 5.5): JV
+# Judges the decision that link $1 (rq.$$.$1.*) brought (SimpleTerm if/event-decision#validation): JV
 # apply (JA the decision id), window (nothing to print: a v1 allow of a
 # question), bad (1, 2, 4), changed (3, 5) or none (the wait ended without
 # one).
@@ -2249,12 +2245,12 @@ rq_judge() { # i
   # OpenCode 1.19 and 2.x settle the session's other open permission
   # requests with always and reject: these decisions are judged by the
   # requests open now, whatever the request carried when it was sent
-  # (section 5.5-5). A question's reject settles only the question.
+  # (SimpleTerm if/event-decision#validation, check 5). A question's reject settles only the question.
   [ "$AGENT" = opencode ] && [ "$OCV" != 1.0 ] && [ "$EVENT" = PermissionRequest ] && jaff=allow_scope,deny,deny_reason
   case $jd in allow | deny) ;; invalid) JV=bad; return 0 ;; *) return 0 ;; esac
   [ "$jx" = bad ] && { JV=bad; return 0; }
   if [ "$jx" != ok ]; then
-    # No extension (an older app, a relay before R2, an alert's quick
+    # No extension (an older app, a relay before R2 (SimpleTerm hist/relay-http#r-changes), an alert's quick
     # action): the decision's default meaning for the request.
     if [ "$jd" = deny ]; then JA=deny
     else
@@ -2266,11 +2262,11 @@ rq_judge() { # i
     JV=apply
     return 0
   fi
-  # The extension (section 5.2).
+  # The extension (SimpleTerm if/event-decision#dext-plaintext).
   xv='' xf='' xr='' xn='' xd='' xq='' xa='' xs='' xm='' xseen='' xks=' '
   xfacts=$(printf '%s' "$jp" | awk "$NORM_FN$JSON_FACTS" 2>/dev/null)
   while IFS="$TAB" read -r xk xt xval; do
-    # A key given twice counts with its first value (section 5.5).
+    # A key given twice counts with its first value (SimpleTerm if/event-v2-limits#same-key).
     case $xks in *" $xk "*) continue ;; esac
     xks="$xks$xk "
     case $xk in
@@ -2283,7 +2279,7 @@ rq_judge() { # i
 $xfacts
 EOF
   if [ "$xv" != 1 ] || [ "$xr" != "$js_rid" ] || [ "$xn" != "$js_nonce" ] || [ "$xd" != "$jd" ]; then JV=bad; return 0; fi
-  # N10: the request the user saw.
+  # SimpleTerm hist/event-decision#n10: the request the user saw.
   [ -n "$jrq" ] && [ "$xq" = "$jrq" ] || { JV=changed; return 0; }
   case ",$jcan," in *",$xa,"*) ;; *) JV=bad; return 0 ;; esac
   case $xa in
@@ -2318,7 +2314,7 @@ EOF
       [ -n "$X_ANSWERS" ] && [ "$X_ANSWERS" != BAD ] || { JV=bad; return 0; }
       ;;
   esac
-  # N10: the other requests that this decision also settles were all seen.
+  # SimpleTerm hist/event-decision#n10: the other requests that this decision also settles were all seen.
   case ",$jaff," in
     *",$xa,"*)
       case " $xseen " in *" $jrq "*) ;; *) JV=changed; return 0 ;; esac
@@ -2330,7 +2326,7 @@ EOF
   JA=$xa JV=apply
 }
 
-# --- waiting for a decision (section 4.6) --------------------------------------
+# --- waiting for a decision (SimpleTerm spec/request-wait#hook-wait) --------------------------------------
 
 # Sends request SPEC as link index $1 to link file $2 when its kind is $8
 # (tunnel, relay or all): rid $3, ev $4, decidable $5 (1: with a nonce),
@@ -2341,7 +2337,7 @@ rq_send() { # i file rid ev dec waitov maxtime pass
   case $8 in tunnel) [ "$L_KIND" = tunnel ] || return 0 ;; relay) [ "$L_KIND" != tunnel ] || return 0 ;; esac
   rd=$5 rw=$6
   # A question is decidable only where the receiver takes decisions on
-  # questions (fmt=2; for the relay that is R1). Elsewhere it is an alert,
+  # questions (fmt=2; for the relay that is R1, SimpleTerm hist/relay-http#r-changes). Elsewhere it is an alert,
   # and one whose window would hide while the hook waits does not wait.
   if [ "$4" = question ] && [ "$L_FMT" != 2 ] && [ "$rd" = 1 ]; then
     rd=0
@@ -2358,8 +2354,8 @@ rq_send() { # i file rid ev dec waitov maxtime pass
   rp=${ri%% *} rc=${ri#* }
   re=${rc#* } rc=${rc%% *}
   if [ "$rc" = 400 ] && [ "$re" = invalid-nh ] && [ -n "$rn" ] && [ "$L_KIND" != tunnel ]; then
-    # The relay lost R1 (rolled back): the same rid once more, not
-    # decidable, and no wait there (section 2.4).
+    # The relay lost R1 (SimpleTerm hist/relay-http#r-changes; rolled back): the same rid once more, not
+    # decidable, and no wait there (SimpleTerm hist/relay-http#r-changes).
     log "ingest invalid-nh link=$(printf %.8s "$L_LINK"): again without a nonce"
     rd=0 rn=''
     ri=$(ingest_raw "$3" "$4" '' "$RUN_DIR/ing.$$.$1")
@@ -2372,7 +2368,7 @@ rq_send() { # i file rid ev dec waitov maxtime pass
 # What link index $1 answered (the loaded link): rq.$$.$1.st "<push>
 # <nonce|-> <rid> <dec> <kind> <http code> <fmt>", and rq.$$.$1.held when a
 # v2 app's tunnel holds a decidable shared request back for a wait the user
-# is looking at (held, section 4.6): it hears the request again while the
+# is looking at (held, SimpleTerm if/ssh-tunnel-wait#held): it hears the request again while the
 # agent's window for it is open (rq_held).
 rq_note() { # i push nonce rid dec code err
   printf '%s %s %s %s %s %s %s\n' "$2" "${3:--}" "$4" "$5" "${L_KIND:-relay}" "$6" "${L_FMT:-1}" >"$RUN_DIR/rq.$$.$1.st"
@@ -2395,7 +2391,7 @@ rq_poll() { # i
   PIDS="$PIDS $!"
 }
 
-# A result event (section 5.6) to the tunnel of link index $1: scope $2,
+# A result event (SimpleTerm if/ssh-tunnel-wait#resolved) to the tunnel of link index $1: scope $2,
 # out $3, the request event's rid $4, decision id or window kind $5.
 rq_result() { # i scope out rrid [act|win]
   load_link "$(cat "$RUN_DIR/rq.$$.$1.f" 2>/dev/null)" || return 0
@@ -2443,8 +2439,7 @@ rq_finish() { # out [i] [act]
   ) </dev/null >/dev/null 2>&1 &
 }
 
-# A decision from link index $1 was dropped ($2 bad or changed, section
-# 5.5): that link's wait ends; a tunnel of a v2 app hears it at once and gets
+# A decision from link index $1 was dropped ($2 bad or changed, SimpleTerm if/event-decision#link-result): that link's wait ends; a tunnel of a v2 app hears it at once and gets
 # the request again under a new rid (3 times at most).
 rq_reject() { # i bad|changed
   read -r xp xn xr xd xk xc xf <"$RUN_DIR/rq.$$.$1.st"
@@ -2473,8 +2468,7 @@ rq_reject() { # i bad|changed
 }
 
 # Whether the agent's own window for this request is still open, as far as
-# the hook can tell for sure (TDS_AGENT_EVENTS_V2 section 4.6, the
-# open-window check): 0 open, 1 not (closed, another one, or nothing to tell
+# the hook can tell for sure (SimpleTerm if/ssh-tunnel-wait#open-window, the open-window check): 0 open, 1 not (closed, another one, or nothing to tell
 # by), 2 not known yet (the agent may record its window a moment after the
 # hook starts). Claude Code only: its session file (sessions/<agent pid>.json
 # under CLAUDE_CONFIG_DIR or ~/.claude, the first 8 KiB) says this session
@@ -2539,10 +2533,10 @@ rq_alone() {
 }
 
 # Tunnels that hold the request back for a wait the user is looking at
-# (rq.$$.<i>.held, section 4.6): while the agent's own window for the request
+# (rq.$$.<i>.held, SimpleTerm if/ssh-tunnel-wait#held): while the agent's own window for the request
 # is open (rq_window), the hook goes on and sends it to them again every 5
 # seconds (RQ_AGAIN), checked just before: one new rid for them all (one
-# event, section 3; the app shows a rid once), a new nonce each. A tunnel
+# event, SimpleTerm if/event-v2#fields; the app shows a rid once), a new nonce each. A tunnel
 # that now answers sent is waited on (rq_poll); one that no longer answers
 # held is dropped (rq_send). True while one is kept.
 rq_held() {
@@ -2578,7 +2572,7 @@ rq_held() {
   hr=$(rand_hex 8)
   is_hex "$hr" 16 || return 0
   # Every tunnel's event is sealed first, so that the check below comes
-  # right before the sends (section 4.6, the delta's grounds).
+  # right before the sends (SimpleTerm if/ssh-tunnel-wait#held, the delta's grounds).
   hready=''
   for hf in "$@"; do
     [ -e "$hf" ] || continue
@@ -2638,7 +2632,7 @@ rq_fire() { # i rid
   rq_note "$1" "$fp" "$fn" "$2" 1 "$fc" "$fe"
 }
 
-# True if a tunnel answered the probe (section 4.6): HTTP 404 with error
+# True if a tunnel answered the probe (SimpleTerm if/ssh-tunnel-http#probe): HTTP 404 with error
 # `unknown` (and not shown:false) to a decision poll of an unknown rid.
 tunnel_probe() {
   tp=0 tjobs=''
@@ -2670,7 +2664,7 @@ EOF
   return 1
 }
 
-# Sends the request in SPEC (ev $1) the way $2 says (section 4.6) and waits
+# Sends the request in SPEC (ev $1) the way $2 says (SimpleTerm if/ssh-tunnel-wait#link-wait) and waits
 # per link; then prints the agent's answer, or nothing (its safe
 # no-decision), and tells the tunnels how the request ended.
 #   shared   every link at once, decidable (Claude Code, OpenCode)
@@ -2685,7 +2679,7 @@ request_flow() { # ev mode
   cap=$(conf_wait_cap "$AGENT")
   POLL_WAIT=$(conf_poll_wait)
   # The cap counts from the hook's start (the tunnel's 5 seconds and the
-  # relay's ingest included, section 4.6).
+  # relay's ingest included, SimpleTerm spec/request-wait-link#send-order).
   start=$T0
   RES_BASE=$(cat "$RUN_DIR/$SID.res" 2>/dev/null)
   deadline=$((start + cap))
@@ -2811,7 +2805,7 @@ EOF
 # --- usage (#342) ------------------------------------------------------------
 
 # ISO 8601 date-time (YYYY-MM-DDTHH:MM:SS, a fraction, Z or +-HH:MM) to
-# epoch seconds; -1 if it is not one (section 9.1 `at`, the windows' resets).
+# epoch seconds; -1 if it is not one (SimpleTerm if/usage-report#v2-fields `at`, the windows' resets).
 ISO_FN='
 function isoepoch(t,   y, mo, d, h, mi, se, r, off, yy, era, yoe, doy, doe) {
   if (t !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][Tt ][0-9][0-9]:[0-9][0-9]:[0-9][0-9]/) return -1
@@ -2964,7 +2958,7 @@ END {
     }
     if (!rl && (("payload.rate_limits.primary.used_percent" in GOT) || ("payload.rate_limits.plan_type" in GOT))) {
       rl = 1
-      # The record time is when Codex learned these values (section 9.1).
+      # The record time is when Codex learned these values (SimpleTerm if/usage-report#v2-fields).
       at = isoepoch(GOT["timestamp"])
       id = GOT["payload.rate_limits.limit_id"]
       gsub(/[^A-Za-z0-9_.-]/, "", id)
@@ -3030,8 +3024,7 @@ END {
 # A usage line "<ctx|-> <win|-> <src|-> <est 0|1> <baseline|-> <plan|->
 # <reached 0|1> [<id>:<pct>:<win min>:<reset epoch>[:<src>[:<at epoch>]]]..."
 # -> two lines: the OSC 9 body (v1; none without a context) and the v1
-# fields of the `usage` event, with each window's `src` and `at` (section
-# 9.1).
+# fields of the `usage` event, with each window's `src` and `at` (SimpleTerm if/usage-report#v2-fields).
 USAGE_FMT='
 function num(v) { return v ~ /^[0-9]+$/ }
 function dec(v) { return v ~ /^[0-9]+([.][0-9]+)?$/ }
@@ -3072,7 +3065,7 @@ NR == 1 {
 
 # Copilot session events (events.jsonl), the facts of its newest
 # model.model_call_success line that has quotaSnapshots -> usage line windows
-# "copilot.<item>:<pct>:<win>:<reset>:file:<at>" (section 9.3): an item
+# "copilot.<item>:<pct>:<win>:<reset>:file:<at>" (SimpleTerm if/usage-report-agents#agent-copilot): an item
 # counts when it is not unlimited and has requests; pct is 100 less the
 # remaining percentage, the window the month before its reset.
 COPILOT_QUOTA=$ISO_FN'
@@ -3099,7 +3092,7 @@ END {
 }'
 
 # Grok usage.json (facts) or the OpenCode bridge (cost, tokens_in,
-# tokens_out) -> the `cost` object, or nothing (section 9.3).
+# tokens_out) -> the `cost` object, or nothing (SimpleTerm if/usage-report#agents).
 COST_FN=$ISO_FN'
 function costjson(usd, tin, tout,   s) {
   s = ""
@@ -3273,7 +3266,7 @@ usage_compute() {
 
 # Reports context, rate limits and cost when they changed: an OSC 9 for the
 # terminal (Claude Code in SimpleTerm, USAGE_SEQ; v1, context and windows
-# only) and a `usage` event for the SSH tunnel links (section 9.1). The relay
+# only) and a `usage` event for the SSH tunnel links (SimpleTerm if/usage-report#v2-fields). The relay
 # gets none: it does not push them (an iOS push is always an alert) and every
 # request costs a function call. At a turn's end it may also ask the agent
 # (usage_ask).
@@ -3311,7 +3304,7 @@ usage_rid() {
 }
 
 # The `usage` event (USAGE_JSON, then $2: uq, cost) to the tunnels, with the
-# common fields (section 9.1); $3 gets text $4 once a tunnel took it.
+# common fields (SimpleTerm if/usage-report#v2-fields); $3 gets text $4 once a tunnel took it.
 usage_send() { # rid tail [file text]
   is_hex "$1" 16 || return 0
   us=$SPEC ux=$V2X um=$NOMSG
@@ -3321,9 +3314,9 @@ usage_send() { # rid tail [file text]
   SPEC=$us V2X=$ux NOMSG=$um USAGE_V2=''
 }
 
-# --- usage asks (TDS_AGENT_EVENTS_V2 section 9.2) ----------------------------------
+# --- usage asks (SimpleTerm if/usage-ask#conditions) ----------------------------------
 
-# Every version and OS is asked (D22, 2026-11-03 user decision). Measured
+# Every version and OS is asked (SimpleTerm hist/usage-ask#d22, 2026-11-03 user decision). Measured
 # against a local mock API (2026-11-03, .hjc/research/2026-11-03-usage-ask
 # of the app): 0 model requests in 22 asks of Claude Code 2.1.316 and
 # 2.1.317 and 11 of Codex 0.165.0 on macOS (the same harness caught 6 and 31
@@ -3371,7 +3364,7 @@ ask_stopped() { # version
   head -c 4096 "$RUN_DIR/ask.$AGENT.off" 2>/dev/null | awk -v v="$1" '$0 == v { f = 1; exit } END { exit !f }'
 }
 
-# How an ask starts its own process group (section 9.2 time): perl's
+# How an ask starts its own process group (SimpleTerm if/usage-ask#run time): perl's
 # setpgrp, else setsid (Linux, BusyBox); without either it cannot (a POSIX
 # shell without job control does not start one: dash needs a terminal for
 # set -m, macOS has no setsid), and its process tree is ended instead.
@@ -3457,17 +3450,15 @@ ask_env() {
   export SIMPLETERM_PROBE
 }
 
-# True if $1 is a version as av is written (section 3): [0-9A-Za-z.+_-]{1,32}.
+# True if $1 is a version as av is written (SimpleTerm if/event-v2#fields): [0-9A-Za-z.+_-]{1,32}.
 ask_ver_ok() { # version
   case $1 in '' | *[!0-9A-Za-z.+_-]*) return 1 ;; esac
   [ "${#1}" -le 32 ]
 }
 
-# The version of agent executable $1, which the ask would run (section 9.2
-# condition 6, D21, D22): ASK_BV, and ASK_EXE the file that the ask then
+# The version of agent executable $1, which the ask would run (SimpleTerm if/usage-ask#conditions condition 6, hist/usage-ask#d21, hist/usage-ask#d22): ASK_BV, and ASK_EXE the file that the ask then
 # runs. Its links are followed to the end: .../versions/<version> (a native
-# Claude Code install) gives the version. Otherwise run/ver.<agent> (D13,
-# section 10.1: that file's path, and its --version's first dotted number or
+# Claude Code install) gives the version. Otherwise run/ver.<agent> (SimpleTerm hist/event-v2#d13, if/hook-events#version-cache: that file's path, and its --version's first dotted number or
 # an empty line if it gave none) is used for the same file while the file is
 # not newer: `unknown` if it holds no version. Else it is measured again in
 # the background (15 seconds at most) and ASK_BV stays empty: no ask this
@@ -3522,7 +3513,7 @@ ask_bin_version() { # executable
   ASK_BV=$v ASK_EXE=$r
 }
 
-# The failed asks in a row of executable version ASK_BV (D22): the first line
+# The failed asks in a row of executable version ASK_BV (SimpleTerm hist/usage-ask#d22): the first line
 # of run/ask.<agent>.fail (its first 4 KiB), `<version> <count>`; 0 if it is
 # another version or not of that form.
 ask_fails() {
@@ -3535,7 +3526,7 @@ ask_fails() {
 # After an ask: an answer ($1 0) clears the count; a failed one (failed,
 # timeout; $1 1) adds one, from 1 for another version, written whole to
 # run/ask.<agent>.fail.<pid> and renamed over the file (not counted if that
-# fails); the third stops that version (D22). Sign-in results (auth,
+# fails); the third stops that version (SimpleTerm hist/usage-ask#d22). Sign-in results (auth,
 # not-subscriber) do not come here.
 ask_fail_count() { # 1|0
   ff=$RUN_DIR/ask.$AGENT.fail
@@ -3559,8 +3550,7 @@ ask_stop() {
 # At the end of a turn, while the app is connected, at most every 5 minutes
 # per agent and settings folder: asks Claude Code or Codex for its limits in
 # the background (stdio closed, 20 seconds at most), unless asks of the
-# version of the executable that the ask runs were stopped (section 9.2,
-# D21, D22). After a failed sign-in or an answer of no plan limits
+# version of the executable that the ask runs were stopped (SimpleTerm if/usage-ask#failures, hist/usage-ask#d21, hist/usage-ask#d22). After a failed sign-in or an answer of no plan limits
 # (not-subscriber) it asks again only once the agent's credentials file
 # changed. usage_ask=off in agent-hook.conf turns it off; usage_ask_codex=off
 # turns off Codex's only (its app-server writes its own state, syncs its
@@ -3670,7 +3660,7 @@ ask_facts() { # text
 }
 
 # Claude Code get_usage control response (facts) -> "OK <usage line>" or
-# "ERR <uq.err>" (section 9.3). at: the epoch the answer came. An answer
+# "ERR <uq.err>" (SimpleTerm if/usage-report-agents#agent-claude). at: the epoch the answer came. An answer
 # whose session shows any model spend (cost, API time or a model's usage;
 # measured 0 in every ask, 2.1.316 and 2.1.317) is "ERR spent": asks of that
 # version stop.
@@ -3777,7 +3767,7 @@ ask_run() { # agent-executable ask-file
       [ "$AQ_RES" = ok ] && A=$(ask_facts '"type":"control_response"' | awk -v at="$at" "$CLAUDE_USAGE" 2>/dev/null)
       # A hook ran in the ask (--include-hook-events shows it; measured 0):
       # the probe guard did not hold or the ask ran as a turn, so as with
-      # spend (D21).
+      # spend (SimpleTerm hist/usage-ask#d21).
       case $(head -c 1048576 "$AQ.out" 2>/dev/null) in
         *'{"type":"system","subtype":"hook_started"'* | *'{"type":"system","subtype":"hook_progress"'* | *'{"type":"system","subtype":"hook_response"'*) hk=1 ;;
       esac
@@ -3800,7 +3790,7 @@ ask_run() { # agent-executable ask-file
   [ -n "$hk" ] && err=spent
   case $err in
     # The ask cost a model call: no more asks of this executable version
-    # (added to the set, D21); a failed ask too.
+    # (added to the set, SimpleTerm hist/usage-ask#d21); a failed ask too.
     spent) ask_stop; err=failed; ask_fail_count 1 ;;
     failed | timeout | unsupported) ask_fail_count 1 ;;
     '') ask_fail_count 0 ;;
@@ -3934,7 +3924,7 @@ else
 fi
 
 # Codex runs PreToolUse and PostToolUse hooks for the session record's
-# heartbeat only (TDS_AGENT_EVENTS_V2 section 8.3): their large tool input or
+# heartbeat only (SimpleTerm if/session-record#files): their large tool input or
 # output is not read, only its start (session_id and the event come first).
 if [ "$AGENT" = codex ]; then
   ih=$(printf '%.4096s' "$INPUT")
@@ -3943,7 +3933,7 @@ fi
 
 # Tests only (SIMPLETERM_HOOK_TEST=1): `agent-hook.sh <agent> __conf <key>`
 # prints what the hook does with key <key> of agent-hook.conf (the read
-# vectors of TDS_AGENT_ALERTS section 6.7).
+# vectors of SimpleTerm if/hook-conf-vectors#read-vectors).
 if [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ "${2:-}" = __conf ]; then
   case ${3:-} in
     usage) if conf_usage_on; then echo on; else echo off; fi ;;
@@ -4036,7 +4026,7 @@ case $AGENT in
     # there only when a subagent's own tool call fires the hook (foreground or
     # background; absent for the main thread).
     WANT='hook_event_name,notification_type,tool_name,tool_input.command,tool_input.file_path,tool_input.url,tool_input.description,tool_input.questions.0.question,session_id,cwd,message,last_assistant_message,error,transcript_path,context_tokens,model,to_model,prompt,source,stop_hook_active,is_interrupt,agent_id'
-    # v2 (TDS_AGENT_EVENTS_V2 section 10.1): turn, permission mode, the
+    # v2 (SimpleTerm if/hook-events#identification): turn, permission mode, the
     # subagent's type, a session's end; from the OpenCode bridge its request
     # id, version family, parent session, message id and session title.
     WANT=$WANT',prompt_id,permission_mode,agent_type,reason,request_id,oc,parent_session_id,message_id,title,cost,tokens_in,tokens_out'
@@ -4065,7 +4055,7 @@ case $AGENT in
     ;;
   copilot)
     # GitHub Copilot CLI (camelCase; notification and Claude-format events
-    # in snake_case): section 10 of TDS_AGENT_EVENTS_V2.
+    # in snake_case): SimpleTerm if/hook-events.
     WANT='hookName,hook_event_name,hookEventName,sessionId,session_id,cwd,transcriptPath,transcript_path,message,notification_type,toolName,tool_name,agentId,agent_id,agentType,agent_type,parentAgentId,parent_agent_id,stopReason,prompt,reason,error.message,error.name,error,stop_hook_active,timestamp,recoverable,errorContext,error_context'
     ;;
 esac
@@ -4694,7 +4684,7 @@ RAWSID=$SID
 SID=$(printf '%s' "$SID" | tr -c 'A-Za-z0-9_-' '_' | cut -c1-80)
 [ -n "$SID" ] || SID=nosession
 DIRV=$CWD
-# A subagent (its own hook events carry its id; section 7).
+# A subagent (its own hook events carry its id; SimpleTerm if/event-v2-turn#sub).
 SUBID=''
 is_id "$AGENTID" && SUBID=$AGENTID
 
@@ -5038,8 +5028,7 @@ bg_all_old() {
   return 0
 }
 
-# TURN_AT: @-parameters of the end of a turn (TDS_AGENT_EVENTS_V2 section
-# 6.1): end $1, asks $2 (true|false), late $3. Who started the turn is the
+# TURN_AT: @-parameters of the end of a turn (SimpleTerm if/event-v2-turn#turn): end $1, asks $2 (true|false), late $3. Who started the turn is the
 # turn's mark (turn_mark); the background tasks and schedules come from the
 # event's facts.
 TASKS='' TLAST='' TGOAL=''
@@ -5133,7 +5122,7 @@ stop_flow() {
 
 # --- v2 helpers of the event handlers ---------------------------------------------
 
-# The request kind parameter lines for v2_prep (TDS_AGENT_EVENTS_V2 section 4).
+# The request kind parameter lines for v2_prep (SimpleTerm if/event-v2-request#fields).
 rk_at() { # kind [extra lines]
   RK_AT="@.rkind${TAB}s$TAB$1$NL@.rid${TAB}s$TAB$RID$NL${2:-}"
 }
@@ -5156,7 +5145,7 @@ facts_add() { # file max-age
 }
 
 # Codex: the plan of turn TID from the rollout (`item_completed` with
-# item.type Plan, measured on 0.165.0, M2): its text, JSON-escaped.
+# item.type Plan, measured on 0.165.0, SimpleTerm hist/event-v2-turn#m2): its text, JSON-escaped.
 codex_plan() { # rollout file
   [ -n "$1" ] && is_id "$TID" || return 1
   tail -c 1048576 "$1" 2>/dev/null | awk -v tid="\"turn_id\":\"$TID\"" '
@@ -5172,7 +5161,7 @@ codex_plan() { # rollout file
 
 # Copilot's session events (transcriptPath, events.jsonl): the last answer
 # (TLAST) and the background shells and subagents that have not ended, as
-# background_tasks facts and kv lines for bg_field (section 10.4).
+# background_tasks facts and kv lines for bg_field (SimpleTerm if/hook-events-turn#turn-end).
 COPILOT_TX='
 function str(s, key,   p, r) {
   p = index(s, "\"" key "\":\"")
@@ -5241,7 +5230,7 @@ sess_turn() { # running|idle [prompt]
   sess_write "$@"
 }
 
-# The heartbeat of the session's record (section 8.2): every hook event.
+# The heartbeat of the session's record (SimpleTerm if/session-record#files): every hook event.
 case $AGENT:$EVENT in
   agy:PreToolUse | grok:PreToolUse) sess_beat ;;
   *:UserPromptSubmit | *:userPromptSubmitted | *:SessionStart | *:sessionStart | *:SessionEnd | *:sessionEnd) ;;
@@ -5257,7 +5246,7 @@ case $AGENT:$EVENT in
     case $AGENT in claude) rk=claude_perm ;; codex) rk=codex_perm ;; *) rk=oc_perm ;; esac
     rk_at "$rk" "@.oc${TAB}s$TAB$OCV$NL"
     if [ "$TOOL" = AskUserQuestion ]; then
-      # The question's decidable report (section 10.3): this one, not the
+      # The question's decidable report (SimpleTerm if/hook-events#can): this one, not the
       # PreToolUse before it, which waits ask_delay seconds for it.
       setmsg "${QTEXT:-$DESC}"
       ask_once || finish
@@ -5269,7 +5258,7 @@ case $AGENT:$EVENT in
       [ -n "$d" ] || d=$DESC
       setmsg "approve $TOOL: $d"
       v2_prep "$RK_AT"
-      # Codex hides its prompt while the hook waits (section 4.6).
+      # Codex hides its prompt while the hook waits (SimpleTerm spec/request-wait#hook-wait).
       w=shared
       [ "$AGENT" = codex ] && w=hidden
       [ -n "$LINKS" ] && request_flow permission "$w"
@@ -5277,7 +5266,7 @@ case $AGENT:$EVENT in
     ;;
   opencode:Question)
     # OpenCode 1.19 question.asked, from the bridge: an answer goes back to
-    # the bridge (section 5.4).
+    # the bridge (SimpleTerm hist/response#e11).
     setmsg "$QTEXT"
     rk_at oc_question "@.oc${TAB}s$TAB$OCV$NL"
     v2_prep "$RK_AT"
@@ -5285,7 +5274,7 @@ case $AGENT:$EVENT in
     ;;
   opencode:Form)
     # OpenCode 2.x form.created (a question): an alert, answered in the
-    # terminal until the plugin can reply to a form (M8).
+    # terminal until the plugin can reply to a form (SimpleTerm hist/event-decision#m8).
     setmsg "${QTEXT:-$LAST}"
     rk_at oc_form "@.oc${TAB}s$TAB$OCV$NL"
     v2_prep "$RK_AT"
@@ -5404,7 +5393,7 @@ case $AGENT:$EVENT in
     gf=''
     [ "$AGENT" = codex ] && gf=$(input_file "$TPATH")
     if [ "$AGENT" = codex ] && plan=$(codex_plan "$gf"); then
-      # The turn ended on Codex's "Implement this plan?" (M2): a question,
+      # The turn ended on Codex's "Implement this plan?" (SimpleTerm hist/event-v2-turn#m2): a question,
       # not a done; answered in Codex's window (keys).
       setmsg "$plan"
       rk_at codex_plan "@.plan${TAB}s$TAB$plan$NL"
@@ -5453,7 +5442,7 @@ case $AGENT:$EVENT in
     sess_turn running "$PROMPT"
     ;;
   codex:PreToolUse | codex:PostToolUse)
-    # Registered for the session record's heartbeat only (section 8.3).
+    # Registered for the session record's heartbeat only (SimpleTerm if/session-record#files).
     ;;
   codex-notify:notify)
     [ "$NTYPE2" = agent-turn-complete ] || finish
@@ -5492,7 +5481,7 @@ case $AGENT:$EVENT in
     ;;
   agy:PreToolUse | agy:PostToolUse)
     if [ "$TOOL" = write_file ] && [ "$RFB" = true ]; then
-      # A plan for review (ArtifactMetadata.RequestFeedback, M3): the Stop
+      # A plan for review (ArtifactMetadata.RequestFeedback, SimpleTerm hist/event-v2-request#m3): the Stop
       # that ends this turn is its review, not a done.
       facts_keep plan. agyplan '^(toolCall\.|stepIdx)'
       finish
@@ -5508,8 +5497,7 @@ case $AGENT:$EVENT in
       run_command | write_file | edit_file | read_file | call_mcp_tool)
         # This hook runs before every call, before agy's permission policy:
         # only with agy_wait > 0 (opt-in), and then only when no tunnel
-        # answers (an app that is connected sees agy's own prompt, section
-        # 4.6), does a request go out and wait.
+        # answers (an app that is connected sees agy's own prompt, SimpleTerm spec/request-wait#hook-wait), does a request go out and wait.
         [ -n "$LINKS" ] && [ "$(conf_wait_cap agy)" -gt 0 ] || finish
         # agy asks before a read only outside the workspace (its policy):
         # a read inside it does not wait.
@@ -5533,8 +5521,7 @@ case $AGENT:$EVENT in
     # Cancelling (Esc) sends no Stop at all.
     note turn
     if [ -f "$RUN_DIR/$SID.agyplan" ] && [ "$FULLYIDLE" != false ] && { [ -z "$ERR" ] || [ "$ERR" = null ]; }; then
-      # The turn ended on a plan for review: a question (section 4.6
-      # "agy plan"), decidable only on a v2 relay while no tunnel answers.
+      # The turn ended on a plan for review: a question (SimpleTerm spec/request-wait-link#agy-plan), decidable only on a v2 relay while no tunnel answers.
       facts_add agyplan 3600
       rm -f "$RUN_DIR/$SID.agyplan" 2>/dev/null
       setmsg "approve plan"
@@ -5576,7 +5563,7 @@ case $AGENT:$EVENT in
     ;;
   grok:PreToolUse)
     # Which tool asks next: the Notification of a permission prompt names
-    # none (section 10.2).
+# none (SimpleTerm if/hook-events#request-source).
     facts_keep pre. grokpre '^(toolName|toolUseId|toolInput)'
     ;;
   grok:PostToolUse)
@@ -5666,14 +5653,14 @@ case $AGENT:$EVENT in
     ;;
   copilot:permissionRequest)
     # It comes for calls whose prompt never shows too (read-only, already
-    # allowed, plan.md): until that can be told from the hook (M9) it sends
+    # allowed, plan.md): until that can be told from the hook (SimpleTerm hist/event-v2-request#m9) it sends
     # nothing and prints nothing (an empty output is Copilot's "no decision";
     # exit 1 or other output would be a denial).
     ;;
   copilot:preToolUse)
     case $TOOL in
       exit_plan_mode)
-        # The plan's review (section 10.4): an alert; answered in Copilot.
+        # The plan's review (SimpleTerm if/hook-events-turn#turn-end): an alert; answered in Copilot.
         v2_facts
         sm=$(printf '%s\n' "$FACTS" | sed -n "s/^toolArgs\\.summary${TAB}s$TAB//p" | head -n 1)
         setmsg "${sm:-plan ready}"
@@ -5710,7 +5697,7 @@ case $AGENT:$EVENT in
     sess_ok && [ ! -f "$SESS.json" ] && sess_turn idle
     ;;
   copilot:agentStop)
-    # A subagent's own stop (agentId set) is not the session's (section 7).
+    # A subagent's own stop (agentId set) is not the session's (SimpleTerm if/event-v2-turn#sub).
     if [ -n "$AGENTID" ]; then
       send_state sub_stop
       finish

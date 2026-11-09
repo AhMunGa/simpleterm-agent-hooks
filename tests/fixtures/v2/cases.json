@@ -687,7 +687,7 @@
   {
    "name": "codex_plan",
    "agent": "codex",
-   "src": "Codex 0.165.0 [measured shapes]; plan at Stop [measured M2]",
+   "src": "Codex 0.165.0 [measured shapes]; plan at Stop [measured SimpleTerm hist/event-v2-turn#m2]",
    "steps": [
     {
      "args": [
@@ -1245,7 +1245,7 @@
   {
    "name": "agy_plan",
    "agent": "agy",
-   "src": "Antigravity CLI 1.4.12 [measured shapes]; plan at Stop [measured M3]",
+   "src": "Antigravity CLI 1.4.12 [measured shapes]; plan at Stop [measured SimpleTerm hist/event-v2-request#m3]",
    "steps": [
     {
      "args": [
@@ -2019,7 +2019,7 @@
   {
    "name": "budget_questions",
    "agent": "claude",
-   "src": "synthetic (sections 2.1, 2.2)",
+   "src": "synthetic (SimpleTerm if/event-v2-limits#path-limits, if/event-v2-limits#shrinking)",
    "steps": [
     {
      "args": [
@@ -2335,7 +2335,7 @@
   {
    "name": "budget_plan_cut",
    "agent": "claude",
-   "src": "synthetic: a long plan (text and file cut per link, section 2.2 stage 0)",
+   "src": "synthetic: a long plan (text and file cut per link, SimpleTerm if/event-v2-limits#shrinking stage 0)",
    "steps": [
     {
      "args": [
@@ -2833,7 +2833,7 @@
    "env": {},
    "conf": {},
    "files": {},
-   "note": "2.2.5 with no other request open: affects and others [] all the same (section 4.5)"
+   "note": "2.2.5 with no other request open: affects and others [] all the same (SimpleTerm if/event-v2-request#affects)"
   },
   {
    "name": "opencode119_alone",
@@ -2876,7 +2876,7 @@
    "env": {},
    "conf": {},
    "files": {},
-   "note": "1.19.5 with no other request open: affects and others [] all the same (section 4.5)"
+   "note": "1.19.5 with no other request open: affects and others [] all the same (SimpleTerm if/event-v2-request#affects)"
   },
   {
    "name": "claude_bad_utf8",

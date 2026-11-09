@@ -319,8 +319,8 @@ def openssl_seal(plain, enc, mac, iv, openssl, prefix="st1."):
 
 
 def t_vectors(s):
-    """Relay protocol v1 vectors (section 5.2): the v1 fields of the plaintext are those of the vector,
-    byte for byte, and the v2 fields come after them, before `ts` (TDS_AGENT_EVENTS_V2 section 3);
+    """Relay protocol v1 vectors (SimpleTerm if/event-envelope#vectors): the v1 fields of the plaintext are those of the vector,
+    byte for byte, and the v2 fields come after them, before `ts` (SimpleTerm if/event-v2#fields);
     the envelope is what openssl makes of the plaintext with the vector keys and IV."""
     s.setup([(LINK_A, {"push": "disabled"})])
     extra = {
@@ -2062,7 +2062,7 @@ def t_usage_codex(s):
     p = rec[0].get("plain_json", {}) if rec else {}
     s.check("usage codex: rollout context, window, baseline",
             p.get("ctx") == {"used": 15159, "win": 258400, "baseline": 12000, "src": "rollout"} and p.get("app") == "codex", str(p))
-    # Section 9.1: the rollout is a file source; at is the token_count record's time.
+    # SimpleTerm if/usage-report#v2-fields: the rollout is a file source; at is the token_count record's time.
     s.check("usage codex: limits and plan", p.get("lims") == [
         {"id": "codex.primary", "pct": 4.0, "win_min": 300, "resets_at": 1795746291, "src": "file", "at": 1793667723},
         {"id": "codex.secondary", "pct": 12.5, "win_min": 10080, "resets_at": 1796000000, "src": "file", "at": 1793667723}]
@@ -2104,7 +2104,7 @@ def t_codex_hooks(s):
     # Codex runs `$SHELL -c '<command>'` with ${PLUGIN_ROOT} replaced (the shell under test here).
     noisy = s.tmp / "noisy-plugin"
     write(noisy / "scripts" / "agent-hook.sh", "echo noise\n")
-    # SessionEnd (R7): Codex 0.165 runs it for every reason ("other" only), at most 3 seconds (more
+    # SessionEnd (SimpleTerm hist/event-v2#r7): Codex 0.165 runs it for every reason ("other" only), at most 3 seconds (more
     # is cut to 3 with a warning) and ends the hook's process group then (measured).
     se = hooks["SessionEnd"][0]
     s.check("codex hooks: SessionEnd for every end, within Codex's 3-second limit",
@@ -2366,7 +2366,7 @@ COPILOT_HOOKS = ROOT / "plugins" / "copilot" / "hooks.json"
 
 
 def t_copilot_hooks(s):
-    """The Copilot plugin (section 12, #381): its own hooks file in Copilot's format; every command
+    """The Copilot plugin (SimpleTerm if/plugin-locations#manifests, #381): its own hooks file in Copilot's format; every command
     finds the plugin's script (PLUGIN_ROOT, or where `copilot plugin install` puts it) and never one
     of another plugin or of the project; with none it prints nothing and exits 0."""
     if s.kind != "sh":
@@ -2719,7 +2719,7 @@ def replies(calls):
     return [c["reply"] for c in calls if "reply" in c]
 
 
-# --- event format v2 (TDS_AGENT_EVENTS_V2) ---------------------------------------
+# --- event format v2 (SimpleTerm if/event-v2) ---------------------------------------
 
 V2_DIR = HERE / "fixtures" / "v2"
 V2_RID = "0123456789abcdef"
@@ -2821,8 +2821,8 @@ def v2_expected():
 
 
 def t_v2_fixtures(s):
-    """Per agent and version (section 10): the plaintext each link gets, byte for byte (the PowerShell
-    hook must give the same bytes: section 2.2), and what the hook prints."""
+    """Per agent and version (SimpleTerm if/hook-events): the plaintext each link gets, byte for byte (the PowerShell
+    hook must give the same bytes: SimpleTerm if/event-v2-limits#shrinking), and what the hook prints."""
     exp = v2_expected()
     for case in v2_cases():
         if s.kind == "ps1" and case["agent"] not in V2_PS1_AGENTS:
@@ -2839,7 +2839,7 @@ def t_v2_fixtures(s):
         s.check("v2 fixture %s: output" % case["name"], [o.strip() for o in outs] == want["stdout"], str(outs)[:400])
 
 
-# Decision extension test vector (TDS_AGENT_EVENTS_V2 section 5.3).
+# Decision extension test vector (SimpleTerm if/event-decision#vectors).
 V2_DEXT_IV = "b0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
 V2_DEXT_PLAIN = ('{"v":1,"fmt":2,"rid":"0123456789abcdef","nonce":"ffeeddccbbaa99887766554433221100","decision":"allow",'
                  '"req":"st-0123456789abcdef","act":"allow_scope","scope":0,"ts":1793232000}')
@@ -2864,7 +2864,7 @@ def behavior(out):
 
 
 def t_v2_dext_vector(s):
-    """Section 5.3: the vector extension, sealed by openssl with the vector keys and IV, is what the
+    """SimpleTerm if/event-decision#vectors: the vector extension, sealed by openssl with the vector keys and IV, is what the
     mock relay sends, and the hook opens and applies it (allow_scope -> the original suggestion)."""
     ct, mac = openssl_seal(V2_DEXT_PLAIN, V_ENC, V_MAC, V2_DEXT_IV, s.openssl or "/usr/bin/openssl", "st1-dext.")
     s.check("dext vector: ct", ct == V2_DEXT_CT, ct)
@@ -2878,7 +2878,7 @@ def t_v2_dext_vector(s):
 
 
 def t_v2_decisions(s):
-    """Section 5.4: each decision the agent's way (Claude Code, Codex), and section 5.5: a decision that
+    """SimpleTerm hist/response#e11: each decision the agent's way (Claude Code, Codex), and SimpleTerm if/event-decision#validation: a decision that
     does not hold (MAC, request, decision list, values) prints nothing and the hook's safe no-decision."""
     def run(dext, decision="allow", inp=None, agent="claude", fmt=2, extra_conf=None):
         s.setup([(LINK_A, {"fmt": fmt, "decision": decision, "after": 1, "dext": dext})], conf=dict({"claude_wait": 20, "codex_wait": 20}, **(extra_conf or {})))
@@ -2921,7 +2921,7 @@ def t_v2_decisions(s):
     b = behavior(out)
     s.check("decision codex deny_reason: message as given, nothing else", b == {"behavior": "deny", "message": "keep build"}, out)
     # A key given twice counts with its first value: in the agent's input (the label the user saw is
-    # the one answered) and in the extension (section 5.5).
+    # the one answered) and in the extension (SimpleTerm if/event-decision#validation).
     pin = {"SIMPLETERM_HOOK_TEST": "1", "SIMPLETERM_HOOK_TEST_NONCE": V_NONCE, "SIMPLETERM_HOOK_TEST_RID": V_RID}
     dq = ('{"session_id":"sdq","cwd":"/w","hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":'
           '{"questions":[{"question":"Which DB?","header":"DB","multiSelect":false,"options":[{"label":"SQLite","label":"Other"},{"label":"Postgres"}]}]}}')
@@ -2937,7 +2937,7 @@ def t_v2_decisions(s):
     s.setup([(LINK_A, {"fmt": 2, "decision": "allow", "after": 1, "dext": {"raw": raw, "iv": V2_DEXT_IV}})], conf={"claude_wait": 20})
     rc, out, err, el = s.run("claude", v2_perm(session="sdx"), pin)
     s.check("first value: an extension's act given twice is its first", behavior(out).get("behavior") == "allow", out + s.log_text()[-200:])
-    # Section 5.5: dropped decisions print nothing.
+    # SimpleTerm if/event-decision#validation: dropped decisions print nothing.
     for name, dext, dec in (("bad MAC", {"act": "allow", "bad_mac": True}, "allow"),
                             ("another request (N10)", {"act": "allow", "req": "st-ffffffffffffffff"}, "allow"),
                             ("not in this link's can", {"act": "allow_scope", "scope": 0}, "allow"),
@@ -2984,7 +2984,7 @@ COPILOT_QUOTA_LINE = json.dumps({"type": "model.model_call_success", "id": "e9",
 
 
 def t_v2_usage(s):
-    """Section 9.1 and 9.3: the usage event's v2 fields from the file sources (Codex rollout src/at, Copilot
+    """SimpleTerm if/usage-report#v2-fields and if/usage-report-agents: the usage event's v2 fields from the file sources (Codex rollout src/at, Copilot
     events.jsonl quotaSnapshots, Grok usage.json and OpenCode cost), to the tunnel only."""
     tun, tctl = s.spawn_mock()
     try:
@@ -3069,7 +3069,7 @@ fi
 
 
 def t_conf_vectors(s):
-    """TDS_AGENT_ALERTS section 6.7 read vectors R1-R46 (tests/fixtures/conf/read-vectors.json): what the hook does
+    """SimpleTerm if/hook-conf-vectors#read-vectors R1-R46 (tests/fixtures/conf/read-vectors.json): what the hook does
     with each key of agent-hook.conf as the app reads it (caps 540 and 110, poll_wait 1-25, usage, the word keys,
     done_delay per agent). The PowerShell hook has no agy_wait nor opencode_wait (no Antigravity, no OpenCode)."""
     vec = json.loads((HERE / "fixtures" / "conf" / "read-vectors.json").read_text(encoding="utf-8"))["vectors"]
@@ -3087,7 +3087,7 @@ def t_conf_vectors(s):
 
 
 def t_v2_usage_ask_gate(s):
-    """Section 9.2 D21/D22: every version is asked, by the version of the executable that the ask runs (a native
+    """SimpleTerm if/usage-ask#conditions, hist/usage-ask#d21, hist/usage-ask#d22: every version is asked, by the version of the executable that the ask runs (a native
     install links it to versions/<v> and the ask runs that file; else the file's --version, cached, `unknown` if it
     gives none, measured again in the background when the file is newer or another, no ask that turn); that version
     stops for good after an answer showing spend or a hook, or 3 failed asks in a row (an answer resets the count;
@@ -3178,7 +3178,7 @@ def t_v2_usage_ask_gate(s):
             n, e = asks(), len(events())
             s.run("claude", stop(sid), {"SIMPLETERM": "1"})
             return bool(wait_for(lambda: asks() > n and len(events()) > e, within))
-        # Any version is asked (D22): executables and a session outside the measured ones.
+        # Any version is asked (SimpleTerm hist/usage-ask#d22): executables and a session outside the measured ones.
         for v in ("2.2.0", "2.1.315"):
             setup(seed=v)
             tr.write_text(trl("2.3.0"))
@@ -3395,17 +3395,17 @@ def t_v2_usage_ask_gate(s):
 
 
 def t_v2_usage_ask(s):
-    """Section 9.2: the usage ask — only while the app is connected (a tunnel's last event an HTTP 200 within 10
+    """SimpleTerm if/usage-ask#conditions: the usage ask — only while the app is connected (a tunnel's last event an HTTP 200 within 10
     minutes), after a turn, every 5 minutes at most, SIMPLETERM_PROBE=1 and ~/.simpleterm/probe, the answer to the
     tunnel as src ask with uq, no ask again after a failed sign-in until the credentials change, usage_ask=off, any
-    session version (D22), Codex on by default and usage_ask_codex=off."""
+    session version (SimpleTerm hist/usage-ask#d22), Codex on by default and usage_ask_codex=off."""
     tun, tctl = s.spawn_mock()
     try:
         tr = write(s.tmp / "tr.jsonl", json.dumps({"type": "user", "version": "2.1.316", "message": {"role": "user", "content": "x"}}) + "\n")
         stop = cc_event("sk1", "Stop", stop_hook_active=False, last_assistant_message="Done.", background_tasks=[], session_crons=[], transcript_path=str(tr))
         run = s.home / ".simpleterm" / "run"
         fake = s.bin / "claude"
-        # The session of every measured ask: no model spend (section 9.2 gate).
+        # The session of every measured ask: no model spend (SimpleTerm if/usage-ask#conditions gate).
         sess = {"total_cost_usd": 0, "total_api_duration_ms": 0, "total_duration_ms": 0, "total_lines_added": 0, "total_lines_removed": 0, "model_usage": {}}
         ok = {"type": "control_response", "response": {"subtype": "success", "request_id": "1", "response": {"session": sess,
             "subscription_type": "max", "rate_limits_available": True, "rate_limits": {
@@ -3473,7 +3473,7 @@ def t_v2_usage_ask(s):
             s.run("claude", stop, {"SIMPLETERM": "1"})
             time.sleep(2.5)
             s.check("ask: usage_ask=%s" % v, asks() == 0, str(asks()))
-        # Any session version is asked (D22).
+        # Any session version is asked (SimpleTerm hist/usage-ask#d22).
         for v in ("2.2.0", "1.0.0"):
             tr.write_text(json.dumps({"type": "user", "version": v, "message": {"role": "user", "content": "x"}}) + "\n")
             setup(ok)
@@ -3544,7 +3544,7 @@ def t_v2_usage_ask(s):
             "codex": snap("codex", 4), "codex_bengalfox": snap("codex_bengalfox", 17)}}}, separators=(",", ":")) + "\n"
         cstop = json.dumps({"session_id": "cx9", "turn_id": "t", "transcript_path": str(ro), "cwd": "/w/repo", "hook_event_name": "Stop",
                             "model": "gpt-5.5", "stop_hook_active": False, "last_assistant_message": "Done."})
-        # On by default (D22); usage_ask_codex=off turns off Codex's asks only.
+        # On by default (SimpleTerm hist/usage-ask#d22); usage_ask_codex=off turns off Codex's asks only.
         for v in ("off", "No", "OFF   # not Codex", '"false"', "0"):
             setup({"id": 1, "result": {"userAgent": "x"}}, conf={"usage_ask_codex": v})
             cseed()
@@ -3586,7 +3586,7 @@ def t_v2_param_keys(s):
 
 
 def t_v2_n10(s):
-    """Section 5.5 N10: a request the user did not see. OpenCode's reject also settles the session's other
+    """SimpleTerm if/event-decision#validation (hist/event-decision#n10): a request the user did not see. OpenCode's reject also settles the session's other
     open requests: applied only if every one open now was seen; a v1 deny never while others are open;
     a request answered in the terminal first is not decided again."""
     oc = json.dumps({"hook_event_name": "PermissionRequest", "session_id": "ses_n", "cwd": "/w", "tool_name": "bash",
@@ -3606,7 +3606,7 @@ def t_v2_n10(s):
         s.check("N10 opencode (%s)" % name, (decision_json(out) or None) == want, out + s.log_text()[-200:])
     # Sent while it was the only open request (no others, so the bridge gave none), and another opened
     # before the decision: always and reject would settle that one too (OpenCode 1.19 and 2.x), so the
-    # decision is judged by the requests open now, not by what the request carried (section 5.5-5).
+    # decision is judged by the requests open now, not by what the request carried (SimpleTerm if/event-decision#validation, check 5).
     for ocv in ("2", "1.19"):
         alone = json.loads(oc)
         alone.pop("others")
@@ -3636,7 +3636,7 @@ def t_v2_n10(s):
     s.setup([(LINK_A, {"decision": "deny", "after": 1, "dext": {"act": "deny_reason", "reason": "no"}})], conf={"claude_wait": 8})
     rc, out, err, el = s.run("claude", v2_perm(session="sess-v1"))
     s.check("N10 a fmt-less link: deny_reason was not offered there -> nothing", out.strip() == "", out)
-    # The decision is there and the agent moved on just before it is printed (section 5.5-6): the
+    # The decision is there and the agent moved on just before it is printed (SimpleTerm if/event-decision#validation, check 6): the
     # terminal's note lands while the hook sleeps between its looks, right after the poll's result.
     # An attempt counts only if the hook had not taken the decision yet when the note was written
     # (its result file still there); otherwise the hook was first and the attempt is repeated.
@@ -3665,9 +3665,9 @@ def t_v2_n10(s):
 
 
 def t_v2_link_results(s):
-    """Section 5.5 link results: a dropped decision ends only that link's wait; a v2 tunnel hears it at
+    """SimpleTerm if/event-decision#link-result link results: a dropped decision ends only that link's wait; a v2 tunnel hears it at
     once (resolved, scope link) and gets the request again under a new rid, 3 times at most; an older
-    tunnel neither. Section 5.6: the request-level result names the last rid each tunnel got."""
+    tunnel neither. SimpleTerm if/ssh-tunnel-wait#resolved: the request-level result names the last rid each tunnel got."""
     tun, tctl = s.spawn_mock()
     try:
         def setup(tunnel_opts, relay_opts, fmt=2, conf=None):
@@ -3722,7 +3722,7 @@ def t_v2_link_results(s):
 
 
 def t_v2_link_waits(s):
-    """Section 4.6: waits per link and the order of sending."""
+    """SimpleTerm if/ssh-tunnel-wait#link-wait: waits per link and the order of sending."""
     tun, tctl = s.spawn_mock()
     try:
         def setup(tunnel_opts, relay_opts, conf=None, tunnel_fmt=2):
@@ -3764,7 +3764,7 @@ def t_v2_link_waits(s):
         # allow would be printed: the cut ingest and the empty output show it, whatever the machine's load.
         s.check("waits: hidden: the cap counts from the hook's start (relay ingest cut to the time left)",
                 out.strip() == "" and el < 30 and "http=000" in s.log_text(), "%.2fs %s" % (el, s.log_text()[-300:]))
-        # A relay that lost R1: the question again, same rid, without nonce, not waited.
+        # A relay that lost R1 (SimpleTerm hist/relay-http#r-changes): the question again, same rid, without nonce, not waited.
         q = json.dumps({"session_id": "sq", "cwd": "/w", "hook_event_name": "PermissionRequest", "tool_name": "AskUserQuestion",
                         "tool_input": {"questions": [{"question": "Which DB?", "options": [{"label": "A"}]}]}})
         setup({"push": "suppressed"}, {"qdec": False}, conf={"claude_wait": 40})
@@ -3780,7 +3780,7 @@ def t_v2_link_waits(s):
 
 
 def t_v2_held(s):
-    """Section 4.6 "보류한 요청 다시 알리기" (#414): a v2 app's tunnel that holds a request back for
+    """SimpleTerm if/ssh-tunnel-wait#held "보류한 요청 다시 알리기" (#414): a v2 app's tunnel that holds a request back for
     a wait the user is looking at answers suppressed with held:true. While Claude Code's session file
     (sessions/<agent pid>.json) says this session still waits on a permission prompt, the same one
     (statusUpdatedAt unchanged), the hook sends the request to that tunnel again every 5 seconds:
@@ -3817,7 +3817,7 @@ def t_v2_held(s):
         def start(session="held-1", env=None, proc=None, file_session=None, **st):
             """The stand-in agent (its pid names the session file) and the hook under it. Claude Code
             records the prompt in that file 5 to 45 ms before the hook starts (3 ms after it at the
-            latest; TDS_AGENT_EVENTS_V2 M31), and the hook gives a file it cannot read 5 seconds.
+            latest; SimpleTerm hist/event-v2-request#m31), and the hook gives a file it cannot read 5 seconds.
             The agent starts the hook only once the file is there, so a loaded test machine cannot
             turn those milliseconds into seconds."""
             cmd = [sys.executable, "-I", "-c", AGENT_GATED_PY, v2_perm(session=session)] + list(s.argv) + ["claude"]
@@ -3920,7 +3920,7 @@ def t_v2_held(s):
         finished(agent, 15)
         (run / ("perm.held-1.%d" % os.getpid())).unlink()
         # A window first written well after the hook started is not taken for its own: the user may
-        # have answered this request and the next prompt come (TDS section 4.6).
+        # have answered this request and the next prompt come (SimpleTerm if/ssh-tunnel-wait#open-window).
         setup(["held"])
         agent, hook = start(at=int(time.time() + 30) * 1000)
         done, out = finished(agent, 20)
@@ -3996,7 +3996,7 @@ def t_v2_held(s):
 
 
 def t_v2_not_sent(s):
-    """Section 4.6: requests that may never show a prompt are not sent. Copilot permissionRequest: nothing
+    """SimpleTerm spec/request-wait-link#no-send: requests that may never show a prompt are not sent. Copilot permissionRequest: nothing
     and an empty output; Antigravity run_command: only with agy_wait > 0 and when no tunnel answers the
     probe (404 unknown, not shown:false)."""
     if s.kind != "sh":
@@ -4066,7 +4066,7 @@ def t_v2_not_sent(s):
 
 
 def t_v2_state(s):
-    """Section 6.2: state events go to tunnels only, when the state changed."""
+    """SimpleTerm if/event-v2-turn#state: state events go to tunnels only, when the state changed."""
     tun, tctl = s.spawn_mock()
     try:
         s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2}), (LINK_A, {"fmt": 2})])
@@ -4096,7 +4096,7 @@ def t_v2_state(s):
         s.check("state: ended", [x for x in st if x.get("st") == "ended"], str(st)[:400])
         s.check("state: no msg in a state event", all("msg" not in x for x in st), str(st)[:300])
         # A subagent's start and stop are events of their own: in the same second as a session state
-        # and as each other, none replaces another (section 6.2).
+        # and as each other, none replaces another (SimpleTerm if/event-v2-turn#state).
         tctl("/_ctl/reset", {})
         tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown")}})
         sub = lambda name, ag: json.dumps({"session_id": "st2", "cwd": "/w", "hook_event_name": name, "agent_id": ag, "agent_type": "explore"})
@@ -4114,7 +4114,7 @@ def t_v2_state(s):
 
 
 def t_v2_sessions(s):
-    """Section 8.2: the session records of SimpleTerm sessions."""
+    """SimpleTerm if/session-record#files: the session records of SimpleTerm sessions."""
     s.setup([(LINK_A, {"push": "disabled"})])
     sd = s.home / ".simpleterm" / "sessions" / "claude-code"
     sid = "872e63d5-f55f-46fa-93db-a0062d1259fb"
@@ -4151,7 +4151,7 @@ def t_v2_sessions(s):
     os.utime(beat, (fut, fut))
     s.run("claude", ev("SessionEnd", reason="exit"), env)
     s.check("session: a late SessionEnd (newer .beat) does not mark it ended", not (sd / (sid + ".ended")).exists())
-    # Codex 0.165's SessionEnd (R7): session_id, transcript_path, cwd, hook_event_name and reason
+    # Codex 0.165's SessionEnd (SimpleTerm hist/event-v2#r7): session_id, transcript_path, cwd, hook_event_name and reason
     # ("other", the only value) [measured]; nothing printed.
     cd = s.home / ".simpleterm" / "sessions" / "codex"
     cx = "019a5c3e-0000-7000-8000-00000000c0de"
@@ -4173,7 +4173,7 @@ def t_v2_sessions(s):
     if s.kind == "sh":
         s.run("opencode", json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "ses_oc2", "cwd": "/w", "oc": "2"}), env)
         s.check("session: none for OpenCode 2.x (D14)", not (s.home / ".simpleterm" / "sessions" / "opencode").exists())
-    # Retention (D11): 30 days by the later of .beat and the record, 200 at most.
+    # Retention (SimpleTerm hist/session-record#d11): 30 days by the later of .beat and the record, 200 at most.
     for f in sd.iterdir():
         f.unlink()
     now = time.time()
@@ -4199,8 +4199,8 @@ def t_v2_sessions(s):
 
 
 def t_v2_versions(s):
-    """Section 10.1: the agent's version where the agent gives none: `--version`, run in the background
-    when the executable is new or newer than the cache (D13); the first dotted number is taken."""
+    """SimpleTerm if/hook-events#version-cache: the agent's version where the agent gives none: `--version`, run in the background
+    when the executable is new or newer than the cache (SimpleTerm hist/event-v2#d13); the first dotted number is taken."""
     if s.kind != "sh":
         return
     s.setup([(LINK_A, {"push": "disabled"})])
@@ -4258,14 +4258,14 @@ def regen_v2(argv0):
 
 def t_v2_opencode_js(s):
     """Event format v2 through the OpenCode plugins: scope (always), a reason with a rejection, the
-    1.19 question routes, the other open requests (section 4.5) and the bridge's pending file."""
+    1.19 question routes, the other open requests (SimpleTerm if/event-v2-request#affects) and the bridge's pending file."""
     if not NODE or s.kind != "sh":
         return
     d = str(s.tmp)
     ask19 = {"type": "permission.asked", "properties": {"id": "per_1", "sessionID": "ses_1", "permission": "bash", "patterns": ["echo a1"],
                                                        "metadata": {"command": "echo a1"}, "always": ["echo *"], "tool": {"messageID": "msg_1", "callID": "c1"}}}
     # (A 1.19 always or reject settles the session's other requests: the app names the ones the user
-    # saw, this one at least, section 5.5-5.)
+    # saw, this one at least, SimpleTerm if/event-decision#validation, check 5.)
     s.setup([(LINK_A, {"fmt": 2, "decision": "allow", "after": 1, "dext": {"act": "allow_scope", "scope": 0, "seen": ["per_1"]}})])
     calls = node_plugin(s, "v1", {"directory": d, "raw": True, "steps": [{"event": ask19}], "wait": 30000, "replies": 1})
     s.check("opencode 1.19 v2: allow_scope -> reply always (raw route)",
@@ -4336,7 +4336,7 @@ def t_opencode_js(s):
     time.sleep(1)
     s.check("opencode 1.x: session.idle -> done with the session title, subagents skipped",
             len(ingests(s, "done")) == 1 and rec[0]["plain_json"].get("msg") == "Fix the tests", str(ingests(s))[:300])
-    # The session's tokens and cost (session info) reach the usage event (TDS_AGENT_EVENTS_V2 section 9.3).
+    # The session's tokens and cost (session info) reach the usage event (SimpleTerm if/usage-report#agents).
     info = {"title": "Fix the tests", "cost": 0.25, "tokens": {"input": 100, "output": 20, "reasoning": 5, "cache": {"read": 50, "write": 10}}}
     want = {"usd": 0.25, "tok_in": 160, "tok_out": 25, "scope": "session"}
     for kind, steps in (("v1", [{"event": {"type": "session.idle", "properties": {"sessionID": "ses_1"}}}]),

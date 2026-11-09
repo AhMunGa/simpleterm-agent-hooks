@@ -395,8 +395,16 @@ only in an interactive shell (zsh: `[[ -o interactive ]] && …`).
 ## Event format v2
 
 From 0.4.0 the plugin adds fields to every event (the numeric `v` stays 1: older apps read the v1
-fields and skip the rest). The contract is `docs/tech_specs/TDS_AGENT_EVENTS_V2.md` of the SimpleTerm
-app; in short:
+fields and skip the rest). The contract is in the SimpleTerm app's specs (`index/if-agent-events`:
+`if/event-v2`, `if/event-v2-request`, `if/event-v2-limits`, `if/event-decision`); in short:
+
+> **Spec IDs.** Names like `if/event-v2#fields` or `hist/event-v2-request#r16` here, in the scripts
+> and in the tests are IDs of the SimpleTerm app's specs, in the SimpleTerm repository
+> (`AhMunGa/simple-term`): the `id:` at the head of a file under `docs/spec/`, `docs/interfaces/`,
+> `docs/data/` or `docs/ops/` (`spec/` feature specs, `if/` interfaces, `data/` data, `hist/` the
+> decisions and measurements next to them in `_history/`, `ops/` runbooks, `index/` the chapter and
+> group READMEs); `#name` is an anchor `{#name}` in that file. To find one, start at
+> `docs/spec/README.md` (top level), go to the group README, then the file.
 
 - **Who sent it**: the format (`fmt`: 2), the plugin's version, the agent's version (from its
   transcript or rollout, `COPILOT_CLI_BINARY_VERSION`, or for OpenCode, Antigravity and Grok Build a
@@ -444,7 +452,7 @@ app; in short:
   after that wait ended; once the prompt closes (answered in the terminal, or another one comes)
   nothing more is sent and the hook ends as before. Older apps never say `held` and older hooks
   ignore it. Other agents' requests are not sent again: their hooks do not wait, and no record of
-  theirs tells an open prompt (SimpleTerm `TDS_AGENT_EVENTS_V2.md` section 4.6, R16, issue #446).
+  theirs tells an open prompt (SimpleTerm `if/ssh-tunnel-wait#held`, `hist/event-v2-request#r16`, issue #446).
 - **Ends and states**: a turn's end carries how it ended, who started it, whether its last message
   asks you something, its last message (tunnel), the background work still running (new this turn
   or older, services), the schedules and an active Codex goal. To the SSH tunnel only: `state`
@@ -749,7 +757,7 @@ Not tested on Windows yet.
   the terminal that started it, so `SIMPLETERM` (session records) and `TMUX`/`STY` (`mux`) may be
   another session's; a Codex session's end comes when the daemon closes the conversation (about 30
   minutes after you quit or the SSH connection drops). `codex --no-daemon` runs hooks in the session
-  itself. SimpleTerm `TDS_AGENT_EVENTS_V2.md` R17, issue #447.
+  itself. SimpleTerm `hist/event-v2-turn#r17`, issue #447.
 - **A held request is told again for Claude Code only.** Other agents' requests held back for a wait
   you are looking at stay off the device once you answer that wait (their hooks do not wait, and no
   record of theirs tells an open prompt; other devices get the relay's push; SimpleTerm issue #446).

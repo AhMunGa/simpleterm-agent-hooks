@@ -13,8 +13,7 @@ envelope with `openssl` (the enc key is part of the test config), checks the MAC
 and `nh == sha256(nonce)`, and signs the decision with the link's mac key
 (`dmac`), exactly as the app would before calling /v1/decide.
 
-It also makes decision extensions (`dext`, event format v2, TDS_AGENT_EVENTS_V2
-section 5): a link (or one entry of its `decisions` plan) configured with
+It also makes decision extensions (`dext`, event format v2, SimpleTerm if/event-decision#format): a link (or one entry of its `decisions` plan) configured with
 `dext: {act, scope?, mode?, reason?, answers?, seen?, req?, rid?, nonce?,
 decision?, bad_mac?, raw?}` gets the extension sealed with the link's keys
 (AES-256-CBC, MAC over "st1-dext." + iv + "." + ct) at the end of the decided
@@ -64,7 +63,7 @@ def decrypt(env, enc_hex, mac_hex):
 
 
 def seal_dext(plain, enc_hex, mac_hex, iv_hex=None, bad_mac=False):
-    """The decision extension envelope (section 5.1) of plaintext `plain` (str)."""
+    """The decision extension envelope (SimpleTerm if/event-decision#format) of plaintext `plain` (str)."""
     import os
     iv = iv_hex or os.urandom(16).hex()
     out = subprocess.run(
@@ -166,7 +165,7 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(raw)
         rec["body"] = body
         if body.get("ev") == "question" and body.get("nh") is not None and link.get("qdec") is False:
-            # A relay before R1 (or rolled back): no nh on a question.
+            # A relay before R1 (SimpleTerm hist/relay-http#r-changes; or rolled back): no nh on a question.
             rec["status"] = 400
             with LOCK:
                 STATE["records"].append(rec)
@@ -210,7 +209,7 @@ class Handler(BaseHTTPRequestHandler):
             STATE["records"].append(rec)
         if push == "held":
             # A v2 app's tunnel holding the request back for a wait the user is looking at
-            # (TDS_AGENT_EVENTS_V2 section 4.6): suppressed, and asked to tell it again.
+            # (SimpleTerm if/ssh-tunnel-wait#open-window): suppressed, and asked to tell it again.
             return self._send(200, {"ok": True, "push": "suppressed", "held": True})
         return self._send(200, {"ok": True, "push": push})
 
@@ -238,7 +237,7 @@ class Handler(BaseHTTPRequestHandler):
             req = STATE["requests"].get((lid, rid))
         if not req:
             # The relay says not-found; the app's tunnel says unknown, and a v2
-            # app adds whether it can show anything (section 4.6 probe).
+            # app adds whether it can show anything (SimpleTerm if/ssh-tunnel-http#probe).
             obj = {"ok": False, "error": link.get("unknown_error", "not-found")}
             if "shown" in link:
                 obj["shown"] = link["shown"]
