@@ -1155,7 +1155,7 @@ END {
   if (P("sub.id") != "") { O("sub"); S("sub.id", P("sub.id")); S("sub.type", P("sub.type"), 1); S("sub.name", P("sub.name"), 1); S("sub.parent", P("sub.parent")); B("sub.bg", P("sub.bg")) }
   S("dir", P("dir"))
   if (P("cfg.var") != "" && P("cfg.path") != "") { O("cfg"); S("cfg.var", P("cfg.var")); S("cfg.path", P("cfg.path")) }
-  S("pm", P("pm")); S("mux", P("mux")); R("tms", P("tms"))
+  S("pm", P("pm")); S("mux", P("mux")); S("pane", P("pane")); R("tms", P("tms"))
   if (P("rkind") != "") req(P("rkind"))
   if (P("turn") == "1") turn()
   S("st", P("st"))
@@ -1561,6 +1561,26 @@ codex_pm() {
     END { print pm }'
 }
 
+# The multiplexer the agent runs in and the id of its pane there (SimpleTerm
+# if/event-v2#common-fields, if/hook-events#identification): MUXV (tmux,
+# screen, herdr, unknown or empty) and PANEV (empty when none may be sent).
+# tmux and screen come first: herdr (0.9.5, measured) drops TMUX, TMUX_PANE
+# and STY from its panes, so with both a tmux or screen was started inside a
+# herdr pane and is the nearer one (it keeps that pane's HERDR_* variables).
+mux_detect() {
+  MUXV='' PANEV=''
+  if [ "$AGENT" = opencode ] && [ "$OCV" = 2 ]; then MUXV=unknown
+  elif [ -n "${TMUX:-}" ]; then MUXV=tmux PANEV=${TMUX_PANE:-}
+  elif [ -n "${STY:-}" ]; then MUXV=screen
+  elif [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ]; then MUXV=herdr PANEV=$HERDR_PANE_ID
+  fi
+  # Codex's default daemon runs every hook with the environment of the TUI
+  # that started it: the id would name another pane.
+  [ "$AGENT" = codex ] && PANEV=''
+  case $PANEV in '' | *[!A-Za-z0-9%._:-]*) PANEV='' ;; esac
+  [ "${#PANEV}" -le 64 ] || PANEV=''
+}
+
 # The common fields (SimpleTerm if/event-v2#fields) as @-parameters, once per run.
 v2_common() {
   [ "$V2C" = 1 ] && return 0
@@ -1603,10 +1623,9 @@ v2_common() {
   fi
   [ "$AGENT" = codex ] && PMODE=$(codex_pm)
   case $PMODE in '' | *[!A-Za-z0-9._:/-]*) ;; *) [ "${#PMODE}" -le 48 ] && at pm "$PMODE" ;; esac
-  if [ "$AGENT" = opencode ] && [ "$OCV" = 2 ]; then at mux unknown
-  elif [ -n "${TMUX:-}" ]; then at mux tmux
-  elif [ -n "${STY:-}" ]; then at mux screen
-  fi
+  mux_detect
+  at mux "$MUXV"
+  at pane "$PANEV"
 }
 
 # Event time in milliseconds where `date` has them (GNU), for `tms`.
@@ -1784,10 +1803,9 @@ sess_write() { # state [prompt]
   cpp=$(printf '%s' "$AT" | sed -n "s/^@\\.cfg\\.path${TAB}s${TAB}//p")
   [ -n "${cvv:-}" ] && [ -n "$cpp" ] && j=$j',"cfg":{"var":"'$cvv'","path":"'$(json_trim "$cpp" 100000 1024)'"}'
   j=$j',"state":"'$1'"'
-  if [ "$AGENT" = opencode ] && [ "$OCV" = 2 ]; then j=$j',"mux":"unknown"'
-  elif [ -n "${TMUX:-}" ]; then j=$j',"mux":"tmux"'
-  elif [ -n "${STY:-}" ]; then j=$j',"mux":"screen"'
-  fi
+  # No pane: a resumed session runs in another one (SimpleTerm hist/session-record#d25).
+  mux_detect
+  [ -n "$MUXV" ] && j=$j',"mux":"'$MUXV'"'
   j=$j'}'
   [ "${#j}" -le 4096 ] || return 0
   printf '%s\n' "$j" >"$SESS.json.$$" 2>/dev/null && chmod 600 "$SESS.json.$$" 2>/dev/null && mv -f "$SESS.json.$$" "$SESS.json" 2>/dev/null
