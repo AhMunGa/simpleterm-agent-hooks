@@ -92,9 +92,11 @@ The end of a turn a schedule started (SimpleTerm `spec/turn-state#scheduled`,
   left at `agentStop` are counted from `events.jsonl` (`session.schedule_created` less
   `session.schedule_cancelled` and a one-shot whose prompt came). The rules above apply: no `done`
   while a schedule is set after a scheduled turn, and the last one goes to the tunnels only. A
-  prompt you type that starts with that mark is read the same way (the mark is text only). A
-  one-shot `/after` run was not measured (`hist/hook-events#e12`). `agent-hook.sh` only: Copilot
-  runs no `agent-hook.ps1`.
+  prompt you type that starts with that mark is yours again at `agentStop`: the session's last
+  `user.message` in `events.jsonl` has a `schedule-<id>` source for a run and none when you typed
+  it, written before `agentStop` (`hist/turn-state#d11`). A one-shot `/after` run (measured on
+  1.0.109) leaves no schedule at its `agentStop` (`hist/hook-events#e12`). `agent-hook.sh` only:
+  Copilot runs no `agent-hook.ps1`.
 - **A failed turn shows an error**: Claude Code's `StopFailure` writes `simpleterm:state=idle` and
   then the new state value `simpleterm:state=error` in the same output, instead of `done` (a failed
   turn showed a green done badge where Claude does not speak OSC 7501). The app shows the error badge

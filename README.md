@@ -389,8 +389,9 @@ there):
   SSH tunnels only and at once (no relay push), with `done_scheduled` on Claude Code's screen, so the
   app shows it in its list without an alert. When that turn ends asking you something it is a plain
   `done` everywhere. Copilot CLI's `/every` (`/loop`) and `/after` follow the same rules: its
-  scheduled prompt starts with `[Scheduled prompt #<id>]`, and the schedules left come from the
-  session's `events.jsonl`. Grok Build 1.0.77 runs each scheduled run as a background subagent: the
+  scheduled prompt starts with `[Scheduled prompt #<id>]` (one you type that starts so is yours:
+  its `user.message` in the session's `events.jsonl` has no `schedule-<id>` source), and the
+  schedules left come from that `events.jsonl`. Grok Build 1.0.77 runs each scheduled run as a background subagent: the
   `subagent-completed-` turn its result opens is the schedule's when its prompt names
   (`scheduler_delete("<id>")`) a schedule of that `Stop`'s or the previous `Stop`'s `sessionCrons`.
 

@@ -2643,6 +2643,19 @@ def t_copilot_schedules(s):
         s.run("copilot", json.dumps(dict(base, prompt="[not a schedule] hi")), env, args=("userPromptSubmitted",))
         turn = (s.home / ".simpleterm" / "run" / "cops-1.turn").read_text().split("\n")[0]
         s.check("copilot schedule: a typed prompt is the user's", turn == "user", turn)
+        # A prompt you typed that starts like a scheduled one: the hook input is the same, but events.jsonl has no
+        # source for it (measured on 1.0.109), so its end is yours: a plain done, to the relay too.
+        reset()
+        ev("session.schedule_created", {"id": 3, "intervalMs": 60000, "prompt": "check status", "recurring": True, "origin": "user"})
+        typed = "[Scheduled prompt #1] hello there"
+        s.run("copilot", json.dumps(dict(base, prompt=typed)), env, args=("userPromptSubmitted",))
+        ev("user.message", {"content": typed})
+        ev("assistant.message", {"content": "Hi."})
+        s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
+              env, args=("agentStop",))
+        r = wait_for(lambda: ingests(s, "done"), 20)
+        s.check("copilot schedule: a typed prompt that starts like a scheduled one ends as yours (done, by user)",
+                len(r) == 1 and (r[0]["plain_json"].get("turn") or {}).get("by") == "user", str(ingests(s))[:300])
     finally:
         tun.terminate()
         tun.wait(5)

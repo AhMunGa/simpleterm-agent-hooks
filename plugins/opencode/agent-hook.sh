@@ -4123,7 +4123,7 @@ PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS='' REQIDIN=''
 OCTITLE='' OCCOST='' OCTIN='' OCTOUT='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX=''
 BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_SEQ=''
 BG_SVC=0 BG_IDMAP='' BG_KEEP='' BG_SHELLS='' BG_IDS='' BG_NOID=0 BG_M=''
-CRON_N=0 CRON_SCHED='' CRON_SUMS='' CRON_IDS='' PROMPT_SCHED=''
+CRON_N=0 CRON_SCHED='' CRON_SUMS='' CRON_IDS='' PROMPT_SCHED='' COPILOT_SRC=''
 
 # --- what the hook reads from the text of a turn ------------------------------
 
@@ -5192,7 +5192,9 @@ stop_flow() {
   # if/hook-events-turn#turn-end):
   #  - Grok: a subagent-completed- turn whose prompt names one of the
   #    session's sessionCrons (this Stop's, or the last Stop's when the turn
-  #    dropped it) is the result of a scheduled run.
+  #    dropped it) is the result of a scheduled run;
+  #  - Copilot: a prompt that starts like a scheduled one is a person's when
+  #    the session's last user.message has no schedule-<id> source.
   if [ "$TURN_BY" = task ] && [ -n "$t3" ]; then
     so_ids=$CRON_IDS
     [ -f "$RUN_DIR/$SID.cronids" ] && so_ids="$so_ids $(cat "$RUN_DIR/$SID.cronids" 2>/dev/null)"
@@ -5202,6 +5204,9 @@ stop_flow() {
     printf '%s\n' "$CRON_IDS" >"$RUN_DIR/$SID.cronids" 2>/dev/null
   elif [ -f "$RUN_DIR/$SID.cronids" ]; then
     rm -f "$RUN_DIR/$SID.cronids" 2>/dev/null
+  fi
+  if [ "$AGENT" = copilot ] && [ "$TURN_BY" = schedule ] && [ -n "$COPILOT_SRC" ]; then
+    case ${COPILOT_SRC#:} in schedule-[0-9]*) ;; *) TURN_BY=user TURN_USER=1 ;; esac
   fi
   bg_ids_finish
   printf '%s\n' "$BG_IDS" >"$RUN_DIR/$SID.stopids" 2>/dev/null
@@ -5328,7 +5333,11 @@ function sid(s,   t) {
 }
 /"type":"session\.schedule_cancelled"/ { delete CR[sid($0)] }
 /"type":"user\.message"/ { s = str($0, "source"); if (s ~ /^schedule-[0-9]+$/ && ONE[substr(s, 10)]) delete CR[substr(s, 10)] }
+# The source of the last prompt: schedule-<id> for a scheduled run, none when
+# a person typed it (it is written before agentStop; measured on 1.0.109).
+/"type":"user\.message"/ { us = ":" str($0, "source") }
 END {
+  if (us != "") print "S\t" us
   m = 0
   for (k = 1; k <= NC; k++) if (CO[k] in CR) {
     i = CO[k]
@@ -5367,6 +5376,7 @@ copilot_tx() {
   [ -n "$tx" ] || return 0
   TLAST=$(printf '%s\n' "$tx" | sed -n "s/^L$TAB//p")
   [ -n "$TLAST" ] && LAST=$TLAST
+  COPILOT_SRC=$(printf '%s\n' "$tx" | sed -n "s/^S$TAB//p")
   v2_facts
   ft=$(printf '%s\n' "$tx" | sed -n "s/^F$TAB//p")
   [ -n "$ft" ] && FACTS="$FACTS$NL$ft"
