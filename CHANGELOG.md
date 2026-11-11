@@ -49,7 +49,7 @@ A held request the hook does not wait on is told again while its window is open 
   the assistant's call with the request's id, no result for it) and for a permission window also
   `events.jsonl` (the last line is `permission_requested`), Claude Code its session file (`input needed`
   for the MCP form; `input needed` or `permission prompt` for a question, first seen after the first
-  send). A request with no record (Claude Code's URL form and `agent_needs_input`, Antigravity CLI's plan
+  send). A request with no record (Claude Code's `agent_needs_input`, Antigravity CLI's plan
   confirmation, Codex, OpenCode, Copilot CLI) is not told again: one log line `held: no record of <agent>'s window to tell it by (stop)`.
 - **Limits**: one sender per request (the mark `run/held.<session>.<request key>` holds its pid; a
   second hook of the same call logs `held: another sender has it (stop)`), at most 8 per user
