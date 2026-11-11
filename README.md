@@ -757,9 +757,10 @@ Not tested on Windows yet.
 - **Claude Code MCP forms** are alerts without the server's name (the `Notification` has none).
 - **Codex's daemon mode** (its default): hooks run in Codex's shared daemon with the environment of
   the terminal that started it, so `SIMPLETERM` (session records) and `TMUX`/`STY`/`HERDR_*` (`mux`)
-  may be another session's (the hook sends no `pane` for Codex for that reason); a Codex session's end comes when the daemon closes the conversation (about 30
-  minutes after you quit or the SSH connection drops). `codex --no-daemon` runs hooks in the session
-  itself. SimpleTerm `hist/event-v2-turn#r17`, issue #447.
+  may be another session's (the hook sends no `pane` for Codex for that reason); a Codex session's
+  end comes when the daemon closes the conversation (about 30 minutes after you quit or the SSH
+  connection drops). `codex --no-daemon` runs hooks in the session itself. SimpleTerm
+  `hist/event-v2-turn#r17`, issue #447.
 - **A held request is told again for Claude Code only.** Other agents' requests held back for a wait
   you are looking at stay off the device once you answer that wait (their hooks do not wait, and no
   record of theirs tells an open prompt; other devices get the relay's push; SimpleTerm issue #446).

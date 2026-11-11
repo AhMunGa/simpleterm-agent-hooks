@@ -4262,6 +4262,23 @@ def t_v2_mux(s):
             rec = sd / (sid + ".json")
             r = json.loads(rec.read_text()) if rec.exists() else None
             s.check("mux %s: session record has mux %s and no pane" % (sid, mux), r is not None and r.get("mux") == mux and "pane" not in r, str(r)[:300])
+        # The events a hook run sends after its first: the result of a decision (`resolved`) …
+        tctl("/_ctl/reset", {})
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown",
+                                                           decisions=[{"decision": "allow", "after": 0.5, "dext": {"act": "allow"}}])}})
+        rc, out, err, el = s.run("claude", v2_perm(session="mx-res-herdr"), herdr)
+        wait_for(lambda: plains(tctl("/_ctl/records")["records"], "resolved"), 10)
+        raw = plains(tctl("/_ctl/records")["records"], "resolved").get("mx-res-herdr")
+        s.check("mux mx-res-herdr: resolved has mux herdr, pane w1:p3",
+                behavior(out).get("behavior") == "allow" and raw is not None and '"mux":"herdr","pane":"w1:p3",' in raw, out + str(raw)[:300])
+        if s.kind == "sh":
+            # … and a usage report (Copilot's quota file, sh only).
+            ev = write(s.tmp / "mxcop" / "events.jsonl", COPILOT_QUOTA_LINE + "\n")
+            tctl("/_ctl/reset", {})
+            s.run("copilot", json.dumps({"hookName": "agentStop", "sessionId": "mx-use-herdr", "cwd": "/w/c", "transcriptPath": str(ev)}), herdr)
+            wait_for(lambda: plains(tctl("/_ctl/records")["records"], "usage"), 20)
+            raw = plains(tctl("/_ctl/records")["records"], "usage").get("mx-use-herdr")
+            s.check("mux mx-use-herdr: usage has mux herdr, pane w1:p3", raw is not None and '"mux":"herdr","pane":"w1:p3",' in raw, str(raw)[:300])
     finally:
         tun.terminate()
         tun.wait(5)
