@@ -390,7 +390,9 @@ there):
   app shows it in its list without an alert. When that turn ends asking you something it is a plain
   `done` everywhere. Copilot CLI's `/every` (`/loop`) and `/after` follow the same rules: its
   scheduled prompt starts with `[Scheduled prompt #<id>]`, and the schedules left come from the
-  session's `events.jsonl`.
+  session's `events.jsonl`. Grok Build 1.0.77 runs each scheduled run as a background subagent: the
+  `subagent-completed-` turn its result opens is the schedule's when its prompt names
+  (`scheduler_delete("<id>")`) a schedule of that `Stop`'s or the previous `Stop`'s `sessionCrons`.
 
 **A `done` waits 3 seconds on Claude Code and Grok Build** (`done_delay`). Another Stop hook (yours
 or a plugin's) may block the stop so that the agent works on; the agent then fires `Stop` again

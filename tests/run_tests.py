@@ -1254,7 +1254,41 @@ def t_schedules(s):
                           lastAssistantMessage="Hello.", backgroundTasks=[], sessionCrons=gcron)
     s.run("claude", inp, env)
     s.check("schedule: Grok Build typed turn -> done", wait_for(lambda: ingests(s, "done"), 20))
+    # Grok Build 1.0.77 (measured, SimpleTerm if/hook-events-turn#turn-end): each scheduled run is a background
+    # subagent; the turn its result opens has promptId subagent-completed-<task>, names the schedule in its prompt
+    # (scheduler_delete("<id>")) and its Stop still lists the schedule. Not a task's report: no done per run.
+    sid1 = "01a1c998-e899-7942-881d-11d6b12c1b49"
+    mcron = [{"id": sid1, "schedule": "every 1 minute", "recurring": True, "prompt": "say tick"}]
 
+    def grok_run(i, crons, sched=sid1):
+        pid = "subagent-completed-01a1c998-e8a0-7f71-a9cd-1cb9175eda%02d" % i
+        prompt = ("<system-reminder>\nWhile you were idle, 1 background subagent completed:\n- [general-purpose] \"loop: say tick "
+                  "(every 1 minute)\" — completed successfully (1.2s, 0 tool calls)\n=== Output ===\ntick\n\n")
+        if sched:
+            prompt += ("If this schedule is no longer relevant, run scheduler_delete(\"%s\"). If it is outdated, you can update "
+                       "it with scheduler_create(new_prompt, interval, \"%s\").\n" % (sched, sched))
+        prompt += "</system-reminder>"
+        inp, env = grok_input("UserPromptSubmit", promptId=pid, timestamp="2026-11-11T07:5%d:25.586Z" % i, prompt=prompt)
+        s.run("claude", inp, dict(env, GROK_HOOK_EVENT="user_prompt_submit"))
+        inp, env = grok_input("Stop", reason="end_turn", promptId=pid, timestamp="2026-11-11T07:5%d:25.982Z" % i,
+                              lastAssistantMessage="Tick result %d received." % i, backgroundTasks=[], sessionCrons=crons)
+        s.run("claude", inp, env)
+
+    s.ctl("/_ctl/reset", {})
+    grok_run(1, mcron)
+    grok_run(2, mcron)
+    time.sleep(4.5)  # past done_delay (3 s on Grok)
+    s.check("schedule: Grok Build scheduled runs (subagent-completed-, schedule named) -> nothing",
+            not ingests(s), str([(r.get("body") or {}).get("ev") for r in ingests(s)])[:200])
+    # The run whose turn dropped the schedule (its Stop lists none) is the last: no relay push either.
+    grok_run(3, [])
+    time.sleep(4.5)
+    s.check("schedule: Grok Build last scheduled run -> nothing to the relay", not ingests(s),
+            str([(r.get("body") or {}).get("ev") for r in ingests(s)])[:200])
+    # A background subagent the agent started itself (no schedule named) still reports as a task: done.
+    s.ctl("/_ctl/reset", {})
+    grok_run(4, mcron, sched=None)
+    s.check("schedule: Grok Build task report with a schedule set -> done", wait_for(lambda: ingests(s, "done"), 20))
 
 def t_schedule_end(s):
     """The end of a turn a schedule started (SimpleTerm spec/turn-state#scheduled, AhMunGa/simple-term#469): with no

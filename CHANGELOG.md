@@ -80,6 +80,12 @@ The end of a turn a schedule started (SimpleTerm `spec/turn-state#scheduled`,
 - **A task's turn ends while a schedule is set**: only a turn a schedule started waits for the
   schedule; a turn a task's report (or the agent) started ends in `done` when none of its work is
   left (`spec/turn-state#background`). Before, a set schedule kept it quiet.
+- **Grok Build's scheduled runs** (`if/hook-events-turn#turn-end`, measured on 1.0.77): each run is
+  a background subagent, and the turn its result opens starts with `subagent-completed-` like any
+  subagent's report. That turn is the schedule's when its prompt names (`scheduler_delete("<id>")`)
+  a schedule of the `Stop`'s `sessionCrons` or of the previous `Stop`'s (a run whose turn drops the
+  schedule ends with none): no `done` per run, and the last one goes to the tunnels only. With the
+  rule above alone each run sent a `done`. Grok has no one-shot schedule.
 - **Copilot CLI's scheduled turns** (`/every`, alias `/loop`, and `/after`, an experimental
   feature; `if/hook-events-turn#turn-end`): a prompt that starts with `[Scheduled prompt #<id>]` is
   a turn a schedule started (the hook input has no `source`, measured on 1.0.109), and the schedules

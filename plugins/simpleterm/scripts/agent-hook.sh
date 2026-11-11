@@ -4123,7 +4123,7 @@ PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS='' REQIDIN=''
 OCTITLE='' OCCOST='' OCTIN='' OCTOUT='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX=''
 BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_SEQ=''
 BG_SVC=0 BG_IDMAP='' BG_KEEP='' BG_SHELLS='' BG_IDS='' BG_NOID=0 BG_M=''
-CRON_N=0 CRON_SCHED='' CRON_SUMS=''
+CRON_N=0 CRON_SCHED='' CRON_SUMS='' CRON_IDS='' PROMPT_SCHED=''
 
 # --- what the hook reads from the text of a turn ------------------------------
 
@@ -4621,8 +4621,8 @@ bg_ids_finish() {
 }
 
 # One field of a scheduled wake-up (Stop `session_crons`, Grok
-# `sessionCrons`): how many, the first one's schedule, and a checksum of each
-# prompt (the prompt of the turn it starts is that text).
+# `sessionCrons`): how many, the first one's schedule, each id, and a checksum
+# of each prompt (the prompt of the turn it starts is that text).
 cron_field() { # path=value
   ck=${1#*.}
   ck=${ck%%.*}
@@ -4631,6 +4631,7 @@ cron_field() { # path=value
   cv=${1#*=}
   [ $((ck + 1)) -gt "$CRON_N" ] && CRON_N=$((ck + 1))
   case $cf in
+    id) [ -n "$cv" ] && CRON_IDS="$CRON_IDS $cv" ;;
     schedule) [ "$ck" = 0 ] && CRON_SCHED=$cv ;;
     prompt) [ -n "$cv" ] && CRON_SUMS="$CRON_SUMS $(prompt_sum "$cv")" ;;
   esac
@@ -5029,15 +5030,32 @@ turn_end() {
 # prompt of a wake-up listed at the last Stop (session_crons) says so. Grok
 # Build has no such field: the prompt id of a turn it starts itself begins
 # with a fixed word (task-completed-, scheduler-fired-, ...; static, from the
-# 1.0.70 binary), a person's is a UUID.
+# 1.0.70 binary), a person's is a UUID. PROMPT_SCHED: the schedule a Grok
+# subagent-completed- turn names (scheduler_delete("<id>")), for its Stop.
 PROMPT_USER=1 PROMPT_BY=user
 prompt_origin() {
-  PROMPT_USER=1 PROMPT_BY=user
+  PROMPT_USER=1 PROMPT_BY=user PROMPT_SCHED=''
   if [ "$AGENT" = grok ]; then
     case $PROMPTID in
       task-completed-* | bash-completed-* | monitor-completed-* | subagent-completed-* | workflow-completed-*) PROMPT_BY=task ;;
       scheduler-fired-*) PROMPT_BY=schedule ;;
       parent-agent-message-* | parent-message-* | notifications-* | goal-summary-* | goal-classifier-nudge-* | plan-resume-*) PROMPT_BY=agent ;;
+    esac
+    # Grok 1.0.77 runs each scheduled run as a background subagent: the turn
+    # its result opens says how to drop the schedule (measured; SimpleTerm
+    # if/hook-events-turn#turn-end). Its Stop decides (sessionCrons).
+    # (The prompt's quotes may still be JSON-escaped: scheduler_delete(\"<id>\").)
+    po_pat='scheduler_delete(' po_q='"' po_bs='\'
+    case $PROMPTID:$PROMPT in
+      subagent-completed-*"$po_pat"*)
+        PROMPT_SCHED=${PROMPT#*"$po_pat"}
+        PROMPT_SCHED=${PROMPT_SCHED#"$po_bs"}
+        case $PROMPT_SCHED in "$po_q"*) PROMPT_SCHED=${PROMPT_SCHED#"$po_q"} ;; *) PROMPT_SCHED='' ;; esac
+        PROMPT_SCHED=${PROMPT_SCHED%%"$po_q"*}
+        PROMPT_SCHED=${PROMPT_SCHED%%"$po_bs"*}
+        case $PROMPT_SCHED in '' | *[!A-Za-z0-9._-]*) PROMPT_SCHED='' ;; esac
+        [ "${#PROMPT_SCHED}" -le 128 ] || PROMPT_SCHED=''
+        ;;
     esac
   elif [ "$AGENT" = copilot ]; then
     # A scheduled prompt (/every, /loop, /after) starts with the line
@@ -5073,13 +5091,14 @@ prompt_origin() {
 
 # $SID.turn: line 1 `user` or `auto` (who started this turn), line 2 the ids
 # of the background tasks that already ran when it started ($SID.stopids, the
-# last Stop's list), for the Stop that ends it.
+# last Stop's list), line 3 the schedule the prompt names (PROMPT_SCHED), for
+# the Stop that ends it.
 turn_mark() {
   tm_ids=''
   [ -f "$RUN_DIR/$SID.stopids" ] && IFS= read -r tm_ids <"$RUN_DIR/$SID.stopids"
   tm_who=$PROMPT_BY
   [ "$PROMPT_USER" = 1 ] && tm_who=user
-  printf '%s\n%s\n' "$tm_who" "$tm_ids" >"$RUN_DIR/$SID.turn" 2>/dev/null
+  printf '%s\n%s\n%s\n' "$tm_who" "$tm_ids" "$PROMPT_SCHED" >"$RUN_DIR/$SID.turn" 2>/dev/null
 }
 
 # True if every counted task was already running before the turn began.
@@ -5162,12 +5181,27 @@ stop_done() {
 # though a schedule is set (SimpleTerm spec/turn-state#background).
 # TURN_USER defaults to 1 (a person) when the turn's start was not seen.
 stop_flow() {
-  TURN_USER=1 PREV_IDS='' t1='' t2='' TURN_BY=''
+  TURN_USER=1 PREV_IDS='' t1='' t2='' t3='' TURN_BY=''
   if [ -f "$RUN_DIR/$SID.turn" ]; then
-    { IFS= read -r t1; IFS= read -r t2; } <"$RUN_DIR/$SID.turn"
+    { IFS= read -r t1; IFS= read -r t2; IFS= read -r t3; } <"$RUN_DIR/$SID.turn"
     [ -n "$t1" ] && [ "$t1" != user ] && TURN_USER=0
     TURN_BY=$t1
     PREV_IDS=$t2
+  fi
+  # Who started it, as only the turn's end can tell (SimpleTerm
+  # if/hook-events-turn#turn-end):
+  #  - Grok: a subagent-completed- turn whose prompt names one of the
+  #    session's sessionCrons (this Stop's, or the last Stop's when the turn
+  #    dropped it) is the result of a scheduled run.
+  if [ "$TURN_BY" = task ] && [ -n "$t3" ]; then
+    so_ids=$CRON_IDS
+    [ -f "$RUN_DIR/$SID.cronids" ] && so_ids="$so_ids $(cat "$RUN_DIR/$SID.cronids" 2>/dev/null)"
+    case " $so_ids " in *" $t3 "*) TURN_BY=schedule ;; esac
+  fi
+  if [ -n "$CRON_IDS" ]; then
+    printf '%s\n' "$CRON_IDS" >"$RUN_DIR/$SID.cronids" 2>/dev/null
+  elif [ -f "$RUN_DIR/$SID.cronids" ]; then
+    rm -f "$RUN_DIR/$SID.cronids" 2>/dev/null
   fi
   bg_ids_finish
   printf '%s\n' "$BG_IDS" >"$RUN_DIR/$SID.stopids" 2>/dev/null
@@ -5496,7 +5530,7 @@ case $AGENT:$EVENT in
       v2_prep "$TURN_AT"
       send_bg error
     fi
-    rm -f "$RUN_DIR/$SID.cerr" 2>/dev/null
+    rm -f "$RUN_DIR/$SID.cerr" "$RUN_DIR/$SID.cronids" 2>/dev/null
     printf '' 2>/dev/null >"$RUN_DIR/t0.$$"
     # The record first: Codex gives this hook 3 seconds at most and then
     # ends its process group (0.165.0, measured).

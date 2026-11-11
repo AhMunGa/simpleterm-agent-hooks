@@ -5075,9 +5075,11 @@ function Get-PromptSum([string]$text) {
 # sentinel, or the prompt of a wake-up listed at the last Stop (session_crons)
 # says so. Grok Build has no such field: the prompt id of a turn it starts
 # itself begins with a fixed word (static, from the 1.0.70 binary), a
-# person's is a UUID.
+# person's is a UUID. PromptSched: the schedule a Grok subagent-completed-
+# turn names (scheduler_delete("<id>")), for its Stop.
 function Set-PromptOrigin {
     $by = 'user'
+    $Script:PromptSched = ''
     if ($Script:Agent -ceq 'grok') {
         $p = $Script:PromptId
         foreach ($x in @('task-completed-', 'bash-completed-', 'monitor-completed-', 'subagent-completed-', 'workflow-completed-')) {
@@ -5086,6 +5088,24 @@ function Set-PromptOrigin {
         if ($p.StartsWith('scheduler-fired-', $Ord)) { $by = 'schedule' }
         foreach ($x in @('parent-agent-message-', 'parent-message-', 'notifications-', 'goal-summary-', 'goal-classifier-nudge-', 'plan-resume-')) {
             if ($p.StartsWith($x, $Ord)) { $by = 'agent' }
+        }
+        # Grok 1.0.77 runs each scheduled run as a background subagent: the
+        # turn its result opens says how to drop the schedule (measured;
+        # SimpleTerm if/hook-events-turn#turn-end). Its Stop decides.
+        # (The prompt's quotes may still be JSON-escaped: scheduler_delete(\"<id>\").)
+        $pat = 'scheduler_delete('
+        $at = $Script:Prompt.IndexOf($pat, $Ord)
+        if ($p.StartsWith('subagent-completed-', $Ord) -and $at -ge 0) {
+            $rest = $Script:Prompt.Substring($at + $pat.Length)
+            if ($rest.StartsWith('\', $Ord)) { $rest = $rest.Substring(1) }
+            if ($rest.StartsWith('"', $Ord)) {
+                $rest = $rest.Substring(1)
+                $end = $rest.IndexOfAny([char[]]@('"', '\'))
+                if ($end -gt 0 -and $end -le 128) {
+                    $id = $rest.Substring(0, $end)
+                    if ($id -cmatch '\A[A-Za-z0-9._-]+\z') { $Script:PromptSched = $id }
+                }
+            }
         }
     } else {
         $src = $Script:Src
@@ -5110,12 +5130,12 @@ function Set-PromptOrigin {
 
 # $Sid.turn: line 1 who started this turn, line 2 the ids of the background
 # tasks that already ran when it started ($Sid.stopids, the last Stop's list),
-# for the Stop that ends it.
+# line 3 the schedule the prompt names (PromptSched), for the Stop that ends it.
 function Write-TurnMark {
     $ids = Read-LineB (Join-Path $RunDir ($Script:Sid + '.stopids')) 0
     $who = $Script:PromptBy
     if ($Script:PromptUser) { $who = 'user' }
-    [void](Write-FileB (Join-Path $RunDir ($Script:Sid + '.turn')) ($who + "`n" + $ids + "`n"))
+    [void](Write-FileB (Join-Path $RunDir ($Script:Sid + '.turn')) ($who + "`n" + $ids + "`n" + $Script:PromptSched + "`n"))
 }
 
 # TurnAt: @-parameters of the end of a turn (SimpleTerm if/event-v2-turn#turn):
@@ -5193,13 +5213,14 @@ function Complete-BgIds {
 }
 
 # One field of a scheduled wake-up (Stop `session_crons`, Grok `sessionCrons`):
-# how many, the first one's schedule, and a checksum of each prompt.
+# how many, the first one's schedule, each id, and a checksum of each prompt.
 function Add-CronField([string]$p, [string]$v) {
     $d1 = $p.IndexOf('.')
     $d2 = $p.IndexOf('.', $d1 + 1)
     $ck = [int]$p.Substring($d1 + 1, $d2 - $d1 - 1)
     $cf = $p.Substring($d2 + 1)
     if ($ck + 1 -gt $Script:CronN) { $Script:CronN = $ck + 1 }
+    if ($cf -ceq 'id' -and $v) { $Script:CronIds += ' ' + $v }
     if ($cf -ceq 'schedule' -and $ck -eq 0) { $Script:CronSched = $v }
     if ($cf -ceq 'prompt' -and $v) { $Script:CronSums += ' ' + (Get-PromptSum $v) }
 }
@@ -5385,13 +5406,26 @@ function Invoke-StopFlow {
     $Script:PrevIds = ''
     $Script:TurnBy = ''
     $turnFile = Join-Path $RunDir ($Script:Sid + '.turn')
+    $t3 = ''
     if ([IO.File]::Exists($turnFile)) {
         $t1 = Read-LineB $turnFile 0
         $t2 = Read-LineB $turnFile 1
+        $t3 = Read-LineB $turnFile 2
         if ($t1 -and $t1 -cne 'user') { $Script:TurnUser = $false }
         $Script:TurnBy = $t1
         $Script:PrevIds = $t2
     }
+    # Grok: a subagent-completed- turn whose prompt names one of the session's
+    # sessionCrons (this Stop's, or the last Stop's when the turn dropped it)
+    # is the result of a scheduled run (SimpleTerm if/hook-events-turn#turn-end;
+    # the same as stop_flow in agent-hook.sh).
+    $idFile = Join-Path $RunDir ($Script:Sid + '.cronids')
+    if ($Script:TurnBy -ceq 'task' -and $t3) {
+        $ids = $Script:CronIds + ' ' + (Read-LineB $idFile 0)
+        if ((Split-Words $ids) -ccontains $t3) { $Script:TurnBy = 'schedule' }
+    }
+    if ($Script:CronIds) { [void](Write-FileB $idFile ($Script:CronIds + "`n")) }
+    else { Remove-FileQ $idFile }
     Complete-BgIds
     [void](Write-FileB (Join-Path $RunDir ($Script:Sid + '.stopids')) ($Script:BgIds + "`n"))
     $cronFile = Join-Path $RunDir ($Script:Sid + '.crons')
@@ -5671,6 +5705,7 @@ function Invoke-Event {
     }
     if ($ev -ceq 'claude:SessionEnd' -or $ev -ceq 'grok:SessionEnd' -or $ev -ceq 'codex:SessionEnd') {
         $since = [DateTime]::UtcNow
+        Remove-FileQ (Join-Path $RunDir ($Script:Sid + '.cronids'))
         # The record first: Codex gives this hook 3 seconds at most and then
         # ends it (0.165.0, measured).
         Stop-Sess $since
@@ -6013,7 +6048,7 @@ try {
     }
     foreach ($v in @('HookEvent', 'NType', 'Tool', 'Detail', 'Desc', 'Sid', 'Cwd', 'Last', 'Err', 'QText', 'FirstIn', 'NType2', 'TPath',
             'CtxTok', 'Model', 'GKey', 'Reason', 'Prompt', 'Src', 'StopAct', 'IsInt', 'AgentId', 'PromptId', 'ToolUseId', 'SubType', 'SubPar',
-            'Tid', 'PMode', 'BgPick', 'BgType', 'BgDesc', 'BgCmd', 'BgShells', 'BgSvcIdx', 'BgIds', 'CronSched', 'CronSums', 'BgM')) {
+            'Tid', 'PMode', 'BgPick', 'BgType', 'BgDesc', 'BgCmd', 'BgShells', 'BgSvcIdx', 'BgIds', 'CronSched', 'CronSums', 'CronIds', 'PromptSched', 'BgM')) {
         Set-Variable -Name $v -Value '' -Scope Script
     }
     $Script:BgN = 0
