@@ -4271,6 +4271,13 @@ def t_v2_mux(s):
         raw = plains(tctl("/_ctl/records")["records"], "resolved").get("mx-res-herdr")
         s.check("mux mx-res-herdr: resolved has mux herdr, pane w1:p3",
                 behavior(out).get("behavior") == "allow" and raw is not None and '"mux":"herdr","pane":"w1:p3",' in raw, out + str(raw)[:300])
+        # … a turn's end (`done`), inside tmux …
+        tctl("/_ctl/reset", {})
+        s.run("claude", json.dumps({"session_id": "mx-done-tmux", "cwd": "/w", "hook_event_name": "Stop", "stop_hook_active": False,
+                                    "last_assistant_message": "Done."}), tmux)
+        wait_for(lambda: plains(tctl("/_ctl/records")["records"], "done"), 20)
+        raw = plains(tctl("/_ctl/records")["records"], "done").get("mx-done-tmux")
+        s.check("mux mx-done-tmux: done has mux tmux, pane %13", raw is not None and '"mux":"tmux","pane":"%13",' in raw, str(raw)[:300])
         if s.kind == "sh":
             # … and a usage report (Copilot's quota file, sh only).
             ev = write(s.tmp / "mxcop" / "events.jsonl", COPILOT_QUOTA_LINE + "\n")
