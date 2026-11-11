@@ -5084,12 +5084,19 @@ function Write-TurnMark {
 # TurnAt: @-parameters of the end of a turn (SimpleTerm if/event-v2-turn#turn):
 # end, asks (true|false), late. Who started the turn is the turn's mark; the
 # background tasks and schedules come from the event's facts.
-function Set-TurnAt([string]$end, [string]$asks, [string]$late) {
-    $t = '@.turn' + $Tab + 's' + $Tab + '1' + $Nl + '@.end' + $Tab + 's' + $Tab + $end + $Nl
+function Get-TurnBy {
+    # Who started the turn that ends now (SimpleTerm if/event-v2-turn#fields
+    # `by`): the turn's mark, unknown when its start was not seen.
     $tb = $Script:TurnBy
     if (-not $tb) { $tb = Read-LineB (Join-Path $RunDir ($Script:Sid + '.turn')) 0 }
     if ($tb -ceq 'auto') { $tb = 'agent' }
     elseif (@('user', 'task', 'schedule', 'agent') -cnotcontains $tb) { $tb = 'unknown' }
+    return $tb
+}
+
+function Set-TurnAt([string]$end, [string]$asks, [string]$late) {
+    $t = '@.turn' + $Tab + 's' + $Tab + '1' + $Nl + '@.end' + $Tab + 's' + $Tab + $end + $Nl
+    $tb = Get-TurnBy
     $t += '@.by' + $Tab + 's' + $Tab + $tb + $Nl
     if ($asks) { $t += '@.asks' + $Tab + 's' + $Tab + $asks + $Nl }
     if ($Script:Last) { $t += '@.last' + $Tab + 's' + $Tab + $Script:Last + $Nl }
@@ -5309,21 +5316,33 @@ function Invoke-StopDone([string]$what) {
     if ($Script:StopAct -ceq 'true') { $Script:XFlags = ',"stop_hook_active":true' }
     Set-TurnAt 'done' $Script:Tasks ''
     Initialize-V2 $Script:TurnAt
-    Send-DoneLater
+    $sd = 'done'
+    if ((Get-TurnBy) -ceq 'schedule' -and $Script:Tasks -cne 'true') {
+        # The last turn a schedule started, not one that ended asking
+        # (SimpleTerm spec/turn-state#scheduled): no alert anywhere. The
+        # tunnels only (the app lists it), at once (no alert waits on it), and
+        # the screen says it was a scheduled turn so that the agent's own 7501
+        # done stays quiet too.
+        $sd = 'done_scheduled'
+        Send-Background 'done' '' 'tunnel'
+    } else {
+        Send-DoneLater
+    }
     # The turn's done is sent (or pending): Claude Code's idle_prompt, 60 s
     # later, repeats it (the next turn note takes the mark back).
     [void](Write-FileB (Join-Path $RunDir ($Script:Sid + '.done')) '')
     Invoke-UsageReport
-    Write-State 'done' ''
+    Write-State $sd ''
     Invoke-TurnEnd
 }
 
 # A Stop (Claude Code, Codex, Grok): done, or not yet. Not done while the agent
 # waits for work it started or for a schedule, unless a person typed this turn
 # and only work that ran before it is left, only services are left, or the
-# last message asks the user something (then they are told). A turn the agent
-# started itself while a schedule (/loop, cron) is set stays quiet:
-# background with "scheduled: ...". The same as stop_flow in agent-hook.sh.
+# last message asks the user something (then they are told). A turn a schedule
+# started while a schedule (/loop, cron) is still set stays quiet: background
+# with "scheduled: ..."; any other turn with no work left ends in done though a
+# schedule is set. The same as stop_flow in agent-hook.sh.
 function Invoke-StopFlow {
     $Script:TurnUser = $true
     $Script:PrevIds = ''
@@ -5349,7 +5368,10 @@ function Invoke-StopFlow {
         if ($Script:BgN -gt 0) { Invoke-StopDone $Script:BgM } else { Invoke-StopDone '' }
         return
     }
-    if ($Script:BgN -gt 0 -and $Script:BgSvc -eq $Script:BgN -and ($Script:CronN -eq 0 -or $Script:TurnUser)) {
+    # Only a turn a schedule started waits for the schedule: one a task's
+    # report or the agent started ends here when no work of its own is left.
+    if ($Script:BgN -eq 0 -and $Script:TurnBy -cne 'schedule') { Invoke-StopDone ''; return }
+    if ($Script:BgN -gt 0 -and $Script:BgSvc -eq $Script:BgN -and ($Script:CronN -eq 0 -or $Script:TurnBy -cne 'schedule')) {
         Get-BgSummary
         Invoke-StopDone $Script:BgM
         return
@@ -5676,7 +5698,9 @@ function Invoke-Event {
         Initialize-V2 $Script:TurnAt
         Send-Background $e
         Invoke-UsageReport
-        Write-State 'done' ''
+        # The turn failed: the badge is cleared, not a green done; the error
+        # is the event above (the screen's state values have no error).
+        Write-State 'idle' ''
         Write-SessTurn 'idle' ''
         return
     }

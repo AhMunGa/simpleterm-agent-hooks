@@ -226,9 +226,10 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | Claude `PermissionRequest` | `permission` (waits for your answer, up to 540 s); for `AskUserQuestion` a `question` you can answer where the receiver takes answers (`fmt=2`) | waiting, then running |
 | Claude `PreToolUse` `AskUserQuestion`, `Notification` (idle, elicitation, input needed) | `question` (one per question: the `PermissionRequest` of the same question goes first, the `PreToolUse` one only when none came within `ask_delay`; `idle_prompt` only when no `done` was sent or is pending for the turn) | waiting (idle keeps done; `agent_needs_input`, another session's, leaves the badge) |
 | Claude `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure` | none (context, see below) | running |
-| Claude `Stop` / `StopFailure` | `done` (sent 3 s later on Claude Code, see below) / `error` or `auth` | done |
+| Claude `Stop` / `StopFailure` | `done` (sent 3 s later on Claude Code, see below) / `error` or `auth` | done / idle |
 | Claude `Stop` with `background_tasks` in flight | none (and no idle question until the next turn), unless the last message asks you something (`question`), only services or tasks that ran before your prompt are left (`done`) | background (+ an OSC 7501 `working` record, see below); waiting (+ a `blocked` record) for a question |
 | Claude `Stop` with `session_crons` set, turn started by a schedule | none (a question: `question`) | background, `scheduled: <schedule>` |
+| Claude `Stop` with no schedule left, turn started by a schedule | `done` to the SSH tunnel only, at once (the app lists it without an alert); one that ends asking you something is a plain `done` | `done_scheduled` (`done` when it asks) |
 | Claude `PostToolUseFailure` with `is_interrupt` (Esc; not for a subagent's tool, `agent_id` set) | none | idle |
 | Claude `SessionStart`, `PostCompact`, `PostModelSwitch` | none (context) | none |
 | Claude `SessionEnd`, `SubagentStart`, `SubagentStop` | `state` `ended`, `sub_start`, `sub_stop` (SSH tunnel only) | none |
@@ -359,8 +360,12 @@ there):
 - **Loops and schedules are quiet.** While `session_crons` (Grok `sessionCrons`: `/loop`,
   CronCreate, ScheduleWakeup) is set, a turn the schedule started sends no `done` and the badge
   says `background`, `scheduled: <schedule>` (`+N more`); Claude Code 2.1.295+ gets a `working`
-  record with that text. A turn you typed still ends with `done`, a question still alerts, and an
-  error always does. The first `Stop` that finds no schedule left is the `done`.
+  record with that text. A turn you typed still ends with `done`, so does a turn a task's report
+  started once none of its work is left, a question still alerts, and an error always does. The
+  first `Stop` that finds no schedule left after a turn the schedule started is the `done`: to the
+  SSH tunnels only and at once (no relay push), with `done_scheduled` on Claude Code's screen, so the
+  app shows it in its list without an alert. When that turn ends asking you something it is a plain
+  `done` everywhere.
 
 **A `done` waits 3 seconds on Claude Code and Grok Build** (`done_delay`). Another Stop hook (yours
 or a plugin's) may block the stop so that the agent works on; the agent then fires `Stop` again
