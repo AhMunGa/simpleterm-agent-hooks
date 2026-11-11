@@ -1858,12 +1858,17 @@ sess_keep() {
 
 # USAGE_SEQ is the JSON-escaped usage OSC to append, if any (usage_report);
 # BG_SEQ the hook's OSC 7501 record for background work (bg_pause, note).
-print_state() { # running|waiting|done|background [message]
+# [first] is a value written just before the state, in the same output: an app
+# that does not know the state drops it and is left with that one
+# (SimpleTerm if/terminal-signals#structured).
+print_state() { # running|waiting|done|done_scheduled|background|idle|error [message [first]]
   [ "$AGENT" = claude ] || return 0
   [ "${SIMPLETERM:-}" = 1 ] || return 0
   m=''
   [ -n "${2:-}" ] && m=' '$(json_trim "$2" 80 320)
-  printf '{"terminalSequence":"\\u001b]9;simpleterm:state=%s%s\\u0007%s%s"}\n' "$1" "$m" "$BG_SEQ" "$USAGE_SEQ"
+  p=''
+  [ -n "${3:-}" ] && p='\u001b]9;simpleterm:state='$3'\u0007'
+  printf '{"terminalSequence":"%s\\u001b]9;simpleterm:state=%s%s\\u0007%s%s"}\n' "$p" "$1" "$m" "$BG_SEQ" "$USAGE_SEQ"
 }
 
 print_usage() {
@@ -5503,9 +5508,10 @@ case $AGENT:$EVENT in
     v2_prep "$TURN_AT"
     send_bg "$ev"
     usage_report
-    # The turn failed: the badge is cleared, not a green done; the error is
-    # the event above (the screen's state values have no error).
-    print_state idle
+    # The turn failed (SimpleTerm spec/turn-state): the error badge and its
+    # alert, which the event above pairs with. `idle` first: an app older
+    # than `error` drops it and only clears the badge, no green done.
+    print_state error '' idle
     sess_turn idle
     ;;
   codex:SessionStart | codex:PostCompact)

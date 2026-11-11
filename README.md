@@ -249,7 +249,7 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | Claude `PermissionRequest` | `permission` (waits for your answer, up to 540 s); for `AskUserQuestion` a `question` you can answer where the receiver takes answers (`fmt=2`) | waiting, then running |
 | Claude `PreToolUse` `AskUserQuestion`, `Notification` (idle, elicitation, input needed) | `question` (one per question: the `PermissionRequest` of the same question goes first, the `PreToolUse` one only when none came within `ask_delay`; `idle_prompt` only when no `done` was sent or is pending for the turn) | waiting (idle keeps done; `agent_needs_input`, another session's, leaves the badge) |
 | Claude `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure` | none (context, see below) | running |
-| Claude `Stop` / `StopFailure` | `done` (sent 3 s later on Claude Code, see below) / `error` or `auth` | done / idle |
+| Claude `Stop` / `StopFailure` | `done` (sent 3 s later on Claude Code, see below) / `error` or `auth` | done / idle, then error (a login error too) |
 | Claude `Stop` with `background_tasks` in flight | none (and no idle question until the next turn), unless the last message asks you something (`question`), only services or tasks that ran before your prompt are left (`done`) | background (+ an OSC 7501 `working` record, see below); waiting (+ a `blocked` record) for a question |
 | Claude `Stop` with `session_crons` set, turn started by a schedule | none (a question: `question`) | background, `scheduled: <schedule>` |
 | Claude `Stop` with no schedule left, turn started by a schedule | `done` to the SSH tunnel only, at once (the app lists it without an alert); one that ends asking you something is a plain `done` | `done_scheduled` (`done` when it asks) |

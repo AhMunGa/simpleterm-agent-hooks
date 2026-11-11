@@ -80,9 +80,12 @@ The end of a turn a schedule started (SimpleTerm `spec/turn-state#scheduled`,
 - **A task's turn ends while a schedule is set**: only a turn a schedule started waits for the
   schedule; a turn a task's report (or the agent) started ends in `done` when none of its work is
   left (`spec/turn-state#background`). Before, a set schedule kept it quiet.
-- **A failed turn clears the badge**: Claude Code's `StopFailure` writes `simpleterm:state=idle`
-  instead of `done` (a failed turn showed a green done badge where Claude does not speak OSC 7501);
-  the `error` or `auth` event is unchanged.
+- **A failed turn shows an error**: Claude Code's `StopFailure` writes `simpleterm:state=idle` and
+  then the new state value `simpleterm:state=error` in the same output, instead of `done` (a failed
+  turn showed a green done badge where Claude does not speak OSC 7501). The app shows the error badge
+  and one error alert, which the `error` event pairs with; a login error is `error` on the screen
+  too while its event stays `auth`. An older app drops `error` and is left with `idle`: the badge is
+  cleared. The `error` or `auth` event is unchanged.
 - The same in `agent-hook.ps1` and in every plugin's copy of `agent-hook.sh`.
 
 ## 0.5.1 - 2026-11-04

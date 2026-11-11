@@ -1260,8 +1260,9 @@ def t_schedule_end(s):
     """The end of a turn a schedule started (SimpleTerm spec/turn-state#scheduled, AhMunGa/simple-term#469): with no
     schedule left it is a done to the tunnels only, at once, and Claude's screen says done_scheduled; one that ended
     asking is a plain done on the screen, the tunnels and the relay. A turn a task's report started ends in done
-    while a schedule remains (SimpleTerm spec/turn-state#background). A StopFailure clears the badge (idle) instead
-    of a green done; the error itself goes as an event."""
+    while a schedule remains (SimpleTerm spec/turn-state#background). A StopFailure writes idle, then error, in one
+    output (SimpleTerm if/terminal-signals#structured): no green done, and an app older than error is left with idle;
+    a login error too, while its event says auth."""
     tun, tctl = s.spawn_mock()
     try:
         s.setup([(LINK_A, {}), (LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})], conf={"done_delay": None})
@@ -1323,12 +1324,19 @@ def t_schedule_end(s):
         s.check("scheduled turn with a schedule set: state scheduled, no done anywhere",
                 st_ev and not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300])
 
-        # StopFailure: the badge is cleared (idle), not a green done; the error goes as an event.
+        # StopFailure: idle, then error, in one output; the event goes as before.
+        failed = "\x1b]9;simpleterm:state=idle\x07\x1b]9;simpleterm:state=error\x07"
         reset()
         out = s.run("claude", cc_event("se4", "StopFailure", error="server_error", error_details="overloaded",
                                        last_assistant_message=""), st)[1]
-        s.check("StopFailure: the screen says idle", seqs(out) == "\x1b]9;simpleterm:state=idle\x07", repr(out))
+        s.check("StopFailure: the screen says idle, then error", seqs(out) == failed, repr(out))
         s.check("StopFailure: the error goes", wait_for(lambda: ingests(s, "error"), 20), str(ingests(s))[:300])
+        # A login error is no other screen value (SimpleTerm hist/turn-state#d10): error there, auth as the event.
+        reset()
+        out = s.run("claude", cc_event("se5", "StopFailure", error="authentication_failed",
+                                       last_assistant_message=""), st)[1]
+        s.check("StopFailure login: the screen says idle, then error", seqs(out) == failed, repr(out))
+        s.check("StopFailure login: the event says auth", wait_for(lambda: ingests(s, "auth"), 20), str(ingests(s))[:300])
     finally:
         tun.terminate()
         tun.wait(5)
@@ -1886,7 +1894,8 @@ def t_usage_claude(s):
     rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-claude-rl", "transcript_path": str(tr), "hook_event_name": "StopFailure",
                                                    "error": "rate_limit", "last_assistant_message": "API Error"}), {"SIMPLETERM": "1"})
     s.check("usage claude: StopFailure rate_limit -> lim=reached",
-            seqs(out) == "\x1b]9;simpleterm:state=done\x07\x1b]9;simpleterm:usage v=1 agent=claude-code ctx=42000 win=1000000"
+            seqs(out) == "\x1b]9;simpleterm:state=idle\x07\x1b]9;simpleterm:state=error\x07"
+                          "\x1b]9;simpleterm:usage v=1 agent=claude-code ctx=42000 win=1000000"
                           " src=transcript est=1 lim=reached\x07", repr(out))
     # Earlier cases' background sends may still land here: pick the event by content.
     rec = wait_for(lambda: [r for r in ingests(s, "usage") if {"id": "reached"} in (r.get("plain_json") or {}).get("lims", [])], 20)

@@ -2459,11 +2459,16 @@ function Write-SessTurn([string]$state, [string]$prompt) {
 
 # $Script:UsageSeq is the JSON-escaped usage OSC to append, if any;
 # $Script:BgSeq the hook's OSC 7501 record for background work.
-function Write-State([string]$state, [string]$message) {
+# $first is a value written just before the state, in the same output: an app
+# that does not know the state drops it and is left with that one
+# (SimpleTerm if/terminal-signals#structured).
+function Write-State([string]$state, [string]$message, [string]$first = '') {
     if ($Script:Agent -cne 'claude' -or $env:SIMPLETERM -ne '1') { return }
     $m = ''
     if ($message) { $m = ' ' + (Limit-Json $message 80 320) }
-    Write-Out ('{"terminalSequence":"\u001b]9;simpleterm:state=' + $state + $m + '\u0007' + $Script:BgSeq + $Script:UsageSeq + '"}')
+    $p = ''
+    if ($first) { $p = '\u001b]9;simpleterm:state=' + $first + '\u0007' }
+    Write-Out ('{"terminalSequence":"' + $p + '\u001b]9;simpleterm:state=' + $state + $m + '\u0007' + $Script:BgSeq + $Script:UsageSeq + '"}')
 }
 
 function Write-UsageOnly {
@@ -5730,9 +5735,10 @@ function Invoke-Event {
         Initialize-V2 $Script:TurnAt
         Send-Background $e
         Invoke-UsageReport
-        # The turn failed: the badge is cleared, not a green done; the error
-        # is the event above (the screen's state values have no error).
-        Write-State 'idle' ''
+        # The turn failed (SimpleTerm spec/turn-state): the error badge and its
+        # alert, which the event above pairs with. 'idle' first: an app older
+        # than 'error' drops it and only clears the badge, no green done.
+        Write-State 'error' '' 'idle'
         Write-SessTurn 'idle' ''
         return
     }
