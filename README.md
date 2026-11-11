@@ -270,6 +270,7 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | Grok `Notification` `permission_prompt` (also "Plan approval requested"), `elicitation_dialog`, `idle_prompt` | `question`, with what is asked from the `PreToolUse` before it (`idle_prompt` only when no `done` was sent or is pending for the turn) | none |
 | Grok `SessionEnd`, `SubagentStart`, `SubagentStop` | `state` (SSH tunnel only) | none |
 | Grok `Stop` (`end_turn`) / `StopFailure` | `done` (none with `backgroundTasks` or `sessionCrons`, same rules as Claude) / `error` or `auth` | none |
+| Grok `StopCancelled` (instead of `Stop` when a turn ends without completing: Ctrl+C, a rejected permission) | `state` `idle` (`turn.end: interrupt`), as Claude Code's Esc | none |
 | OpenCode permission request | `permission` (waits up to 540 s) | none |
 | OpenCode turn finished / failed | `done` (none while a subagent of it runs; a background shell is judged as Claude Code's `background_tasks`) / `error` or `auth` | none |
 | OpenCode 2.x input form | `question` | none |

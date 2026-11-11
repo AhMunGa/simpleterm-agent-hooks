@@ -4718,6 +4718,7 @@ if [ "$AGENT" = grok ]; then
     notification) EVENT=Notification ;;
     stop) EVENT=Stop ;;
     stop_failure) EVENT=StopFailure ;;
+    stop_cancelled) EVENT=StopCancelled ;;
     user_prompt_submit) EVENT=UserPromptSubmit ;;
   esac
 fi
@@ -5906,6 +5907,20 @@ case $AGENT:$EVENT in
       turn_end
       turn_close
     fi
+    sess_turn idle
+    ;;
+  grok:StopCancelled)
+    # Grok 1.0.77 runs StopCancelled instead of Stop when a turn ends without
+    # completing (Ctrl+C: reason user_interrupt, cancelTrigger ctrl_c;
+    # measured): the turn is over, as at Claude Code's Esc (SimpleTerm
+    # hist/turn-state#d16). Claude Code ignores this event of the shared
+    # hooks file (measured on 2.1.322).
+    once "$(printf '%s|%s|%s|%s' "$EVENT" "$SID" "$GKEY" "$REASON" | cksum | awk '{ print $1 }')" || finish
+    note turn
+    print_state idle
+    turn_at interrupt
+    send_state idle "$TURN_AT"
+    turn_close
     sess_turn idle
     ;;
   opencode:Notification)

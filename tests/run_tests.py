@@ -3011,7 +3011,7 @@ def t_agy_paths(s):
 
 
 def grok_input(event, **kw):
-    snake = {"Notification": "notification", "Stop": "stop", "StopFailure": "stop_failure",
+    snake = {"Notification": "notification", "Stop": "stop", "StopFailure": "stop_failure", "StopCancelled": "stop_cancelled",
              "UserPromptSubmit": "user_prompt_submit"}[event]
     j = {"hookEventName": snake, "sessionId": "gk-1", "cwd": "/w/grokproj", "workspaceRoot": "/w/grokproj",
          "timestamp": kw.pop("timestamp", "2026-10-29T10:00:00.000Z"), "hook_event_name": event, "session_id": "gk-1"}
@@ -3060,6 +3060,26 @@ def t_grok(s):
     rec = wait_for(lambda: ingests(s), 20)
     s.check("grok: StopFailure -> error", rec and rec[0]["body"]["ev"] == "error"
             and rec[0]["plain_json"].get("msg") == "rate_limit: Rate limited", str(rec)[:200])
+    # Ctrl+C or a rejected permission ends a Grok turn with StopCancelled instead of Stop (measured on 1.0.77, reason
+    # user_interrupt or permission_rejected): the turn is over, as at Claude Code's Esc (SimpleTerm
+    # hist/turn-state#d16), so the report that comes next starts a turn of its own.
+    def gmark():
+        return (s.home / ".simpleterm" / "run" / "gk-1.turn").read_text().split("\n")
+
+    for i, (reason, extra) in enumerate((("user_interrupt", {"cancelTrigger": "ctrl_c"}), ("permission_rejected", {}))):
+        ups, uenv = grok_input("UserPromptSubmit", promptId="p9%d" % i, prompt="Run the long check",
+                               timestamp="2026-10-29T10:12:0%d.000Z" % i)
+        s.run("claude", ups, uenv)
+        m1 = gmark()
+        cancel, cenv = grok_input("StopCancelled", promptId="p9%d" % i, reason=reason, cancelledBy="user",
+                                  timestamp="2026-10-29T10:12:1%d.000Z" % i, **extra)
+        s.run("claude", cancel, cenv)
+        m2 = gmark()
+        rep, renv = grok_input("UserPromptSubmit", promptId="task-completed-gbash9%d" % i, prompt="npm test finished",
+                               timestamp="2026-10-29T10:12:2%d.000Z" % i)
+        s.run("claude", rep, renv)
+        s.check("grok: StopCancelled (%s) closes the turn; the next report is a turn of its own" % reason,
+                m1[3:4] == ["open"] and m2[3:4] in ([], [""]) and gmark()[0] == "task", repr((m1, m2, gmark())))
     s.ctl("/_ctl/reset", {})
     only_camel = json.dumps({"hookEventName": "stop", "sessionId": "gk-2", "cwd": "/w/g", "timestamp": "t9", "reason": "end_turn",
                              "lastAssistantMessage": "camel only"})

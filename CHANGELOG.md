@@ -120,6 +120,14 @@ The end of a turn a schedule started (SimpleTerm `spec/turn-state#scheduled`,
   `/loop` turn whose background work ended inside it sent a `done`. The report of work
   your own turn started still ends in `done` (`hist/hook-events#e15`). Codex has no schedules;
   OpenCode 2.x and Antigravity follow.
+- **Grok Build's cancelled turn ends the turn** (`hist/turn-state#d16`): Grok 1.0.77 runs
+  `StopCancelled` instead of `Stop` when a turn ends without completing (Ctrl+C: `reason`
+  `user_interrupt`, `cancelTrigger` `ctrl_c`; a rejected permission: `permission_rejected`;
+  measured). The hooks file now names it, and the hook ends the turn as at Claude Code's Esc: `state`
+  `idle` with `turn.end: interrupt`, and the turn mark closes, so a report that comes next starts a
+  turn of its own. Before, the plugin did not hear it and the turn stayed open. Claude Code ignores
+  the entry (2.1.322 runs the other hooks of the file; `claude plugin validate` warns "unknown hook
+  event; entry ignored at runtime").
 - **A failed turn shows an error**: Claude Code's `StopFailure` writes `simpleterm:state=idle` and
   then the new state value `simpleterm:state=error` in the same output, instead of `done` (a failed
   turn showed a green done badge where Claude does not speak OSC 7501). The app shows the error badge

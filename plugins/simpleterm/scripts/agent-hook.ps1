@@ -5937,6 +5937,21 @@ function Invoke-Event {
         Write-SessTurn 'idle' ''
         return
     }
+    if ($ev -ceq 'grok:StopCancelled') {
+        # Grok 1.0.77 runs StopCancelled instead of Stop when a turn ends
+        # without completing (Ctrl+C: reason user_interrupt; measured): the turn
+        # is over, as at Claude Code's Esc (SimpleTerm hist/turn-state#d16).
+        # The same as agent-hook.sh.
+        $key = (Get-Sha256Hex ($Script:HookEvent + '|' + $Script:Sid + '|' + $Script:GKey + '|' + $Script:Reason)).Substring(0, 16)
+        if (-not (Test-Once $key)) { return }
+        Add-Note 'turn' ''
+        Write-State 'idle' ''
+        Set-TurnAt 'interrupt' '' ''
+        Send-State 'idle' $Script:TurnAt
+        Close-TurnMark
+        Write-SessTurn 'idle' ''
+        return
+    }
 }
 
 try {
@@ -6136,6 +6151,7 @@ try {
         if ($Script:HookEvent -ceq 'notification') { $Script:HookEvent = 'Notification' }
         elseif ($Script:HookEvent -ceq 'stop') { $Script:HookEvent = 'Stop' }
         elseif ($Script:HookEvent -ceq 'stop_failure') { $Script:HookEvent = 'StopFailure' }
+        elseif ($Script:HookEvent -ceq 'stop_cancelled') { $Script:HookEvent = 'StopCancelled' }
         elseif ($Script:HookEvent -ceq 'user_prompt_submit') { $Script:HookEvent = 'UserPromptSubmit' }
     }
     $Script:RawSid = $Script:Sid
