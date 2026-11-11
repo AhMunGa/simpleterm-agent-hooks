@@ -54,8 +54,11 @@ Windows: Claude Code (through Git Bash) and Codex (PowerShell) only; see [Window
 ## Install
 
 Run the commands for each agent you use on the server. The SimpleTerm app can run them for you
-after asking; it does not edit your agents' settings files. Running an install command again is
-harmless.
+after asking; it does not edit your agents' settings files. It runs the same commands as below,
+except where an agent's section says otherwise. Running an install command again changes nothing:
+Gemini CLI and Grok Build then report that the plugin is already installed (exit 1), and where a
+block clones `~/.simpleterm/src` and you already have it, run
+`git -C ~/.simpleterm/src pull --ff-only` instead of the clone.
 
 ### Claude Code
 
@@ -81,21 +84,31 @@ after every update, because trust is tied to the plugin's contents.
 ### Gemini CLI
 
 ```sh
-mkdir -p ~/.simpleterm
-cd ~/.simpleterm && gemini extensions install https://github.com/AhMunGa/simpleterm-agent-hooks --consent
+mkdir -p -m 700 ~/.simpleterm
+cd ~/.simpleterm && gemini extensions install https://github.com/AhMunGa/simpleterm-agent-hooks --consent --skip-settings
 ```
 
 With `--consent`, Gemini CLI also trusts the folder the command runs in if it is not trusted yet
 (folder trust is on by default), so run it from `~/.simpleterm` rather than from your home or a
 project. Gemini installs the whole repository as the extension `simpleterm` (it reads
 `gemini-extension.json` and `hooks/hooks.json` at the top). It needs `git`, and it cannot be run
-from inside a Gemini session.
+from inside a Gemini session. `~/.simpleterm` is the plugin's own folder, readable only by you.
+`--skip-settings` changes nothing for this extension, which has no settings to ask for. The
+SimpleTerm app makes the folder itself and runs the second line.
 
 ### GitHub Copilot CLI
 
 ```sh
-copilot plugin install AhMunGa/simpleterm-agent-hooks:plugins/copilot
+copilot plugin marketplace add AhMunGa/simpleterm-agent-hooks
+copilot plugin install simpleterm-copilot@simpleterm-agent-hooks
 ```
+
+Copilot reads its own catalog in this repository (`.github/plugin/marketplace.json`), which lists
+only `simpleterm-copilot`; Claude Code and Codex read `.claude-plugin/marketplace.json` and do not
+see it. The direct install `copilot plugin install AhMunGa/simpleterm-agent-hooks:plugins/copilot`
+still works, but Copilot says direct installs are deprecated. If you installed that way, run
+`copilot plugin uninstall simpleterm-copilot` once before installing from the marketplace; with
+both, Copilot keeps two copies (the first uninstall removes the direct one).
 
 The plugin is `simpleterm-copilot`, a folder of its own (`plugins/copilot`) with hooks in Copilot's
 own format: a session's prompts, the plan review (`exit_plan_mode`), its prompts and questions
@@ -116,9 +129,14 @@ agy plugin install https://github.com/AhMunGa/simpleterm-agent-hooks/tree/main/p
 If your `agy` does not take a GitHub folder, install from a copy:
 
 ```sh
+mkdir -p -m 700 ~/.simpleterm
 git clone --depth 1 https://github.com/AhMunGa/simpleterm-agent-hooks ~/.simpleterm/src
 agy plugin install ~/.simpleterm/src/plugins/antigravity
 ```
+
+Both ways install the same files into `~/.gemini/config/plugins/simpleterm-antigravity` (agy 1.5.4),
+and the plugin does not use the copy afterwards. The SimpleTerm app installs from the copy, which
+every agy takes.
 
 The plugin is `simpleterm-antigravity`, a folder of its own (`plugins/antigravity`): agy reads
 `plugin.json` and `hooks.json` at a plugin's top, and treats a folder with `.claude-plugin/` as a
@@ -159,17 +177,17 @@ If the Claude Code plugin above is installed, **Grok already uses it**: install 
 hook sees Grok's `GROK_HOOK_EVENT` and reports `grok-build` events. Otherwise:
 
 ```sh
-grok plugin install AhMunGa/simpleterm-agent-hooks#plugins/simpleterm --trust
+grok plugin install "AhMunGa/simpleterm-agent-hooks#plugins/simpleterm" --trust
 ```
 
-Grok loads a plugin name once, so having both does not send alerts twice (and the hook drops a
-second copy of the same event anyway). Grok has no hook that can approve a permission, so its
-permission waits are alerts only.
+Keep the quotes: zsh with `extendedglob` and csh read a bare `#`. Grok loads a plugin name once,
+so having both does not send alerts twice (and the hook drops a second copy of the same event
+anyway). Grok has no hook that can approve a permission, so its permission waits are alerts only.
 
 ### OpenCode 2.x
 
 ```sh
-opencode plugin add 'github:AhMunGa/simpleterm-agent-hooks#main::path:plugins/opencode'
+opencode plugin add "github:AhMunGa/simpleterm-agent-hooks#main::path:plugins/opencode"
 ```
 
 `opencode plugin add` records the plugin in `~/.config/opencode/opencode.json`. To leave that
@@ -183,13 +201,18 @@ the terminal.
 OpenCode 1.x loads every `.js` file in `~/.config/opencode/plugins/`:
 
 ```sh
+rm -f ~/.config/opencode/plugins/simpleterm.js ~/.config/opencode/plugins/simpleterm-agent-hook.sh
 mkdir -p ~/.config/opencode/plugins
 curl -fsSL -o ~/.config/opencode/plugins/simpleterm.js https://raw.githubusercontent.com/AhMunGa/simpleterm-agent-hooks/main/plugins/opencode-v1/simpleterm.js
 curl -fsSL -o ~/.config/opencode/plugins/simpleterm-agent-hook.sh https://raw.githubusercontent.com/AhMunGa/simpleterm-agent-hooks/main/plugins/opencode-v1/simpleterm-agent-hook.sh
 ```
 
-It works with OpenCode 1.0 (`permission.updated`) and 1.19 (`permission.asked`). OpenCode 2.x
-lists a 1.x plugin file as failed and goes on.
+The first line removes links that an earlier SimpleTerm app made into `~/.simpleterm/src`
+(`curl -o` would write through them). The SimpleTerm app copies the same two files from its copy of
+this repository (`~/.simpleterm/src`, as for Antigravity) instead of downloading them, so it needs
+only `github.com`; the files have the same content. It works with OpenCode 1.0
+(`permission.updated`) and 1.19 (`permission.asked`). OpenCode 2.x lists a 1.x plugin file as
+failed and goes on.
 
 ## Pair with the SimpleTerm app
 
@@ -705,10 +728,10 @@ it to go back to the default).
 | Codex | `codex plugin marketplace upgrade simpleterm-agent-hooks`, then trust the changed hooks again in `codex` |
 | Gemini CLI | `gemini extensions update simpleterm` |
 | GitHub Copilot CLI | `copilot plugin update simpleterm-copilot` |
-| Antigravity | run the install command again (from a copy: `git -C ~/.simpleterm/src pull` first) |
+| Antigravity | run the install commands again (from a copy: `git -C ~/.simpleterm/src pull --ff-only` instead of the clone) |
 | Grok Build | `grok plugin update simpleterm` (nothing to do when it uses the Claude Code plugin) |
-| OpenCode 2.x | `opencode plugin update 'github:AhMunGa/simpleterm-agent-hooks#main::path:plugins/opencode'` |
-| OpenCode 1.x | run the two `curl` commands again |
+| OpenCode 2.x | `opencode plugin update "github:AhMunGa/simpleterm-agent-hooks#main::path:plugins/opencode"` |
+| OpenCode 1.x | run the install commands again |
 
 ## Uninstall
 
@@ -720,8 +743,9 @@ codex plugin marketplace remove simpleterm-agent-hooks
 gemini extensions uninstall simpleterm
 agy plugin uninstall simpleterm-antigravity
 copilot plugin uninstall simpleterm-copilot
+copilot plugin marketplace remove simpleterm-agent-hooks
 grok plugin uninstall simpleterm --confirm
-opencode plugin remove 'github:AhMunGa/simpleterm-agent-hooks#main::path:plugins/opencode'
+opencode plugin remove "github:AhMunGa/simpleterm-agent-hooks#main::path:plugins/opencode"
 rm -f ~/.config/opencode/plugins/simpleterm.js ~/.config/opencode/plugins/simpleterm-agent-hook.sh
 ```
 
@@ -813,6 +837,7 @@ Not tested on Windows yet.
 
 ```
 .claude-plugin/marketplace.json        marketplace (read by both Claude Code and Codex)
+.github/plugin/marketplace.json        Copilot CLI catalog (simpleterm-copilot only)
 gemini-extension.json, hooks/hooks.json  Gemini CLI extension (the repository is the extension)
 plugins/simpleterm/                    Claude Code, Codex and Grok Build
   .claude-plugin/plugin.json           Claude Code (and Grok) manifest; hooks in hooks/hooks.json

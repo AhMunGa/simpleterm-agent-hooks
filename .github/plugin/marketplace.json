@@ -1,0 +1,17 @@
+{
+  "name": "simpleterm-agent-hooks",
+  "owner": {
+    "name": "AhMunGa",
+    "url": "https://github.com/AhMunGa/simpleterm-agent-hooks"
+  },
+  "metadata": {
+    "description": "SimpleTerm agent hooks for GitHub Copilot CLI"
+  },
+  "plugins": [
+    {
+      "name": "simpleterm-copilot",
+      "source": "./plugins/copilot",
+      "description": "SimpleTerm alerts for GitHub Copilot CLI"
+    }
+  ]
+}

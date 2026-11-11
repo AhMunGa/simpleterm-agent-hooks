@@ -29,6 +29,25 @@ tie an alert or a request to a herdr or tmux session row whose session id it doe
 - Outside herdr, tmux and screen the events and records are byte for byte those of 0.5.1 (the shared
   fixtures); inside tmux the events gain `pane`.
 
+The install commands here and in the SimpleTerm app are the same, or the README says why not
+(SimpleTerm `if/cmd-plugin-installer#commands`, `hist/cmd-plugin-installer#d6`, issue
+AhMunGa/simple-term#470). No hook changed.
+
+- **Copilot CLI from a marketplace**: a catalog of its own, `.github/plugin/marketplace.json`
+  (marketplace `simpleterm-agent-hooks`, only `simpleterm-copilot`), so
+  `copilot plugin install simpleterm-copilot@simpleterm-agent-hooks` works after
+  `copilot plugin marketplace add AhMunGa/simpleterm-agent-hooks`. Copilot reads that file before
+  `.claude-plugin/marketplace.json`; Claude Code and Codex do not read it and list no Copilot plugin
+  (measured: Copilot CLI 1.0.108, Claude Code 2.1.322, Codex 0.167.0; SimpleTerm
+  `if/plugin-locations#distribution`, `hist/plugin-locations#d2`). The direct install still works,
+  but Copilot 1.0.108 says direct installs are deprecated.
+- **README**: Grok Build's and OpenCode 2.x's arguments are in double quotes (unquoted, zsh with
+  `extendedglob` stops at the `#` and csh drops everything after it, `--trust` too); Gemini CLI
+  makes `~/.simpleterm` owner-only (`mkdir -p -m 700`) and passes `--skip-settings`, as the app
+  does; the Antigravity copy install makes the same folder first; OpenCode 1.x first removes the
+  links an earlier SimpleTerm app made into `~/.simpleterm/src` (`curl -o` would write through
+  them). Running an install again changes nothing, but Gemini CLI and Grok Build exit 1 then.
+
 ## 0.5.1 - 2026-11-04
 
 A request held back for a wait is told again while it is still open (SimpleTerm
