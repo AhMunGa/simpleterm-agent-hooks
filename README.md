@@ -276,7 +276,7 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | OpenCode 1.19 question | `question` you can answer (`fmt=2`) | none |
 | Copilot `notification` (permission prompt, question) | `question` (an alert) | none |
 | Copilot `preToolUse` `exit_plan_mode` | `question` (plan) | none |
-| Copilot `agentStop` | `done` (none while background shells or subagents run, as for Claude Code); a subagent's own stop: `state` `sub_stop` | none |
+| Copilot `agentStop` | `done` (none while background shells or subagents run, as for Claude Code; after a turn a `/every` or `/after` schedule started, none while a schedule is left, and the last one to the SSH tunnel only); a subagent's own stop: `state` `sub_stop` | none |
 | Copilot `userPromptSubmitted`, `sessionEnd`, `subagentStart`/`Stop` | `state` (SSH tunnel only); `error` when a session ends on one | none |
 | `simpleterm notify` | `notify` | OSC 777 notification instead |
 
@@ -388,7 +388,9 @@ there):
   first `Stop` that finds no schedule left after a turn the schedule started is the `done`: to the
   SSH tunnels only and at once (no relay push), with `done_scheduled` on Claude Code's screen, so the
   app shows it in its list without an alert. When that turn ends asking you something it is a plain
-  `done` everywhere.
+  `done` everywhere. Copilot CLI's `/every` (`/loop`) and `/after` follow the same rules: its
+  scheduled prompt starts with `[Scheduled prompt #<id>]`, and the schedules left come from the
+  session's `events.jsonl`.
 
 **A `done` waits 3 seconds on Claude Code and Grok Build** (`done_delay`). Another Stop hook (yours
 or a plugin's) may block the stop so that the agent works on; the agent then fires `Stop` again

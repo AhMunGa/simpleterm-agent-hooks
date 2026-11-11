@@ -5040,7 +5040,13 @@ prompt_origin() {
       parent-agent-message-* | parent-message-* | notifications-* | goal-summary-* | goal-classifier-nudge-* | plan-resume-*) PROMPT_BY=agent ;;
     esac
   elif [ "$AGENT" = copilot ]; then
-    case $PROMPT in '<system_notification>'*) PROMPT_BY=task ;; esac
+    # A scheduled prompt (/every, /loop, /after) starts with the line
+    # `[Scheduled prompt #<id>]`; the hook input has no source (measured on
+    # 1.0.109, SimpleTerm if/hook-events-turn#turn-end).
+    case $PROMPT in
+      '<system_notification>'*) PROMPT_BY=task ;;
+      '[Scheduled prompt #'*) PROMPT_BY=schedule ;;
+    esac
   else
     case $SRC in
       user | sdk) ;;
@@ -5251,6 +5257,19 @@ function str(s, key,   p, r) {
   if (match(r, /^([^"\\]|\\.)*/)) return substr(r, 1, RLENGTH)
   return ""
 }
+function int0(s, key,   p, r) {
+  p = index(s, "\"" key "\":")
+  if (!p) return ""
+  r = substr(s, p + length(key) + 3)
+  if (match(r, /^[0-9]+/)) return substr(r, 1, RLENGTH)
+  return ""
+}
+# The schedule id of a session.schedule_* event (data.id, a number).
+function sid(s,   t) {
+  if (!match(s, /"data":\{[^}]*"id":[0-9]+/)) return ""
+  t = substr(s, RSTART, RLENGTH); sub(/.*"id":/, "", t)
+  return t
+}
 /"type":"assistant\.message"/ { c = str($0, "content"); if (c != "") last = c }
 /"type":"tool\.execution_start"/ && /"toolName":"bash"/ && /"mode":"async"/ && !/"detach":true/ {
   id = str($0, "shellId"); if (id == "") next
@@ -5265,7 +5284,28 @@ function str(s, key,   p, r) {
   SA[id] = 1; AT[id] = str($0, "agentType"); AN[id] = str($0, "agentDisplayName")
 }
 /"type":"subagent\.(completed|failed)"/ { delete SA[str($0, "toolCallId")] }
+# Schedules of /every, /after (SimpleTerm if/hook-events-turn#turn-end): created, less
+# cancelled, less a one-shot whose prompt came (user.message source schedule-<id>).
+/"type":"session\.schedule_created"/ {
+  id = sid($0); if (id == "") next
+  if (!(id in CR)) { NC++; CO[NC] = id }
+  CR[id] = 1; CP[id] = str($0, "prompt"); CC[id] = str($0, "cron"); CI[id] = int0($0, "intervalMs")
+  ONE[id] = ($0 ~ /"recurring":false/)
+}
+/"type":"session\.schedule_cancelled"/ { delete CR[sid($0)] }
+/"type":"user\.message"/ { s = str($0, "source"); if (s ~ /^schedule-[0-9]+$/ && ONE[substr(s, 10)]) delete CR[substr(s, 10)] }
 END {
+  m = 0
+  for (k = 1; k <= NC; k++) if (CO[k] in CR) {
+    i = CO[k]
+    sc = CC[i]
+    if (sc == "" && CI[i] != "") sc = "every " int(CI[i] / 1000) "s"
+    if (sc == "") sc = "once"
+    printf "F\tsession_crons.%d.id\ts\t%s\n", m, i
+    printf "F\tsession_crons.%d.schedule\ts\t%s\n", m, sc
+    if (CP[i] != "") printf "F\tsession_crons.%d.prompt\ts\t%s\n", m, CP[i]
+    m++
+  }
   n = 0
   for (k = 1; k <= NS; k++) if (SO[k] in SH) {
     i = SO[k]
@@ -5297,7 +5337,11 @@ copilot_tx() {
   ft=$(printf '%s\n' "$tx" | sed -n "s/^F$TAB//p")
   [ -n "$ft" ] && FACTS="$FACTS$NL$ft"
   while IFS="$TAB" read -r k t v; do
-    [ -n "$k" ] && bg_field "$k=$v"
+    case $k in
+      '') ;;
+      session_crons.*) cron_field "$k=$v" ;;
+      *) bg_field "$k=$v" ;;
+    esac
   done <<EOF
 $ft
 EOF

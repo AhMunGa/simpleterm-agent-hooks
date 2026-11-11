@@ -80,6 +80,15 @@ The end of a turn a schedule started (SimpleTerm `spec/turn-state#scheduled`,
 - **A task's turn ends while a schedule is set**: only a turn a schedule started waits for the
   schedule; a turn a task's report (or the agent) started ends in `done` when none of its work is
   left (`spec/turn-state#background`). Before, a set schedule kept it quiet.
+- **Copilot CLI's scheduled turns** (`/every`, alias `/loop`, and `/after`, an experimental
+  feature; `if/hook-events-turn#turn-end`): a prompt that starts with `[Scheduled prompt #<id>]` is
+  a turn a schedule started (the hook input has no `source`, measured on 1.0.109), and the schedules
+  left at `agentStop` are counted from `events.jsonl` (`session.schedule_created` less
+  `session.schedule_cancelled` and a one-shot whose prompt came). The rules above apply: no `done`
+  while a schedule is set after a scheduled turn, and the last one goes to the tunnels only. A
+  prompt you type that starts with that mark is read the same way (the mark is text only). A
+  one-shot `/after` run was not measured (`hist/hook-events#e12`). `agent-hook.sh` only: Copilot
+  runs no `agent-hook.ps1`.
 - **A failed turn shows an error**: Claude Code's `StopFailure` writes `simpleterm:state=idle` and
   then the new state value `simpleterm:state=error` in the same output, instead of `done` (a failed
   turn showed a green done badge where Claude does not speak OSC 7501). The app shows the error badge

@@ -2540,6 +2540,80 @@ def t_copilot(s):
         tun.wait(5)
 
 
+def t_copilot_schedules(s):
+    """Copilot CLI /every, /loop and /after (experimental; measured on 1.0.109 with a local model stub,
+    SimpleTerm if/hook-events-turn#turn-end): a scheduled prompt starts with `[Scheduled prompt #<id>]`;
+    events.jsonl holds session.schedule_created and session.schedule_cancelled. A scheduled turn with a
+    schedule left is a pause (state scheduled); with none left its done goes to the tunnels only."""
+    if s.kind != "sh":
+        return
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2}), (LINK_A, {"fmt": 2})])
+        env = {"COPILOT_CLI": "1", "COPILOT_CLI_BINARY_VERSION": "1.0.109"}
+        base = {"sessionId": "cops-1", "timestamp": 1794366354204, "cwd": "/w/proj"}
+        tx = s.tmp / "cops" / "events.jsonl"
+        lines = []
+
+        def ev(t, data):
+            lines.append(json.dumps({"type": t, "data": data, "id": "7033787d-cd09-404e-b99d-a3725d448438",
+                                     "timestamp": "2026-11-11T03:12:01.230Z"}, separators=(",", ":")))
+            write(tx, "\n".join(lines) + "\n")
+
+        def reset():
+            s.ctl("/_ctl/reset", {})
+            tctl("/_ctl/reset", {})
+            tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T)}})
+
+        def run_turn(sched_id, reply):
+            prompt = "[Scheduled prompt #%d]\ncheck status" % sched_id
+            s.run("copilot", json.dumps(dict(base, prompt=prompt)), env, args=("userPromptSubmitted",))
+            ev("user.message", {"content": prompt, "source": "schedule-%d" % sched_id})
+            ev("assistant.message", {"content": reply})
+            s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
+                  env, args=("agentStop",))
+
+        def tunnel(kind):
+            return [r for r in ingests(s, ctl=tctl) if (r.get("body") or {}).get("ev") == kind]
+
+        reset()
+        ev("session.schedule_created", {"id": 1, "intervalMs": 20000, "prompt": "check status", "recurring": True, "origin": "user"})
+        run_turn(1, "Still deploying.")
+        turn = (s.home / ".simpleterm" / "run" / "cops-1.turn").read_text().split("\n")[0]
+        s.check("copilot schedule: a scheduled prompt's turn is the schedule's", turn == "schedule", turn)
+        st = wait_for(lambda: [r for r in tunnel("state") if (r.get("plain_json") or {}).get("st") == "scheduled"], 10)
+        time.sleep(1.5)
+        s.check("copilot schedule: with the schedule left, state scheduled and no done",
+                st and not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300])
+        s.check("copilot schedule: the schedule is in turn.crons",
+                (st[0]["plain_json"].get("turn") or {}).get("crons") == [{"sched": "every 20s", "prompt": "check status"}] if st else False,
+                str(st[0]["plain_json"].get("turn") if st else None)[:300])
+        # Cancelled in the schedule manager: the next scheduled turn (one more fire raced it) is the last.
+        reset()
+        ev("session.schedule_cancelled", {"id": 1})
+        run_turn(1, "The deploy finished.")
+        d = wait_for(lambda: tunnel("done"), 10)
+        time.sleep(1.5)
+        s.check("copilot schedule: none left -> done by schedule to the tunnel only",
+                len(d) == 1 and (d[0]["plain_json"].get("turn") or {}).get("by") == "schedule" and not ingests(s, "done"),
+                str(d)[:300] + str(ingests(s))[:200])
+        # A one-shot /after is gone once its prompt came.
+        reset()
+        ev("session.schedule_created", {"id": 2, "at": 1794366400000, "prompt": "say hello", "recurring": False, "origin": "user"})
+        run_turn(2, "Hello.")
+        d = wait_for(lambda: tunnel("done"), 10)
+        s.check("copilot schedule: a one-shot that fired leaves no schedule -> done to the tunnel",
+                len(d) == 1 and (d[0]["plain_json"].get("turn") or {}).get("by") == "schedule", str(d)[:300])
+        # A prompt you typed in the same session is yours.
+        reset()
+        s.run("copilot", json.dumps(dict(base, prompt="[not a schedule] hi")), env, args=("userPromptSubmitted",))
+        turn = (s.home / ".simpleterm" / "run" / "cops-1.turn").read_text().split("\n")[0]
+        s.check("copilot schedule: a typed prompt is the user's", turn == "user", turn)
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+
 def t_agy(s):
     """Antigravity: PreToolUse always answers with a decision (what agy does with `{}` or no
     answer is not documented); device waits are opt-in."""
@@ -4860,11 +4934,11 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js,
          t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_usage_ask_gate, t_conf_vectors, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_held, t_v2_not_sent,
-         t_v2_state, t_v2_sessions, t_v2_mux, t_v2_opencode_js, t_copilot_hooks, t_copilot,
+         t_v2_state, t_v2_sessions, t_v2_mux, t_v2_opencode_js, t_copilot_hooks, t_copilot, t_copilot_schedules,
          t_v2_versions, t_v2_claude_question_once]
 
 # Tests of the sh hook only (scripts and behaviour the PowerShell hook does not have).
-SH_ONLY = {"t_v2_versions", "t_v2_n10", "t_v2_opencode_js", "t_copilot_hooks", "t_copilot", "t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_delivery", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_notify_no_tty", "t_cli_wrapper",
+SH_ONLY = {"t_v2_versions", "t_v2_n10", "t_v2_opencode_js", "t_copilot_hooks", "t_copilot", "t_copilot_schedules", "t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_delivery", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_notify_no_tty", "t_cli_wrapper",
            "t_agy", "t_agy_paths", "t_opencode_sh", "t_opencode_js"}
 
 
