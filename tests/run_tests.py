@@ -5199,6 +5199,67 @@ def versions_check():
     return ["%s has version %s, %s has %s" % (k, v, MANIFESTS[0], want) for k, v in found.items() if v != want]
 
 
+def t_hooks_removed_plugin(s):
+    """A session still running after its plugin is removed still runs the hook commands it registered at start
+    (SimpleTerm if/plugin-locations#manifests, hist/plugin-locations#d3, #e5; issue AhMunGa/simple-term#686). With the
+    script gone the command ends with exit 0 and prints nothing on stdout, in the shell the agent runs it with: Gemini
+    CLI reads another exit code with text as `deny`, and a denied AfterAgent runs the agent again (one prompt made 36
+    model calls, measured on 0.66.0 with a stub). Gemini CLI runs a hook with `bash -c` on Unix and with PowerShell
+    `-Command` (the command + `; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`) on Windows (0.66.0 bundle,
+    getShellConfiguration). The Copilot and Antigravity commands find their script themselves (same rule)."""
+    gone = s.tmp / "removed-plugin"
+    there = s.tmp / "kept-plugin"
+    home = s.tmp / "removed-home"
+    for d in (gone, there / "plugins" / "simpleterm" / "scripts", home):
+        d.mkdir(parents=True, exist_ok=True)
+    rec = home / "ran.log"
+    if rec.exists():
+        rec.unlink()
+    (there / "plugins" / "simpleterm" / "scripts" / "agent-hook.sh").write_text(
+        '#!/bin/sh\ncat > /dev/null\necho "ran $*" >> "%s"\n' % rec)
+    env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8"}
+
+    def run(argv, cwd):
+        p = subprocess.run(argv, input=b"{}", capture_output=True, env=env, cwd=str(cwd), timeout=60)
+        return p.returncode, p.stdout.decode("utf-8", "replace")
+
+    if s.kind == "ps1":
+        def shell(c):
+            return [s.argv[0], "-NoProfile", "-NonInteractive", "-Command", c + "; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"]
+    else:
+        def shell(c):
+            return ["bash", "-c", c]
+    gem = json.loads((ROOT / "hooks" / "hooks.json").read_text())
+    cmds = [(ev, h["command"]) for ev, groups in gem["hooks"].items() for g in groups for h in g["hooks"]]
+    got = [(ev,) + run(shell(c.replace("${extensionPath}", str(gone))), home) for ev, c in cmds]
+    s.check("removed plugin: Gemini hook commands (%s) end with 0 and print nothing" % ("PowerShell" if s.kind == "ps1" else "bash -c"),
+            len(cmds) == 2 and all(rc == 0 and out == "" for _, rc, out in got), str(got))
+    got = [(ev,) + run(shell(c.replace("${extensionPath}", str(there))), home) for ev, c in cmds]
+    ran = rec.read_text().splitlines() if rec.exists() else []
+    s.check("kept plugin: the Gemini hook commands run the script with `gemini`",
+            all(rc == 0 and out == "" for _, rc, out in got) and ran == ["ran gemini"] * len(cmds), "%s ran=%s" % (got, ran))
+    if s.kind != "sh":
+        return
+    cp = json.loads(COPILOT_HOOKS.read_text())
+    got = [(ev,) + run(["bash", "-c", h["bash"]], gone) for ev, groups in cp["hooks"].items() for h in groups]
+    s.check("removed plugin: Copilot hook commands end with 0 and print nothing",
+            got and all(rc == 0 and out == "" for _, rc, out in got), str(got))
+    def commands(x, ev=""):
+        if isinstance(x, dict):
+            if isinstance(x.get("command"), str):
+                yield ev, x["command"]
+            for k, v in x.items():
+                yield from commands(v, k if isinstance(v, list) else ev)
+        elif isinstance(x, list):
+            for v in x:
+                yield from commands(v, ev)
+    ag = json.loads((ROOT / "plugins" / "antigravity" / "hooks.json").read_text())
+    got = [(ev,) + run(["bash", "-c", c], gone) for ev, c in commands(ag)]
+    # (Antigravity's PreToolUse answers its neutral `allow` when it finds no script.)
+    s.check("removed plugin: Antigravity hook commands end with 0 (nothing, or PreToolUse's allow)",
+            got and all(rc == 0 and out in ("", '{"decision":"allow"}\n') for _, rc, out in got), str(got))
+
+
 def copies_check():
     """Plugins that are installed on their own carry copies of the scripts; they must not drift."""
     bad = []
@@ -5216,7 +5277,7 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js,
          t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_usage_ask_gate, t_conf_vectors, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_held, t_v2_not_sent,
          t_v2_state, t_v2_sessions, t_v2_mux, t_v2_opencode_js, t_copilot_hooks, t_copilot, t_copilot_schedules,
-         t_v2_versions, t_v2_claude_question_once]
+         t_v2_versions, t_v2_claude_question_once, t_hooks_removed_plugin]
 
 # Tests of the sh hook only (scripts and behaviour the PowerShell hook does not have).
 SH_ONLY = {"t_v2_versions", "t_v2_n10", "t_v2_opencode_js", "t_copilot_hooks", "t_copilot", "t_copilot_schedules", "t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_delivery", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_notify_no_tty", "t_cli_wrapper",

@@ -6,7 +6,7 @@
           {
             "type": "command",
             "name": "simpleterm",
-            "command": "sh \"${extensionPath}/plugins/simpleterm/scripts/agent-hook.sh\" gemini",
+            "command": "sh \"${extensionPath}/plugins/simpleterm/scripts/agent-hook.sh\" gemini; exit 0",
             "timeout": 10000
           }
         ]
@@ -18,7 +18,7 @@
           {
             "type": "command",
             "name": "simpleterm",
-            "command": "sh \"${extensionPath}/plugins/simpleterm/scripts/agent-hook.sh\" gemini",
+            "command": "sh \"${extensionPath}/plugins/simpleterm/scripts/agent-hook.sh\" gemini; exit 0",
             "timeout": 10000
           }
         ]
