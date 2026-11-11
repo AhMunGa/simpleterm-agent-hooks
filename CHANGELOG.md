@@ -94,9 +94,11 @@ The end of a turn a schedule started (SimpleTerm `spec/turn-state#scheduled`,
   while a schedule is set after a scheduled turn, and the last one goes to the tunnels only. A
   prompt you type that starts with that mark is yours again at `agentStop`: the session's last
   `user.message` in `events.jsonl` has a `schedule-<id>` source for a run and none when you typed
-  it, written before `agentStop` (`hist/turn-state#d11`). A one-shot `/after` run (measured on
-  1.0.109) leaves no schedule at its `agentStop` (`hist/hook-events#e12`). `agent-hook.sh` only:
-  Copilot runs no `agent-hook.ps1`.
+  it, written before `agentStop` (`hist/turn-state#d11`). A subagent's own prompt in that file
+  (source `agent-<session id>`, which can come before the main `agentStop`) is not the session's
+  prompt: before, a scheduled run that started a background subagent could read as yours. A
+  one-shot `/after` run (measured on 1.0.109) leaves no schedule at its `agentStop`
+  (`hist/hook-events#e12`). `agent-hook.sh` only: Copilot runs no `agent-hook.ps1`.
 - **The report of work a scheduled turn started is the schedule's** (`spec/turn-state#background`,
   `if/hook-events-turn#background`, `hist/turn-state#d14`): a `/loop` turn that ran a background
   agent sent a `done` with each report (the rule above; before #469 it sent nothing), and a Copilot
@@ -104,9 +106,14 @@ The end of a turn a schedule started (SimpleTerm `spec/turn-state#scheduled`,
   of the work it started (the newest 32, until no schedule is left or the session ends), and a
   report turn on one of them ends like a scheduled turn, a report on a report too: Claude Code's
   `<task-notification>` by its `<task-id>`, Grok Build's `task-completed-` and
-  `subagent-completed-` by the id after it, Copilot's `<system_notification>` by the shell of the
-  last `shell_completed` in `events.jsonl`. The report of work your own turn started still ends in
-  `done` (`hist/hook-events#e15`). Codex has no schedules; OpenCode 2.x and Antigravity follow.
+  `subagent-completed-` by the id after it, Copilot's `<system_notification>` by the work the last
+  notification in `events.jsonl` names: a shell (`shell_completed`, its `shellId`), a detached
+  shell (`shell_detached_completed`; the scheduled turn keeps the ids of the detached shells it
+  started, which are no work to wait for), or a background subagent (`agent_idle`, its `agentId`,
+  tied to the `toolCallId` of its `subagent.started`); no `user.message` is written for that turn
+  (measured on 1.0.105 and 1.0.109). The report of work
+  your own turn started still ends in `done` (`hist/hook-events#e15`). Codex has no schedules;
+  OpenCode 2.x and Antigravity follow.
 - **A failed turn shows an error**: Claude Code's `StopFailure` writes `simpleterm:state=idle` and
   then the new state value `simpleterm:state=error` in the same output, instead of `done` (a failed
   turn showed a green done badge where Claude does not speak OSC 7501). The app shows the error badge

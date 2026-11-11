@@ -4123,7 +4123,7 @@ PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS='' REQIDIN=''
 OCTITLE='' OCCOST='' OCTIN='' OCTOUT='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX=''
 BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_SEQ=''
 BG_SVC=0 BG_IDMAP='' BG_KEEP='' BG_SHELLS='' BG_IDS='' BG_NOID=0 BG_M=''
-CRON_N=0 CRON_SCHED='' CRON_SUMS='' CRON_IDS='' PROMPT_SCHED='' COPILOT_SRC='' COPILOT_REP='' REPORT_ID=''
+CRON_N=0 CRON_SCHED='' CRON_SUMS='' CRON_IDS='' PROMPT_SCHED='' COPILOT_SRC='' COPILOT_REP='' COPILOT_DET='' REPORT_ID=''
 
 # --- what the hook reads from the text of a turn ------------------------------
 
@@ -5110,12 +5110,13 @@ prompt_origin() {
 }
 
 # $SID.schedtasks: the ids of the background work (background_tasks,
-# backgroundTasks, Copilot's shells) that a scheduled turn
-# started, so that the turn its report starts is the schedule's too (SimpleTerm
-# spec/turn-state#background, hist/turn-state#d14), a chain included. Set at
-# each Stop, after the turn is judged: a scheduled turn adds the ids that were
-# not running when it began, and the newest SCHED_MAX are kept; a Stop with no
-# schedule left, and the session's end, remove the file.
+# backgroundTasks, Copilot's shells and subagents, and Copilot's detached
+# shells, COPILOT_DET) that a scheduled turn started, so that the turn its
+# report starts is the schedule's too (SimpleTerm spec/turn-state#background,
+# hist/turn-state#d14), a chain included. Set at each Stop, after the turn is
+# judged: a scheduled turn adds the ids that were not running when it began,
+# and the newest SCHED_MAX are kept; a Stop with no schedule left, and the
+# session's end, remove the file.
 SCHED_MAX=32
 sched_tasks() {
   st_f=$RUN_DIR/$SID.schedtasks st_keep=''
@@ -5128,7 +5129,7 @@ sched_tasks() {
     st_keep="$st_keep $st_i"
   done
   if [ "$TURN_BY" = schedule ]; then
-    for st_i in $BG_IDS; do
+    for st_i in $BG_IDS $COPILOT_DET; do
       case $st_i in *[!A-Za-z0-9._:-]*) continue ;; esac
       case " $PREV_IDS $st_keep " in *" $st_i "*) ;; *) st_keep="$st_keep $st_i" ;; esac
     done
@@ -5261,8 +5262,10 @@ stop_flow() {
   if [ "$AGENT" = copilot ] && [ "$TURN_BY" = schedule ] && [ -n "$COPILOT_SRC" ]; then
     case ${COPILOT_SRC#:} in schedule-[0-9]*) ;; *) TURN_BY=user TURN_USER=1 ;; esac
   fi
-  #  - Copilot: a <system_notification> turn reports on the work events.jsonl
-  #    names; that work may be a scheduled turn's ($SID.schedtasks).
+  #  - Copilot: a <system_notification> turn reports on the shell (detached
+  #    too) or subagent the last notification in events.jsonl names
+  #    (COPILOT_REP); that work
+  #    may be a scheduled turn's ($SID.schedtasks).
   if [ "$AGENT" = copilot ] && [ "$TURN_BY" = task ] && [ -n "$COPILOT_REP" ] && [ -f "$RUN_DIR/$SID.schedtasks" ]; then
     case " $(cat "$RUN_DIR/$SID.schedtasks" 2>/dev/null) " in *" $COPILOT_REP "*) TURN_BY=schedule ;; esac
   fi
@@ -5393,18 +5396,32 @@ function sid(s,   t) {
 /"type":"session\.schedule_cancelled"/ { delete CR[sid($0)] }
 /"type":"user\.message"/ { s = str($0, "source"); if (s ~ /^schedule-[0-9]+$/ && ONE[substr(s, 10)]) delete CR[substr(s, 10)] }
 # The source of the last prompt: schedule-<id> for a scheduled run, none when
-# a person typed it (it is written before agentStop; measured on 1.0.109).
-# The shell a <system_notification> prompt reports on: that of the last
-# shell_completed.
-/"type":"system\.notification"/ && /"type":"shell_completed"/ { done1 = str($0, "shellId") }
-/"type":"system\.notification"/ && !/"type":"shell_completed"/ { done1 = "" }
-/"type":"user\.message"/ {
-  us = ":" str($0, "source")
-  rep = (index(str($0, "content"), "<system_notification>") == 1) ? done1 : ""
+# a person typed it (it is written before agentStop; measured on 1.0.109). A
+# subagent writes its own prompt to the same file (source agent-<session id>),
+# at times before the main agentStop (1.0.105): only the main prompts count.
+/"type":"user\.message"/ && !/"source":"agent-/ { us = ":" str($0, "source"); rep = ""; ND = 0 }
+# The work a <system_notification> turn reports on (SimpleTerm
+# if/hook-events-turn#background). No user.message is written for that turn
+# (measured on 1.0.105 and 1.0.109), so it is the last notification after the
+# last prompt: shell_completed and shell_detached_completed name the shell
+# (shellId), agent_idle the subagent by its agentId, which subagent.started
+# ties to its toolCallId. The notification also starts that turn.
+/"type":"subagent\.started"/ { a = str($0, "agentId"); if (a != "") AG[a] = str($0, "toolCallId") }
+/"type":"system\.notification"/ {
+  rep = ""; ND = 0
+  if ($0 ~ /"type":"shell_(detached_)?completed"/) rep = str($0, "shellId")
+  else if ($0 ~ /"type":"agent_idle"/) { a = str($0, "agentId"); if (a in AG) rep = AG[a] }
+}
+# Detached shells this turn started (after its prompt or notification): no
+# work to wait for, but their end wakes the agent too (measured on 1.0.109),
+# so a scheduled turn keeps their ids like those of its other work.
+/"type":"tool\.execution_start"/ && /"toolName":"bash"/ && /"mode":"async"/ && /"detach":true/ {
+  id = str($0, "shellId"); if (id != "") { ND++; DT[ND] = id }
 }
 END {
   if (us != "") print "S\t" us
   if (rep != "") print "R\t" rep
+  for (k = 1; k <= ND; k++) print "D\t" DT[k]
   m = 0
   for (k = 1; k <= NC; k++) if (CO[k] in CR) {
     i = CO[k]
@@ -5445,6 +5462,7 @@ copilot_tx() {
   [ -n "$TLAST" ] && LAST=$TLAST
   COPILOT_SRC=$(printf '%s\n' "$tx" | sed -n "s/^S$TAB//p")
   COPILOT_REP=$(printf '%s\n' "$tx" | sed -n "s/^R$TAB//p")
+  COPILOT_DET=$(printf '%s\n' "$tx" | sed -n "s/^D$TAB//p" | tr '\n' ' ')
   v2_facts
   ft=$(printf '%s\n' "$tx" | sed -n "s/^F$TAB//p")
   [ -n "$ft" ] && FACTS="$FACTS$NL$ft"
