@@ -3214,7 +3214,7 @@
   {
    "name": "claude_herdr",
    "agent": "claude",
-   "src": "Claude Code 2.1.316 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "src": "Claude Code 2.1.316 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events-identification#identification)",
    "steps": [
     {
      "args": [
@@ -3277,7 +3277,7 @@
   {
    "name": "claude_tmux_pane",
    "agent": "claude",
-   "src": "Claude Code 2.1.316 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "src": "Claude Code 2.1.316 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events-identification#identification)",
    "steps": [
     {
      "args": [
@@ -3339,7 +3339,7 @@
   {
    "name": "claude_tmux_in_herdr",
    "agent": "claude",
-   "src": "Claude Code 2.1.316 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "src": "Claude Code 2.1.316 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events-identification#identification)",
    "steps": [
     {
      "args": [
@@ -3402,7 +3402,7 @@
   {
    "name": "claude_screen_in_herdr",
    "agent": "claude",
-   "src": "Claude Code 2.1.316 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "src": "Claude Code 2.1.316 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events-identification#identification)",
    "steps": [
     {
      "args": [
@@ -3464,7 +3464,7 @@
   {
    "name": "claude_herdr_bad_pane",
    "agent": "claude",
-   "src": "Claude Code 2.1.316 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "src": "Claude Code 2.1.316 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events-identification#identification)",
    "steps": [
     {
      "args": [
@@ -3525,7 +3525,7 @@
   {
    "name": "codex_herdr",
    "agent": "codex",
-   "src": "Codex 0.165.0 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "src": "Codex 0.165.0 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events-identification#identification)",
    "steps": [
     {
      "args": [
@@ -3565,7 +3565,7 @@
   {
    "name": "opencode2_herdr",
    "agent": "opencode",
-   "src": "OpenCode, from the plugin bridge (2.2.5 permission.asked, measured v2a8); same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "src": "OpenCode, from the plugin bridge (2.2.5 permission.asked, measured v2a8); same input, multiplexer environment (if/event-v2#common-fields, if/hook-events-identification#identification)",
    "steps": [
     {
      "args": [
@@ -3617,7 +3617,7 @@
   {
    "name": "opencode119_herdr",
    "agent": "opencode",
-   "src": "OpenCode, from the plugin bridge (1.19.5 permission.asked, measured a1/a6); same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "src": "OpenCode, from the plugin bridge (1.19.5 permission.asked, measured a1/a6); same input, multiplexer environment (if/event-v2#common-fields, if/hook-events-identification#identification)",
    "steps": [
     {
      "args": [
@@ -3664,7 +3664,7 @@
   {
    "name": "copilot_herdr",
    "agent": "copilot",
-   "src": "GitHub Copilot CLI 1.0.105 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "src": "GitHub Copilot CLI 1.0.105 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events-identification#identification)",
    "steps": [
     {
      "args": [
@@ -3700,7 +3700,7 @@
   {
    "name": "grok_herdr",
    "agent": "grok",
-   "src": "Grok Build 1.0.70 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "src": "Grok Build 1.0.70 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events-identification#identification)",
    "steps": [
     {
      "args": [
@@ -3764,7 +3764,7 @@
   {
    "name": "agy_herdr",
    "agent": "agy",
-   "src": "Antigravity CLI 1.4.12 [measured shapes]; agy_wait > 0, no tunnel; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "src": "Antigravity CLI 1.4.12 [measured shapes]; agy_wait > 0, no tunnel; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events-identification#identification)",
    "steps": [
     {
      "args": [
@@ -3806,7 +3806,7 @@
   {
    "name": "budget_stage2_herdr",
    "agent": "claude",
-   "src": "synthetic: the relay drops req.ask whole (stage 2) after the field limits; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "src": "synthetic: the relay drops req.ask whole (stage 2) after the field limits; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events-identification#identification)",
    "steps": [
     {
      "args": [

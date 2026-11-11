@@ -21,7 +21,7 @@ A held Claude Code question is told again on Claude Code 2.1.322 too (SimpleTerm
 - The same in `agent-hook.ps1` and in every plugin's copy of `agent-hook.sh`. Nothing on the wire changes.
 
 Agents inside herdr, and the pane an agent runs in (SimpleTerm `if/event-v2#common-fields`,
-`if/hook-events#identification`, issue AhMunGa/simple-term#612): the app's agent session list can
+`if/hook-events-identification#identification`, issue AhMunGa/simple-term#612): the app's agent session list can
 tie an alert or a request to a herdr or tmux session row whose session id it does not know yet
 (before an agent's first prompt, or Copilot CLI after `/clear`).
 

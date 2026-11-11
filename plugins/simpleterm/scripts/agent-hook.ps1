@@ -2037,7 +2037,7 @@ function Get-TopVersion([string]$s) {
     return ''
 }
 
-# AV and AVS: the agent's version and where it came from (SimpleTerm if/hook-events#identification).
+# AV and AVS: the agent's version and where it came from (SimpleTerm if/hook-events-identification#identification).
 function Get-AgentVersion {
     $Script:AV = ''
     $Script:AVS = ''
@@ -2129,7 +2129,7 @@ function Initialize-Common {
 }
 
 # The multiplexer the agent runs in and the id of its pane there (SimpleTerm
-# if/event-v2#common-fields, if/hook-events#identification), as mux_detect in
+# if/event-v2#common-fields, if/hook-events-identification#identification), as mux_detect in
 # agent-hook.sh: $Script:MuxV (tmux, screen, herdr or empty) and $Script:PaneV
 # (empty when none may be sent). tmux and screen come first: herdr drops TMUX,
 # TMUX_PANE and STY from its panes, so with both the other one is nearer.
@@ -3249,7 +3249,7 @@ function New-AskPsi([string]$exe, [string]$argLine) {
 # The version of agent executable $exe, which the ask would run (SimpleTerm if/usage-ask#conditions condition 6, hist/usage-ask#d21, hist/usage-ask#d22; ask_bin_version): @{ bv; exe }, exe the file that the
 # ask then runs. Its links are followed to the end: .../versions/<version> (a
 # native Claude Code install) gives the version. Otherwise run/ver.<agent>
-# (SimpleTerm hist/event-v2#d13, if/hook-events#version-cache: that file's path, and its --version's first dotted
+# (SimpleTerm hist/event-v2#d13, if/hook-events-identification#version-cache: that file's path, and its --version's first dotted
 # number or an empty line if it gave none) is used for the same file while the
 # file is not newer: `unknown` if it holds no version. Else a child measures it
 # again (15 seconds at most) and bv stays '': no ask this turn.

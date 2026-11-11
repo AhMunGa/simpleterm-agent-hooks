@@ -1513,7 +1513,7 @@ END {
   }
 }'
 
-# AV and AVS: the agent's version and where it came from (SimpleTerm if/hook-events#identification).
+# AV and AVS: the agent's version and where it came from (SimpleTerm if/hook-events-identification#identification).
 v2_version() {
   AV='' AVS=''
   case $AGENT in
@@ -1562,7 +1562,7 @@ codex_pm() {
 }
 
 # The multiplexer the agent runs in and the id of its pane there (SimpleTerm
-# if/event-v2#common-fields, if/hook-events#identification): MUXV (tmux,
+# if/event-v2#common-fields, if/hook-events-identification#identification): MUXV (tmux,
 # screen, herdr, unknown or empty) and PANEV (empty when none may be sent).
 # tmux and screen come first: herdr (0.9.5, measured) drops TMUX, TMUX_PANE
 # and STY from its panes, so with both a tmux or screen was started inside a
@@ -3515,7 +3515,7 @@ ask_ver_ok() { # version
 
 # The version of agent executable $1, which the ask would run (SimpleTerm if/usage-ask#conditions condition 6, hist/usage-ask#d21, hist/usage-ask#d22): ASK_BV, and ASK_EXE the file that the ask then
 # runs. Its links are followed to the end: .../versions/<version> (a native
-# Claude Code install) gives the version. Otherwise run/ver.<agent> (SimpleTerm hist/event-v2#d13, if/hook-events#version-cache: that file's path, and its --version's first dotted number or
+# Claude Code install) gives the version. Otherwise run/ver.<agent> (SimpleTerm hist/event-v2#d13, if/hook-events-identification#version-cache: that file's path, and its --version's first dotted number or
 # an empty line if it gave none) is used for the same file while the file is
 # not newer: `unknown` if it holds no version. Else it is measured again in
 # the background (15 seconds at most) and ASK_BV stays empty: no ask this
@@ -4083,7 +4083,7 @@ case $AGENT in
     # there only when a subagent's own tool call fires the hook (foreground or
     # background; absent for the main thread).
     WANT='hook_event_name,notification_type,tool_name,tool_input.command,tool_input.file_path,tool_input.url,tool_input.description,tool_input.questions.0.question,session_id,cwd,message,last_assistant_message,error,transcript_path,context_tokens,model,to_model,prompt,source,stop_hook_active,is_interrupt,agent_id'
-    # v2 (SimpleTerm if/hook-events#identification): turn, permission mode, the
+    # v2 (SimpleTerm if/hook-events-identification#identification): turn, permission mode, the
     # subagent's type, a session's end; from the OpenCode bridge its request
     # id, version family, parent session, message id and session title.
     WANT=$WANT',prompt_id,permission_mode,agent_type,reason,request_id,oc,parent_session_id,message_id,title,cost,tokens_in,tokens_out'

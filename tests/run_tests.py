@@ -4513,7 +4513,7 @@ def t_v2_sessions(s):
 
 
 def t_v2_mux(s):
-    """SimpleTerm if/event-v2#common-fields, if/hook-events#identification: `mux` and `pane` from the hook
+    """SimpleTerm if/event-v2#common-fields, if/hook-events-identification#identification: `mux` and `pane` from the hook
     environment (herdr: HERDR_ENV=1 with HERDR_PANE_ID; tmux and screen first, as the nearer multiplexer),
     `pane` right after `mux`, the same on the relay and the tunnel and in the tunnel's states; the session
     record names the multiplexer but never the pane (SimpleTerm if/session-record#fields, hist/session-record#d25)."""
@@ -4620,7 +4620,7 @@ def t_v2_mux(s):
 
 
 def t_v2_versions(s):
-    """SimpleTerm if/hook-events#version-cache: the agent's version where the agent gives none: `--version`, run in the background
+    """SimpleTerm if/hook-events-identification#version-cache: the agent's version where the agent gives none: `--version`, run in the background
     when the executable is new or newer than the cache (SimpleTerm hist/event-v2#d13); the first dotted number is taken."""
     if s.kind != "sh":
         return
