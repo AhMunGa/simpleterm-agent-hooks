@@ -5080,6 +5080,7 @@ function Get-PromptSum([string]$text) {
 function Set-PromptOrigin {
     $by = 'user'
     $rid = ''
+    $report = $false
     $Script:PromptSched = ''
     if ($Script:Agent -ceq 'grok') {
         $p = $Script:PromptId
@@ -5108,8 +5109,8 @@ function Set-PromptOrigin {
                 }
             }
         }
-        if ($p.StartsWith('task-completed-', $Ord)) { $rid = $p.Substring(15) }
-        elseif ($p.StartsWith('subagent-completed-', $Ord)) { $rid = $p.Substring(19) }
+        if ($p.StartsWith('task-completed-', $Ord)) { $rid = $p.Substring(15); $report = $true }
+        elseif ($p.StartsWith('subagent-completed-', $Ord)) { $rid = $p.Substring(19); $report = $true }
     } else {
         $src = $Script:Src
         $pr = $Script:Prompt
@@ -5134,10 +5135,15 @@ function Set-PromptOrigin {
             $b = $r.IndexOf('</task-id>', $Ord)
             if ($b -gt 0) { $rid = $r.Substring(0, $b) }
         }
+        if ($pr.StartsWith('<task-notification>', $Ord)) { $report = $true }
     }
+    # A report prompt (Write-TurnMark: one that comes while a turn is open does
+    # not start a turn; SimpleTerm hist/turn-state#d16).
+    $Script:PromptReport = $report
+    $ridOk = ($rid -and $rid.Length -le 128 -and $rid -cmatch '\A[A-Za-z0-9._:-]+\z')
     # A report on work a scheduled turn started is the schedule's turn too
     # (SimpleTerm spec/turn-state#background, hist/turn-state#d14).
-    if ($rid -and $rid.Length -le 128 -and $rid -cmatch '\A[A-Za-z0-9._:-]+\z' -and ($by -ceq 'task' -or $by -ceq 'agent')) {
+    if ($ridOk -and ($by -ceq 'task' -or $by -ceq 'agent')) {
         $t = Read-FileB (Join-Path $RunDir ($Script:Sid + '.schedtasks'))
         if ($null -ne $t -and (Split-Words $t) -ccontains $rid) { $by = 'schedule' }
     }
@@ -5170,12 +5176,28 @@ function Update-SchedTasks {
 
 # $Sid.turn: line 1 who started this turn, line 2 the ids of the background
 # tasks that already ran when it started ($Sid.stopids, the last Stop's list),
-# line 3 the schedule the prompt names (PromptSched), for the Stop that ends it.
+# line 3 the schedule the prompt names (PromptSched), for the Stop that ends it;
+# line 4 `open` until the turn ends (Close-TurnMark). A report prompt (Claude
+# Code's <task-notification>, Grok Build's task-completed- and
+# subagent-completed-) that comes while the turn is open does not start a turn:
+# the mark stays (SimpleTerm hist/turn-state#d16). The same as turn_mark in
+# agent-hook.sh.
 function Write-TurnMark {
+    $turnFile = Join-Path $RunDir ($Script:Sid + '.turn')
+    if ($Script:PromptReport -and ($Script:Agent -ceq 'claude' -or $Script:Agent -ceq 'grok') -and
+        (Read-LineB $turnFile 3) -ceq 'open') { return }
     $ids = Read-LineB (Join-Path $RunDir ($Script:Sid + '.stopids')) 0
     $who = $Script:PromptBy
     if ($Script:PromptUser) { $who = 'user' }
-    [void](Write-FileB (Join-Path $RunDir ($Script:Sid + '.turn')) ($who + "`n" + $ids + "`n" + $Script:PromptSched + "`n"))
+    [void](Write-FileB $turnFile ($who + "`n" + $ids + "`n" + $Script:PromptSched + "`nopen`n"))
+}
+
+# The turn is over (Stop, StopFailure, Esc): the mark loses its `open` line.
+function Close-TurnMark {
+    $turnFile = Join-Path $RunDir ($Script:Sid + '.turn')
+    if (-not [IO.File]::Exists($turnFile)) { return }
+    $l = @((Read-LineB $turnFile 0), (Read-LineB $turnFile 1), (Read-LineB $turnFile 2))
+    [void](Write-FileB $turnFile (($l -join "`n") + "`n"))
 }
 
 # TurnAt: @-parameters of the end of a turn (SimpleTerm if/event-v2-turn#turn):
@@ -5454,6 +5476,7 @@ function Invoke-StopFlow {
         if ($t1 -and $t1 -cne 'user') { $Script:TurnUser = $false }
         $Script:TurnBy = $t1
         $Script:PrevIds = $t2
+        Close-TurnMark
     }
     # Grok: a subagent-completed- turn whose prompt names one of the session's
     # sessionCrons (this Stop's, or the last Stop's when the turn dropped it)
@@ -5719,6 +5742,7 @@ function Invoke-Event {
             Write-State 'idle' ''
             Set-TurnAt 'interrupt' '' ''
             Send-State 'idle' $Script:TurnAt
+            Close-TurnMark
             Write-SessTurn 'idle' ''
             return
         }
@@ -5816,6 +5840,7 @@ function Invoke-Event {
         # alert, which the event above pairs with. 'idle' first: an app older
         # than 'error' drops it and only clears the badge, no green done.
         Write-State 'error' '' 'idle'
+        Close-TurnMark
         Write-SessTurn 'idle' ''
         return
     }
@@ -5907,6 +5932,7 @@ function Invoke-Event {
             Initialize-V2 $Script:TurnAt
             Send-Background $e
             Invoke-TurnEnd
+            Close-TurnMark
         }
         Write-SessTurn 'idle' ''
         return
@@ -6090,7 +6116,7 @@ try {
     }
     foreach ($v in @('HookEvent', 'NType', 'Tool', 'Detail', 'Desc', 'Sid', 'Cwd', 'Last', 'Err', 'QText', 'FirstIn', 'NType2', 'TPath',
             'CtxTok', 'Model', 'GKey', 'Reason', 'Prompt', 'Src', 'StopAct', 'IsInt', 'AgentId', 'PromptId', 'ToolUseId', 'SubType', 'SubPar',
-            'Tid', 'PMode', 'BgPick', 'BgType', 'BgDesc', 'BgCmd', 'BgShells', 'BgSvcIdx', 'BgIds', 'CronSched', 'CronSums', 'CronIds', 'PromptSched', 'BgM')) {
+            'Tid', 'PMode', 'BgPick', 'BgType', 'BgDesc', 'BgCmd', 'BgShells', 'BgSvcIdx', 'BgIds', 'CronSched', 'CronSums', 'CronIds', 'PromptSched', 'PromptReport', 'BgM')) {
         Set-Variable -Name $v -Value '' -Scope Script
     }
     $Script:BgN = 0

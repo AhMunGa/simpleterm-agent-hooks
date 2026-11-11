@@ -111,7 +111,11 @@ The end of a turn a schedule started (SimpleTerm `spec/turn-state#scheduled`,
   shell (`shell_detached_completed`; the scheduled turn keeps the ids of the detached shells it
   started, which are no work to wait for), or a background subagent (`agent_idle`, its `agentId`,
   tied to the `toolCallId` of its `subagent.started`); no `user.message` is written for that turn
-  (measured on 1.0.105 and 1.0.109). The report of work
+  (measured on 1.0.105 and 1.0.109). A report that comes while a turn runs does not start a turn:
+  Claude Code hands work that ended inside the turn to it as a `<task-notification>` prompt between
+  its tool calls, and the turn keeps who started it (the turn mark `<sid>.turn` has a 4th line
+  `open` until the turn's `Stop`, `StopFailure` or Esc; Claude Code and Grok Build). Before, a
+  `/loop` turn whose background work ended inside it sent a `done`. The report of work
   your own turn started still ends in `done` (`hist/hook-events#e15`). Codex has no schedules;
   OpenCode 2.x and Antigravity follow.
 - **A failed turn shows an error**: Claude Code's `StopFailure` writes `simpleterm:state=idle` and

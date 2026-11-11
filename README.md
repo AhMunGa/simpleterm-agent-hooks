@@ -398,7 +398,8 @@ there):
   the schedule's turn too, and so is the report of work that report started: Claude Code's
   `<task-notification>` by its `<task-id>`, Grok's `task-completed-` or `subagent-completed-` by
   the id after it, Copilot's `<system_notification>` by the shell (detached ones too) or background
-  subagent the last notification in `events.jsonl` names. The
+  subagent the last notification in `events.jsonl` names. A report that comes while a turn runs
+  (Claude Code hands work that ended inside the turn to it as a prompt) belongs to that turn. The
   hook keeps the ids of up to 32 such pieces of work until no schedule is left or the session ends.
   The report of work a turn you typed started still ends with `done`.
 

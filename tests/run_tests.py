@@ -1314,6 +1314,9 @@ def t_schedules(s):
     cc("sw2", "UserPromptSubmit", prompt="<task-notification>\n<task-id>a5c0ffee000000002</task-id>\n<status>completed</status>")
     cc("sw2", "Stop", stop_hook_active=False, last_assistant_message="All checks passed.", background_tasks=[], session_crons=cron)
     s.check("schedule: the report of a person's background agent with the loop set -> done", wait_for(lambda: ingests(s, "done"), 20))
+    s.check("schedule: ... its report came after the person's turn ended: a turn of its own (task)",
+            (s.home / ".simpleterm" / "run" / "sw2.turn").read_text().split("\n")[0] == "task",
+            (s.home / ".simpleterm" / "run" / "sw2.turn").read_text())
     # A chain: the loop turn starts agent A, A's report turn starts agent B; B's report rests with the loop too.
     s.ctl("/_ctl/reset", {})
     cc("sw3", "UserPromptSubmit", prompt="run the checks in a background agent", source="schedule_wakeup")
@@ -1328,6 +1331,37 @@ def t_schedules(s):
     s.check("schedule: a chain of reports from a loop turn (agent A starts agent B) rests with the loop (no done)",
             not ingests(s) and seqs(out).startswith("\x1b]9;simpleterm:state=background scheduled:"), repr(out) + str(ingests(s))[:200])
 
+    # Work that ends inside the running turn: Claude Code hands its <task-notification> to that turn as a prompt,
+    # between its tool calls (shapes: the orca fixture claude-task-notification-hooks.jsonl, shell-ends-mid-turn
+    # and subagent-ends-mid-turn). It does not start a turn: the mark stays, the loop turn ends quiet.
+    def mark(sid):
+        return (s.home / ".simpleterm" / "run" / (sid + ".turn")).read_text().split("\n")
+
+    note = "<task-notification>\n<task-id>bwaw14qyq</task-id>\n<status>completed</status>\n</task-notification>"
+    s.ctl("/_ctl/reset", {})
+    cc("sw4", "UserPromptSubmit", prompt="run the checks", source="schedule_wakeup")
+    cc("sw4", "PostToolUse", tool_name="Bash", tool_input={"command": "sleep 2", "run_in_background": True})
+    cc("sw4", "UserPromptSubmit", prompt=note)
+    m = mark("sw4")
+    out = cc("sw4", "Stop", stop_hook_active=False, last_assistant_message="Checks passed.", background_tasks=[], session_crons=cron)
+    time.sleep(4.5)
+    s.check("schedule: a report inside a loop turn keeps the loop's mark -> quiet (no done)",
+            m[0] == "schedule" and not ingests(s) and seqs(out).startswith("\x1b]9;simpleterm:state=background scheduled:"),
+            repr(m) + repr(out) + str(ingests(s))[:200])
+    s.check("schedule: ... and the Stop closes the turn (no open line)", mark("sw4")[3:4] in ([], [""]), repr(mark("sw4")))
+    s.ctl("/_ctl/reset", {})
+    cc("sw5", "UserPromptSubmit", prompt="run the checks", source="user")
+    cc("sw5", "UserPromptSubmit", prompt=note)
+    s.check("schedule: a report inside a person's turn keeps the person's mark", mark("sw5")[0] == "user", repr(mark("sw5")))
+    # Once the turn is over (Esc during a tool call, or a failed turn), a report starts its own turn.
+    cc("sw6", "UserPromptSubmit", prompt="run the checks", source="schedule_wakeup")
+    cc("sw6", "PostToolUseFailure", tool_name="Bash", tool_input={"command": "ls"}, is_interrupt=True, error="interrupted")
+    cc("sw6", "UserPromptSubmit", prompt=note)
+    s.check("schedule: after Esc, a report starts a turn of its own (task)", mark("sw6")[0] == "task", repr(mark("sw6")))
+    cc("sw7", "UserPromptSubmit", prompt="run the checks", source="schedule_wakeup")
+    cc("sw7", "StopFailure", error="server_error", last_assistant_message="API Error: 500")
+    cc("sw7", "UserPromptSubmit", prompt=note)
+    s.check("schedule: after a failed turn, a report starts a turn of its own (task)", mark("sw7")[0] == "task", repr(mark("sw7")))
     # Grok Build: a scheduled run's turn starts a background command; its task-completed- report rests too.
     s.ctl("/_ctl/reset", {})
     grok_run(5, mcron)

@@ -5032,12 +5032,12 @@ turn_end() {
 # with a fixed word (task-completed-, scheduler-fired-, ...; static, from the
 # 1.0.70 binary), a person's is a UUID. PROMPT_SCHED: the schedule a Grok
 # subagent-completed- turn names (scheduler_delete("<id>")), for its Stop.
-PROMPT_USER=1 PROMPT_BY=user
+PROMPT_USER=1 PROMPT_BY=user PROMPT_REPORT=''
 prompt_origin() {
-  PROMPT_USER=1 PROMPT_BY=user PROMPT_SCHED='' REPORT_ID=''
+  PROMPT_USER=1 PROMPT_BY=user PROMPT_SCHED='' REPORT_ID='' PROMPT_REPORT=''
   if [ "$AGENT" = grok ]; then
     case $PROMPTID in
-      task-completed-* | subagent-completed-*) PROMPT_BY=task REPORT_ID=${PROMPTID#*-completed-} ;;
+      task-completed-* | subagent-completed-*) PROMPT_BY=task REPORT_ID=${PROMPTID#*-completed-} PROMPT_REPORT=1 ;;
       bash-completed-* | monitor-completed-* | workflow-completed-*) PROMPT_BY=task ;;
       scheduler-fired-*) PROMPT_BY=schedule ;;
       parent-agent-message-* | parent-message-* | notifications-* | goal-summary-* | goal-classifier-nudge-* | plan-resume-*) PROMPT_BY=agent ;;
@@ -5095,6 +5095,7 @@ prompt_origin() {
         REPORT_ID=${REPORT_ID%%"$po_tb"*}
         ;;
     esac
+    case $PROMPT in '<task-notification>'*) PROMPT_REPORT=1 ;; esac
   fi
   # A report on work a scheduled turn started is the schedule's turn too
   # (SimpleTerm spec/turn-state#background): $SID.schedtasks (sched_tasks).
@@ -5146,13 +5147,34 @@ sched_tasks() {
 # $SID.turn: line 1 `user` or `auto` (who started this turn), line 2 the ids
 # of the background tasks that already ran when it started ($SID.stopids, the
 # last Stop's list), line 3 the schedule the prompt names (PROMPT_SCHED), for
-# the Stop that ends it.
+# the Stop that ends it; line 4 `open` until the turn ends (turn_close).
+# A report prompt (PROMPT_REPORT: Claude Code's <task-notification>, Grok
+# Build's task-completed- and subagent-completed-) that comes while the turn
+# is open does not start a turn: Claude Code hands work that ended inside a
+# running turn to that turn this way, between its tool calls. The mark stays
+# (SimpleTerm hist/turn-state#d16, if/hook-events-turn#background).
 turn_mark() {
+  case $AGENT in
+    claude | grok)
+      if [ "$PROMPT_REPORT" = 1 ] && [ -f "$RUN_DIR/$SID.turn" ] &&
+        [ "$(sed -n 4p "$RUN_DIR/$SID.turn" 2>/dev/null)" = open ]; then
+        return 0
+      fi
+      ;;
+  esac
   tm_ids=''
   [ -f "$RUN_DIR/$SID.stopids" ] && IFS= read -r tm_ids <"$RUN_DIR/$SID.stopids"
   tm_who=$PROMPT_BY
   [ "$PROMPT_USER" = 1 ] && tm_who=user
-  printf '%s\n%s\n%s\n' "$tm_who" "$tm_ids" "$PROMPT_SCHED" >"$RUN_DIR/$SID.turn" 2>/dev/null
+  printf '%s\n%s\n%s\nopen\n' "$tm_who" "$tm_ids" "$PROMPT_SCHED" >"$RUN_DIR/$SID.turn" 2>/dev/null
+}
+
+# The turn is over (Stop, StopFailure, Esc): the mark loses its `open` line.
+turn_close() {
+  [ -f "$RUN_DIR/$SID.turn" ] || return 0
+  tc1='' tc2='' tc3=''
+  { IFS= read -r tc1; IFS= read -r tc2; IFS= read -r tc3; } <"$RUN_DIR/$SID.turn"
+  printf '%s\n%s\n%s\n' "$tc1" "$tc2" "$tc3" >"$RUN_DIR/$SID.turn" 2>/dev/null
 }
 
 # True if every counted task was already running before the turn began.
@@ -5241,6 +5263,7 @@ stop_flow() {
     [ -n "$t1" ] && [ "$t1" != user ] && TURN_USER=0
     TURN_BY=$t1
     PREV_IDS=$t2
+    turn_close
   fi
   # Who started it, as only the turn's end can tell (SimpleTerm
   # if/hook-events-turn#turn-end):
@@ -5595,6 +5618,7 @@ case $AGENT:$EVENT in
       print_state idle
       turn_at interrupt
       send_state idle "$TURN_AT"
+      turn_close
       sess_turn idle
       finish
     fi
@@ -5686,6 +5710,7 @@ case $AGENT:$EVENT in
     # alert, which the event above pairs with. `idle` first: an app older
     # than `error` drops it and only clears the badge, no green done.
     print_state error '' idle
+    turn_close
     sess_turn idle
     ;;
   codex:SessionStart | codex:PostCompact)
@@ -5871,6 +5896,7 @@ case $AGENT:$EVENT in
       v2_prep "$TURN_AT"
       send_bg "$ev"
       turn_end
+      turn_close
     fi
     sess_turn idle
     ;;
