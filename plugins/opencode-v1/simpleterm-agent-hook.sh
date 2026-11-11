@@ -5926,9 +5926,10 @@ case $AGENT:$EVENT in
         setmsg "$LAST"
         rk_at claude_notif "@.ntype${TAB}s$TAB$NTYPE$NL"
         v2_prep "$RK_AT"
-        # Only the MCP form has a measured record of its window (if/ssh-tunnel-wait#open-window).
+        # The MCP form and its URL form have a measured record of their window (`waiting`, `input
+        # needed`, written before the notification: if/ssh-tunnel-wait#open-window).
         hk=''
-        [ "$NTYPE" = elicitation_dialog ] && hk=claude_form
+        case $NTYPE in elicitation_dialog | elicitation_url_dialog) hk=claude_form ;; esac
         held_prep "$hk"
         send_bg question
         ;;

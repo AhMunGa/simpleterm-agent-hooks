@@ -805,9 +805,12 @@ Not tested on Windows yet.
   end comes when the daemon closes the conversation (about 30 minutes after you quit or the SSH
   connection drops). `codex --no-daemon` runs hooks in the session itself. SimpleTerm
   `hist/event-v2-turn#r17`, issue #447.
-- **A held request is told again for Claude Code only.** Other agents' requests held back for a wait
-  you are looking at stay off the device once you answer that wait (their hooks do not wait, and no
-  record of theirs tells an open prompt; other devices get the relay's push; SimpleTerm issue #446).
+- **Some held requests are not told again.** A request held back for a wait you are looking at is
+  told again while the agent's own record shows its window open (Claude Code questions and forms,
+  Antigravity CLI and Grok Build questions, Grok Build permission windows and plan reviews). Where no
+  record tells an open window (Claude Code `agent_needs_input`, Antigravity CLI's plan confirmation,
+  Codex, OpenCode, Copilot CLI) it stays off the device once you answer that wait; other devices
+  get the relay's push (SimpleTerm issue #446).
 - **Background work that never ends.** A dev server the table of services does not know, or
   another endless job left in the background, never wakes the agent: `done` comes only after
   `bg_done_after` (default 10 minutes), and the badge stays `background` until the next turn

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+The PowerShell hook's held sender runs, and a Claude Code URL form is told again (SimpleTerm
+`if/ssh-tunnel-wait#open-window`, issue AhMunGa/simple-term#446).
+
+- **PowerShell**: run on pwsh 7.7.0 for the first time, the held sender of `agent-hook.ps1` stopped before its
+  first round: `@($links)` on its list of held links threw `Argument types do not match`, and the error was
+  swallowed, so the PowerShell hook never told a held request again. The links are now copied one by one. The
+  sender's tests run on pwsh too (with a Claude Code MCP form; the Antigravity CLI cases on the sh hook only).
+- **Claude Code URL form** (`Notification` `elicitation_url_dialog`): Claude Code 2.1.322 writes `waiting` and
+  `input needed` in its session file for it as for the MCP form, so it is told again while that window is open,
+  in the sh and the PowerShell hook. Before, it logged `held: no record of claude's window to tell it by (stop)`.
+- README: the known limitation on held requests names the requests that still cannot be told again.
+
 A held Claude Code question is told again on Claude Code 2.1.322 too (SimpleTerm
 `if/ssh-tunnel-wait#open-window`, `hist/request-wait-link#d7`, issue AhMunGa/simple-term#446).
 

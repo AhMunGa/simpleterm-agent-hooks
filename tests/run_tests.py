@@ -4546,50 +4546,52 @@ def t_v2_held_bg(s):
             return (len({r["body"]["rid"] for r in got}) == len(got) and len({json.dumps(p.get("req"), sort_keys=True) for p in plains}) == 1
                     and all(not p.get("nonce") for p in plains) and all(not r["body"].get("nh") for r in got))
 
-        # --- Antigravity ask_question: transcript_full.jsonl, the hook's stepIdx 2, the question step 1.
-        tr = s.tmp / "agy" / "transcript_full.jsonl"
-        shutil.rmtree(tr.parent, ignore_errors=True)
-        jl(tr, [{"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE", "content": "ask me"},
-                {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
-                 "tool_calls": [{"name": "ask_question", "args": {"questions": "[]"}}]}])
-        agy_q = json.dumps({"conversationId": "conv-h", "workspacePaths": ["/w/a"], "transcriptPath": str(tr), "stepIdx": 2,
-                            "toolCall": {"name": "ask_question", "args": {"questions": [{"question": "Which color?", "options": ["Red", "Green"],
-                                                                                          "is_multi_select": False}]}}})
-        setup()
-        n0 = s.log_text().count("held: the window is not open (stop)")
-        a = start(("agy", "PreToolUse"), agy_q)
-        got = wait_for(lambda: len(asks()) >= 3 and asks(), 20)
-        s.check("held bg: agy ask_question: told again while the transcript ends on the question",
-                got and same_req(got) and (got[0].get("plain_json") or {}).get("req", {}).get("nid") == "2",
-                "%d %s" % (len(asks()), s.log_text()[-400:]))
-        s.check("held bg: agy: one sender mark while it runs", len(marks()) == 1, str(marks()))
-        jl(tr, [{"step_index": 2, "source": "MODEL", "type": "GENERIC", "status": "DONE", "content": "A1: Red"}])
-        ok = ended("held: the window is not open (stop)", n0)
-        n1 = len(asks())
-        time.sleep(2.5)
-        s.check("held bg: agy: answered (step 2 written): no more, one log line, mark gone",
-                ok and len(asks()) == n1, "%d->%d %s %s" % (n1, len(asks()), marks(), s.log_text()[-300:]))
-        stop(a)
+        # Antigravity CLI runs only the sh hook (the PowerShell hook has no Antigravity CLI part).
+        if s.kind != "ps1":
+            # --- Antigravity ask_question: transcript_full.jsonl, the hook's stepIdx 2, the question step 1.
+            tr = s.tmp / "agy" / "transcript_full.jsonl"
+            shutil.rmtree(tr.parent, ignore_errors=True)
+            jl(tr, [{"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE", "content": "ask me"},
+                    {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+                     "tool_calls": [{"name": "ask_question", "args": {"questions": "[]"}}]}])
+            agy_q = json.dumps({"conversationId": "conv-h", "workspacePaths": ["/w/a"], "transcriptPath": str(tr), "stepIdx": 2,
+                                "toolCall": {"name": "ask_question", "args": {"questions": [{"question": "Which color?", "options": ["Red", "Green"],
+                                                                                              "is_multi_select": False}]}}})
+            setup()
+            n0 = s.log_text().count("held: the window is not open (stop)")
+            a = start(("agy", "PreToolUse"), agy_q)
+            got = wait_for(lambda: len(asks()) >= 3 and asks(), 20)
+            s.check("held bg: agy ask_question: told again while the transcript ends on the question",
+                    got and same_req(got) and (got[0].get("plain_json") or {}).get("req", {}).get("nid") == "2",
+                    "%d %s" % (len(asks()), s.log_text()[-400:]))
+            s.check("held bg: agy: one sender mark while it runs", len(marks()) == 1, str(marks()))
+            jl(tr, [{"step_index": 2, "source": "MODEL", "type": "GENERIC", "status": "DONE", "content": "A1: Red"}])
+            ok = ended("held: the window is not open (stop)", n0)
+            n1 = len(asks())
+            time.sleep(2.5)
+            s.check("held bg: agy: answered (step 2 written): no more, one log line, mark gone",
+                    ok and len(asks()) == n1, "%d->%d %s %s" % (n1, len(asks()), marks(), s.log_text()[-300:]))
+            stop(a)
 
-        # --- Two copies of the hook for one call (the same stepIdx): one sender.
-        tr2 = s.tmp / "agy2" / "transcript_full.jsonl"
-        shutil.rmtree(tr2.parent, ignore_errors=True)
-        jl(tr2, [{"step_index": 6, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "ask_question"}]}])
-        q7 = json.loads(agy_q)
-        q7.update(transcriptPath=str(tr2), stepIdx=7, conversationId="conv-h2")
-        setup()
-        n0 = s.log_text().count("held: another sender has it (stop)")
-        a = start(("agy", "PreToolUse"), json.dumps(q7))
-        wait_for(lambda: marks(), 10)
-        b = start(("agy", "PreToolUse"), json.dumps(q7))
-        s.check("held bg: two hooks of one call: the second sender stops",
-                wait_for(lambda: s.log_text().count("held: another sender has it (stop)") > n0, 15) and len(marks()) == 1,
-                "%s %s" % (marks(), s.log_text()[-300:]))
-        stop(b)
-        # The agent ends: the sender stops.
-        n0 = s.log_text().count("held: agent gone (stop)")
-        stop(a)
-        s.check("held bg: the agent ended: stops, mark gone", ended("held: agent gone (stop)", n0), "%s %s" % (marks(), s.log_text()[-300:]))
+            # --- Two copies of the hook for one call (the same stepIdx): one sender.
+            tr2 = s.tmp / "agy2" / "transcript_full.jsonl"
+            shutil.rmtree(tr2.parent, ignore_errors=True)
+            jl(tr2, [{"step_index": 6, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "ask_question"}]}])
+            q7 = json.loads(agy_q)
+            q7.update(transcriptPath=str(tr2), stepIdx=7, conversationId="conv-h2")
+            setup()
+            n0 = s.log_text().count("held: another sender has it (stop)")
+            a = start(("agy", "PreToolUse"), json.dumps(q7))
+            wait_for(lambda: marks(), 10)
+            b = start(("agy", "PreToolUse"), json.dumps(q7))
+            s.check("held bg: two hooks of one call: the second sender stops",
+                    wait_for(lambda: s.log_text().count("held: another sender has it (stop)") > n0, 15) and len(marks()) == 1,
+                    "%s %s" % (marks(), s.log_text()[-300:]))
+            stop(b)
+            # The agent ends: the sender stops.
+            n0 = s.log_text().count("held: agent gone (stop)")
+            stop(a)
+            s.check("held bg: the agent ended: stops, mark gone", ended("held: agent gone (stop)", n0), "%s %s" % (marks(), s.log_text()[-300:]))
 
         # --- Grok Build: question, permission window, plan review (chat_history.jsonl, events.jsonl beside updates.jsonl).
         def grok_case(name, tool, call, ntype, message, chat_last, events, close, still_open=None, ts="10:20:00"):
@@ -4694,23 +4696,39 @@ def t_v2_held_bg(s):
                 "%s %s" % (marks(), s.log_text()[-300:]))
         stop(f)
 
-        # No record to tell it by (Claude Code's URL form): one log line, nothing again.
+        # Claude Code's URL form (Notification elicitation_url_dialog, #450 8.4): the session file says waiting /
+        # input needed about 6 s before the notification [measured 2.1.322], as the MCP form: told again until it closes.
         setup()
-        n0 = s.log_text().count("held: no record of claude's window to tell it by (stop)")
-        u = start(("claude",), json.dumps(dict(form, session_id="held-u", notification_type="elicitation_url_dialog")),
-                  before=lambda pid: claude_file(pid, "held-u", at=int(time.time() * 1000)))
-        s.check("held bg: no record (URL form): one log line, not told again",
-                wait_for(lambda: s.log_text().count("held: no record of claude's window to tell it by (stop)") > n0, 15)
-                and len(asks()) == 1 and not marks(), "%d %s" % (len(asks()), s.log_text()[-300:]))
+        n0 = s.log_text().count("held: the window is not open (stop)")
+        at_u = int(time.time() * 1000) - 6000
+        u = start(("claude",), json.dumps(dict(form, session_id="held-u", notification_type="elicitation_url_dialog",
+                                               message="Sign in to continue")),
+                  before=lambda pid: claude_file(pid, "held-u", at=at_u))
+        got = wait_for(lambda: len(asks()) >= 3 and asks(), 20)
+        s.check("held bg: claude URL form: told again", got and same_req(got), "%d %s" % (len(asks()), s.log_text()[-400:]))
+        claude_file(u.pid, "held-u", status="idle", wf=None)
+        s.check("held bg: claude URL form: answered (idle): stops", ended("held: the window is not open (stop)", n0),
+                "%s %s" % (marks(), s.log_text()[-300:]))
         stop(u)
 
         # Plain suppressed (not held): the sender ends at once, nothing again.
         tr3 = s.tmp / "agy3" / "transcript_full.jsonl"
         shutil.rmtree(tr3.parent, ignore_errors=True)
         jl(tr3, [{"step_index": 1, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "ask_question"}]}])
-        q3 = dict(json.loads(agy_q), transcriptPath=str(tr3), conversationId="conv-h3")
+        # The sender's own rules, with an Antigravity question (sh) or, as the PowerShell hook has no Antigravity
+        # part, a Claude Code MCP form whose session file waits on it.
+        q3 = {"conversationId": "conv-h3", "workspacePaths": ["/w/a"], "transcriptPath": str(tr3), "stepIdx": 2,
+              "toolCall": {"name": "ask_question", "args": {"questions": [{"question": "Which color?", "options": ["Red", "Green"],
+                                                                            "is_multi_select": False}]}}}
+
+        def gen(conv, env=None):
+            if s.kind != "ps1":
+                return start(("agy", "PreToolUse"), json.dumps(dict(q3, conversationId=conv)), env)
+            sid = "held-" + conv
+            at_g = int(time.time() * 1000) - 6000
+            return start(("claude",), json.dumps(dict(form, session_id=sid)), env, before=lambda pid: claude_file(pid, sid, at=at_g))
         setup(push="suppressed")
-        a = start(("agy", "PreToolUse"), json.dumps(q3))
+        a = gen("conv-h3")
         wait_for(lambda: asks(), 10)
         time.sleep(3)
         s.check("held bg: plain suppressed: not told again, no mark", len(asks()) == 1 and not marks(), "%d %s" % (len(asks()), marks()))
@@ -4719,7 +4737,7 @@ def t_v2_held_bg(s):
         # The limit (test value 3 s from the hook start).
         setup()
         n0 = s.log_text().count("held: limit (stop)")
-        a = start(("agy", "PreToolUse"), json.dumps(dict(q3, conversationId="conv-h4")), {"SIMPLETERM_HOOK_TEST_HELD_CAP": "3"})
+        a = gen("conv-h4", {"SIMPLETERM_HOOK_TEST_HELD_CAP": "3"})
         s.check("held bg: the limit: stops, mark gone", ended("held: limit (stop)", n0), "%s %s" % (marks(), s.log_text()[-300:]))
         stop(a)
 
@@ -4729,7 +4747,7 @@ def t_v2_held_bg(s):
         for i in range(8):
             (run / ("held.other.k%d" % i)).write_text("%d\n" % os.getpid())
         n0 = s.log_text().count("held: too many senders (stop)")
-        a = start(("agy", "PreToolUse"), json.dumps(dict(q3, conversationId="conv-h5")))
+        a = gen("conv-h5")
         s.check("held bg: eight senders alive: a ninth stops",
                 wait_for(lambda: s.log_text().count("held: too many senders (stop)") > n0, 15) and len(marks()) == 8,
                 "%s %s" % (marks(), s.log_text()[-300:]))
@@ -4739,7 +4757,7 @@ def t_v2_held_bg(s):
 
         # Test values are read only with SIMPLETERM_HOOK_TEST=1: without it a round comes every 5 s.
         setup()
-        a = start(("agy", "PreToolUse"), json.dumps(dict(q3, conversationId="conv-h6")), {"SIMPLETERM_HOOK_TEST": ""})
+        a = gen("conv-h6", {"SIMPLETERM_HOOK_TEST": ""})
         got = wait_for(lambda: len(asks()) >= 2 and asks(), 15)
         gap = (got[1]["received"] - got[0]["received"]) if got else 0
         s.check("held bg: without SIMPLETERM_HOOK_TEST the test interval is ignored (5 s)", got and gap >= 4, "%.1f s" % gap)

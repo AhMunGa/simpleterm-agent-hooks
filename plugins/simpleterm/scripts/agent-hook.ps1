@@ -4253,7 +4253,9 @@ function Invoke-HeldLoop([string]$ev, $links) {
     $miss = 0
     $script:ResBase = 0
     if (Test-UInt $Script:HbRes) { $script:ResBase = [int]$Script:HbRes }
-    $live = @($links)
+    # Copied item by item: @($links) of the List[object] throws "Argument types do not match" in pwsh 7.7.
+    $live = @()
+    foreach ($l in $links) { $live += $l }
     while ($true) {
         Start-Sleep -Seconds $every
         $now = Now-Epoch
@@ -5974,8 +5976,9 @@ function Invoke-Event {
             Set-Msg $Script:Last
             Set-RkAt 'claude_notif' ('@.ntype' + $Tab + 's' + $Tab + $nt + $Nl)
             Initialize-V2 $Script:RkAt
-            # Only the MCP form has a measured record of its window (if/ssh-tunnel-wait#open-window).
-            if ($nt -ceq 'elicitation_dialog') { Set-HeldPrep 'claude_form' } else { Set-HeldPrep '' }
+            # The MCP form and its URL form have a measured record of their window (`waiting`, `input
+            # needed`, written before the notification: if/ssh-tunnel-wait#open-window).
+            if ($nt -ceq 'elicitation_dialog' -or $nt -ceq 'elicitation_url_dialog') { Set-HeldPrep 'claude_form' } else { Set-HeldPrep '' }
             Send-Background 'question'
         }
         return
