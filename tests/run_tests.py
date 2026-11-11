@@ -4470,6 +4470,307 @@ def t_v2_held(s):
         tun.wait(5)
 
 
+# A stand-in agent that stays after its hook ended, until its stdin closes: a hook that sent an
+# undecidable request has returned at once, and the agent's window is still open.
+AGENT_STAY_PY = (
+    "import subprocess, sys\n"
+    "p = subprocess.Popen(sys.argv[2:], stdin=subprocess.PIPE)\n"
+    "p.stdin.write(sys.argv[1].encode()); p.stdin.close()\n"
+    "print(p.pid, flush=True)\n"
+    "p.wait()\n"
+    "sys.stdin.readline()\n"
+)
+
+
+def t_v2_held_bg(s):
+    """SimpleTerm if/ssh-tunnel-wait#held-undecidable (#446): the hook does not wait on an undecidable request
+    (wait none), so the background sender that posted it stays when a tunnel with fmt=2 answers held. Every 5
+    seconds it checks the agent's own record of the window (Antigravity transcript_full.jsonl, Grok
+    chat_history.jsonl / events.jsonl, Claude Code's session file) and sends the same request again (same req,
+    new rid, no nonce) to the tunnels that answered held, until the window closes, the user answers at the
+    terminal, the agent ends, 540 s pass or no tunnel is left. One sender per request (run/held.<session>.<key>),
+    8 per user, one log line at each end. Test values (SIMPLETERM_HOOK_TEST=1 only): HELD_EVERY seconds between
+    rounds, HELD_CAP the limit."""
+    tun, tctl = s.spawn_mock()
+    run = s.home / ".simpleterm" / "run"
+    sessions = s.home / ".claude" / "sessions"
+    fast = {"SIMPLETERM_HOOK_TEST": "1", "SIMPLETERM_HOOK_TEST_HELD_EVERY": "1"}
+    agents = []
+    try:
+        def setup(push="held"):
+            s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})], conf={"ask_delay": 0})
+            tctl("/_ctl/reset", {})
+            tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown", max_body=65536, push=push)}})
+            shutil.rmtree(sessions, ignore_errors=True)
+            sessions.mkdir(parents=True)
+
+        def asks():
+            return [r for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and r["body"]["ev"] == "question"]
+
+        def start(agent_args, inp, env=None, before=None):
+            """The hook under a stand-in agent that stays; before(pid) writes what the agent records first."""
+            cmd = [sys.executable, "-I", "-c", "import sys\nsys.stdin.readline()\n" + AGENT_STAY_PY, inp] + list(s.argv) + list(agent_args)
+            agent = s.popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=s.env(dict(fast, **(env or {}))), cwd=str(s.tmp))
+            if before:
+                before(agent.pid)
+            agent.stdin.write(b"go\n")
+            agent.stdin.flush()
+            int(agent.stdout.readline())
+            agents.append(agent)
+            return agent
+
+        def stop(agent):
+            try:
+                agent.stdin.close()
+            except OSError:
+                pass
+            try:
+                agent.wait(10)
+            except subprocess.TimeoutExpired:
+                agent.kill()
+
+        def marks():
+            return sorted(p.name for p in run.glob("held.*")) if run.exists() else []
+
+        def ended(line, n0, timeout=20):
+            return wait_for(lambda: s.log_text().count(line) > n0 and not marks(), timeout)
+
+        def jl(path, rows):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a") as f:
+                for r in rows:
+                    f.write(json.dumps(r, separators=(",", ":")) + "\n")
+
+        def same_req(got):
+            plains = [r.get("plain_json") or {} for r in got]
+            return (len({r["body"]["rid"] for r in got}) == len(got) and len({json.dumps(p.get("req"), sort_keys=True) for p in plains}) == 1
+                    and all(not p.get("nonce") for p in plains) and all(not r["body"].get("nh") for r in got))
+
+        # Antigravity CLI runs only the sh hook (the PowerShell hook has no Antigravity CLI part).
+        if s.kind != "ps1":
+            # --- Antigravity ask_question: transcript_full.jsonl, the hook's stepIdx 2, the question step 1.
+            tr = s.tmp / "agy" / "transcript_full.jsonl"
+            shutil.rmtree(tr.parent, ignore_errors=True)
+            jl(tr, [{"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE", "content": "ask me"},
+                    {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+                     "tool_calls": [{"name": "ask_question", "args": {"questions": "[]"}}]}])
+            agy_q = json.dumps({"conversationId": "conv-h", "workspacePaths": ["/w/a"], "transcriptPath": str(tr), "stepIdx": 2,
+                                "toolCall": {"name": "ask_question", "args": {"questions": [{"question": "Which color?", "options": ["Red", "Green"],
+                                                                                              "is_multi_select": False}]}}})
+            setup()
+            n0 = s.log_text().count("held: the window is not open (stop)")
+            a = start(("agy", "PreToolUse"), agy_q)
+            got = wait_for(lambda: len(asks()) >= 3 and asks(), 20)
+            s.check("held bg: agy ask_question: told again while the transcript ends on the question",
+                    got and same_req(got) and (got[0].get("plain_json") or {}).get("req", {}).get("nid") == "2",
+                    "%d %s" % (len(asks()), s.log_text()[-400:]))
+            s.check("held bg: agy: one sender mark while it runs", len(marks()) == 1, str(marks()))
+            jl(tr, [{"step_index": 2, "source": "MODEL", "type": "GENERIC", "status": "DONE", "content": "A1: Red"}])
+            ok = ended("held: the window is not open (stop)", n0)
+            n1 = len(asks())
+            time.sleep(2.5)
+            s.check("held bg: agy: answered (step 2 written): no more, one log line, mark gone",
+                    ok and len(asks()) == n1, "%d->%d %s %s" % (n1, len(asks()), marks(), s.log_text()[-300:]))
+            stop(a)
+
+            # --- Two copies of the hook for one call (the same stepIdx): one sender.
+            tr2 = s.tmp / "agy2" / "transcript_full.jsonl"
+            shutil.rmtree(tr2.parent, ignore_errors=True)
+            jl(tr2, [{"step_index": 6, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "ask_question"}]}])
+            q7 = json.loads(agy_q)
+            q7.update(transcriptPath=str(tr2), stepIdx=7, conversationId="conv-h2")
+            setup()
+            n0 = s.log_text().count("held: another sender has it (stop)")
+            a = start(("agy", "PreToolUse"), json.dumps(q7))
+            wait_for(lambda: marks(), 10)
+            b = start(("agy", "PreToolUse"), json.dumps(q7))
+            s.check("held bg: two hooks of one call: the second sender stops",
+                    wait_for(lambda: s.log_text().count("held: another sender has it (stop)") > n0, 15) and len(marks()) == 1,
+                    "%s %s" % (marks(), s.log_text()[-300:]))
+            stop(b)
+            # The agent ends: the sender stops.
+            n0 = s.log_text().count("held: agent gone (stop)")
+            stop(a)
+            s.check("held bg: the agent ended: stops, mark gone", ended("held: agent gone (stop)", n0), "%s %s" % (marks(), s.log_text()[-300:]))
+
+        # --- Grok Build: question, permission window, plan review (chat_history.jsonl, events.jsonl beside updates.jsonl).
+        def grok_case(name, tool, call, ntype, message, chat_last, events, close, still_open=None, ts="10:20:00"):
+            gd = s.tmp / ("grok-" + call)
+            shutil.rmtree(gd, ignore_errors=True)
+            gd.mkdir(parents=True)
+            (gd / "updates.jsonl").write_text("")
+            jl(gd / "chat_history.jsonl", [{"type": "user", "content": [{"type": "text", "text": "go"}]}, chat_last])
+            jl(gd / "events.jsonl", events)
+            sid = "gk-" + call
+            pre = {"hookEventName": "pre_tool_use", "hook_event_name": "PreToolUse", "sessionId": sid, "session_id": sid,
+                   "cwd": "/w/g", "toolName": tool, "toolUseId": call, "toolInput": {}, "transcriptPath": str(gd / "updates.jsonl")}
+            setup()
+            s.run("claude", json.dumps(pre), {"GROK_HOOK_EVENT": "pre_tool_use", "SIMPLETERM": "1"})
+            note = {"hookEventName": "notification", "hook_event_name": "Notification", "sessionId": sid, "session_id": sid,
+                    "cwd": "/w/g", "notificationType": ntype, "message": message, "level": "info",
+                    "timestamp": "2026-11-11T%s.000Z" % ts, "transcriptPath": str(gd / "updates.jsonl")}
+            n0 = s.log_text().count("held: the window is not open (stop)")
+            g = start(("claude",), json.dumps(note), {"GROK_HOOK_EVENT": "notification", "SIMPLETERM": "1"})
+            got = wait_for(lambda: len(asks()) >= 3 and asks(), 20)
+            s.check("held bg: grok %s: told again while open" % name,
+                    got and same_req(got) and (got[0].get("plain_json") or {}).get("req", {}).get("id") == call,
+                    "%d %s" % (len(asks()), s.log_text()[-400:]))
+            if still_open:
+                still_open(gd)
+                k = len(asks())
+                s.check("held bg: grok %s: still open after that line" % name, wait_for(lambda: len(asks()) > k, 10),
+                        "%d %s" % (len(asks()), s.log_text()[-300:]))
+            close(gd)
+            ok = ended("held: the window is not open (stop)", n0)
+            k = len(asks())
+            time.sleep(2.5)
+            s.check("held bg: grok %s: closed: no more, mark gone" % name, ok and len(asks()) == k,
+                    "%d->%d %s %s" % (k, len(asks()), marks(), s.log_text()[-300:]))
+            stop(g)
+
+        grok_case("question", "ask_user_question", "call_2_0", "elicitation_dialog", "User question requested",
+                  {"type": "assistant", "content": "", "tool_calls": [{"id": "call_2_0", "name": "ask_user_question", "arguments": "{}"}]},
+                  [{"type": "permission_resolved", "tool_name": "ask_user_question", "decision": "allow", "wait_ms": 3},
+                   {"type": "phase_changed", "phase": "tool_execution"}],
+                  lambda gd: jl(gd / "chat_history.jsonl", [{"type": "tool_result", "tool_call_id": "call_2_0", "content": "answered"}]),
+                  ts="10:20:01")
+        grok_case("permission window", "run_terminal_command", "call_3_0", "permission_prompt", "Tool permission requested",
+                  {"type": "assistant", "content": "", "tool_calls": [{"id": "call_3_0", "name": "run_terminal_command", "arguments": "{}"}]},
+                  [{"type": "tool_started", "tool_name": "run_terminal_command"}, {"type": "phase_changed", "phase": "permission_prompt"},
+                   {"type": "permission_requested", "tool_name": "run_terminal_command"}],
+                  # an allow: the call stays without a result while the tool runs; events.jsonl says it closed
+                  lambda gd: jl(gd / "events.jsonl", [{"type": "permission_resolved", "tool_name": "run_terminal_command", "decision": "allow",
+                                                       "wait_ms": 9000}, {"type": "phase_changed", "phase": "tool_execution"}]),
+                  ts="10:20:02")
+        grok_case("plan review", "exit_plan_mode", "call_4_0", "permission_prompt", "Plan approval requested: plan.md",
+                  {"type": "assistant", "content": "", "tool_calls": [{"id": "call_4_0", "name": "exit_plan_mode", "arguments": "{}"}]},
+                  # the review box opens with the permission already resolved (allow, 0 ms)
+                  [{"type": "permission_requested", "tool_name": "exit_plan_mode"},
+                   {"type": "permission_resolved", "tool_name": "exit_plan_mode", "decision": "allow", "wait_ms": 0},
+                   {"type": "phase_changed", "phase": "tool_execution"}],
+                  lambda gd: jl(gd / "chat_history.jsonl", [{"type": "tool_result", "tool_call_id": "call_4_0",
+                                                             "content": "The user chose to abandon the plan entirely"}]),
+                  ts="10:20:03")
+
+        # --- Claude Code: an undecidable question from PreToolUse (ask_delay 0 here), its session file says
+        # waiting / input needed; the user answers at the terminal (PostToolUse of that call).
+        ask_in = {"session_id": "held-q", "transcript_path": "/home/u/.claude/projects/x/t.jsonl", "cwd": "/home/u/api",
+                  "hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion", "tool_use_id": "toolu_q1",
+                  "tool_input": {"questions": [{"question": "Which tea?", "header": "Tea", "multiSelect": False,
+                                                "options": [{"label": "Green", "description": "g"}, {"label": "Black", "description": "b"}]}]}}
+
+        def claude_file(pid, session, status="waiting", wf="input needed", at=None):
+            at = at if at is not None else int(time.time() * 1000)
+            tmp = sessions / ("%d.json.tmp" % pid)
+            tmp.write_text(json.dumps({"pid": pid, "sessionId": session, "cwd": "/home/u/api", "status": status, "waitingFor": wf,
+                                       "statusUpdatedAt": at, "updatedAt": at}))
+            os.replace(tmp, sessions / ("%d.json" % pid))
+
+        setup()
+        n0 = s.log_text().count("held: answered at the terminal (stop)")
+        # The window is written right after PreToolUse returns: write it once the hook ran (its first send is
+        # in; start() returns when the hook was started, possibly before it read its start time).
+        c = start(("claude",), json.dumps(ask_in))
+        wait_for(lambda: asks(), 10)
+        claude_file(c.pid, "held-q")
+        got = wait_for(lambda: len(asks()) >= 3 and asks(), 20)
+        s.check("held bg: claude PreToolUse question: told again while the session file waits on it",
+                got and same_req(got), "%d %s" % (len(asks()), s.log_text()[-400:]))
+        post = dict(ask_in, hook_event_name="PostToolUse", tool_response={"answers": {"Which tea?": "Green"}})
+        s.run("claude", json.dumps(post))
+        s.check("held bg: claude: answered at the terminal (PostToolUse): stops, mark gone",
+                ended("held: answered at the terminal (stop)", n0), "%s %s" % (marks(), s.log_text()[-300:]))
+        stop(c)
+
+        # Claude Code MCP form (Notification elicitation_dialog): the file was written before the hook (6.4 s on 2.1.322).
+        form = {"session_id": "held-f", "transcript_path": "/home/u/.claude/projects/x/t.jsonl", "cwd": "/home/u/api",
+                "hook_event_name": "Notification", "notification_type": "elicitation_dialog", "message": "MCP server spike requests your input"}
+        setup()
+        n0 = s.log_text().count("held: the window is not open (stop)")
+        at_f = int(time.time() * 1000) - 6400
+        f = start(("claude",), json.dumps(form), before=lambda pid: claude_file(pid, "held-f", at=at_f))
+        got = wait_for(lambda: len(asks()) >= 3 and asks(), 20)
+        s.check("held bg: claude MCP form: told again", got and same_req(got), "%d %s" % (len(asks()), s.log_text()[-400:]))
+        claude_file(f.pid, "held-f", status="idle", wf=None)
+        s.check("held bg: claude MCP form: answered (idle): stops", ended("held: the window is not open (stop)", n0),
+                "%s %s" % (marks(), s.log_text()[-300:]))
+        stop(f)
+
+        # Claude Code's URL form (Notification elicitation_url_dialog, #450 8.4): the session file says waiting /
+        # input needed about 6 s before the notification [measured 2.1.322], as the MCP form: told again until it closes.
+        setup()
+        n0 = s.log_text().count("held: the window is not open (stop)")
+        at_u = int(time.time() * 1000) - 6000
+        u = start(("claude",), json.dumps(dict(form, session_id="held-u", notification_type="elicitation_url_dialog",
+                                               message="Sign in to continue")),
+                  before=lambda pid: claude_file(pid, "held-u", at=at_u))
+        got = wait_for(lambda: len(asks()) >= 3 and asks(), 20)
+        s.check("held bg: claude URL form: told again", got and same_req(got), "%d %s" % (len(asks()), s.log_text()[-400:]))
+        claude_file(u.pid, "held-u", status="idle", wf=None)
+        s.check("held bg: claude URL form: answered (idle): stops", ended("held: the window is not open (stop)", n0),
+                "%s %s" % (marks(), s.log_text()[-300:]))
+        stop(u)
+
+        # Plain suppressed (not held): the sender ends at once, nothing again.
+        tr3 = s.tmp / "agy3" / "transcript_full.jsonl"
+        shutil.rmtree(tr3.parent, ignore_errors=True)
+        jl(tr3, [{"step_index": 1, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "ask_question"}]}])
+        # The sender's own rules, with an Antigravity question (sh) or, as the PowerShell hook has no Antigravity
+        # part, a Claude Code MCP form whose session file waits on it.
+        q3 = {"conversationId": "conv-h3", "workspacePaths": ["/w/a"], "transcriptPath": str(tr3), "stepIdx": 2,
+              "toolCall": {"name": "ask_question", "args": {"questions": [{"question": "Which color?", "options": ["Red", "Green"],
+                                                                            "is_multi_select": False}]}}}
+
+        def gen(conv, env=None):
+            if s.kind != "ps1":
+                return start(("agy", "PreToolUse"), json.dumps(dict(q3, conversationId=conv)), env)
+            sid = "held-" + conv
+            at_g = int(time.time() * 1000) - 6000
+            return start(("claude",), json.dumps(dict(form, session_id=sid)), env, before=lambda pid: claude_file(pid, sid, at=at_g))
+        setup(push="suppressed")
+        a = gen("conv-h3")
+        wait_for(lambda: asks(), 10)
+        time.sleep(3)
+        s.check("held bg: plain suppressed: not told again, no mark", len(asks()) == 1 and not marks(), "%d %s" % (len(asks()), marks()))
+        stop(a)
+
+        # The limit (test value 3 s from the hook start).
+        setup()
+        n0 = s.log_text().count("held: limit (stop)")
+        a = gen("conv-h4", {"SIMPLETERM_HOOK_TEST_HELD_CAP": "3"})
+        s.check("held bg: the limit: stops, mark gone", ended("held: limit (stop)", n0), "%s %s" % (marks(), s.log_text()[-300:]))
+        stop(a)
+
+        # Eight live senders of the user: a ninth does not stay.
+        setup()
+        run.mkdir(parents=True, exist_ok=True)
+        for i in range(8):
+            (run / ("held.other.k%d" % i)).write_text("%d\n" % os.getpid())
+        n0 = s.log_text().count("held: too many senders (stop)")
+        a = gen("conv-h5")
+        s.check("held bg: eight senders alive: a ninth stops",
+                wait_for(lambda: s.log_text().count("held: too many senders (stop)") > n0, 15) and len(marks()) == 8,
+                "%s %s" % (marks(), s.log_text()[-300:]))
+        for p in run.glob("held.other.*"):
+            p.unlink()
+        stop(a)
+
+        # Test values are read only with SIMPLETERM_HOOK_TEST=1: without it a round comes every 5 s.
+        setup()
+        a = gen("conv-h6", {"SIMPLETERM_HOOK_TEST": ""})
+        got = wait_for(lambda: len(asks()) >= 2 and asks(), 15)
+        gap = (got[1]["received"] - got[0]["received"]) if got else 0
+        s.check("held bg: without SIMPLETERM_HOOK_TEST the test interval is ignored (5 s)", got and gap >= 4, "%.1f s" % gap)
+        stop(a)
+        s.check("held bg: no mark left", wait_for(lambda: not marks(), 10), str(marks()))
+    finally:
+        for ag in agents:
+            if ag.poll() is None:
+                ag.kill()
+        tun.terminate()
+        tun.wait(5)
+
+
 def t_v2_not_sent(s):
     """SimpleTerm spec/request-wait-link#no-send: requests that may never show a prompt are not sent. Copilot permissionRequest: nothing
     and an empty output; Antigravity run_command: only with agy_wait > 0 and when no tunnel answers the
@@ -5275,7 +5576,7 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js,
-         t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_usage_ask_gate, t_conf_vectors, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_held, t_v2_not_sent,
+         t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_usage_ask_gate, t_conf_vectors, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_held, t_v2_held_bg, t_v2_not_sent,
          t_v2_state, t_v2_sessions, t_v2_mux, t_v2_opencode_js, t_copilot_hooks, t_copilot, t_copilot_schedules,
          t_v2_versions, t_v2_claude_question_once, t_hooks_removed_plugin]
 
@@ -5324,7 +5625,7 @@ def ps_parse_check(pwsh):
 # Tests that keep the CPU busy (t_service_shells: some 200 Stop hooks, about 40 s of CPU a suite):
 # at most two suites run one at a time, so the others' timed checks do not run on a machine loaded
 # far past its cores (the full matrix runs ten suites at once).
-HEAVY = {"t_service_shells": threading.Semaphore(2), "t_v2_held": threading.Semaphore(3)}
+HEAVY = {"t_service_shells": threading.Semaphore(2), "t_v2_held": threading.Semaphore(3), "t_v2_held_bg": threading.Semaphore(3)}
 
 
 def ours(groups, marks):

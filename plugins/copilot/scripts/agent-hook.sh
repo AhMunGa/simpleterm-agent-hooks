@@ -564,19 +564,38 @@ send_bg() { # ev [rid] [all|tunnel|relay] [file text]
   [ "$sb_rid" = "$RID" ] && RID_USED=1
   sb_file=${4:-} sb_text=${5:-}
   [ -n "$sb_rid" ] || return 0
+  # An undecidable request (wait none; Claude Code's PreToolUse question goes
+  # as shared without a nonce, which is undecidable too): a tunnel of a v2 app
+  # may hold it back for a wait the user is looking at (held); its tunnels are
+  # listed in $sb_held and the sender stays to tell it again (held_bg,
+  # SimpleTerm if/ssh-tunnel-wait#held-undecidable).
+  sb_held=''
+  case $NL$SPEC$NL in *"${NL}req.wait${TAB}s${TAB}none${NL}"*) sb_held=$RUN_DIR/hb.$$.$sb_rid ;; esac
+  [ "$HB_KIND" = claude_ask ] && sb_held=$RUN_DIR/hb.$$.$sb_rid
   # Ignored before the fork, so the sender also outlives a terminal that
   # closes right after `simpleterm notify` (its children get SIGHUP).
   trap '' HUP
   (
+    [ -n "$sb_held" ] && : >"$sb_held"
     for pass in tunnel relay; do
       [ "$sb_scope" = all ] || [ "$sb_scope" = "$pass" ] || continue
       printf '%s\n' "$LINKS" | while IFS= read -r f; do
         load_link "$f" || continue
         if [ "$L_KIND" = tunnel ]; then [ "$pass" = tunnel ] || continue; else [ "$pass" = relay ] || continue; fi
-        ingest_one "$sb_rid" "$1" '' "$RUN_DIR/ing.$$.$sb_rid.$1.$(printf %.8s "$L_LINK")" >/dev/null &&
-          [ -n "$sb_file" ] && printf '%s\n' "$sb_text" >"$sb_file" 2>/dev/null
+        sb_out=$RUN_DIR/ing.$$.$sb_rid.$1.$(printf %.8s "$L_LINK")
+        if [ -n "$sb_held" ] && [ "$L_KIND" = tunnel ]; then
+          sb_io=$(ingest_raw "$sb_rid" "$1" '' "$sb_out")
+          sb_ok=$?
+          case $sb_io in *" held") [ "${L_FMT:-1}" = 2 ] && printf '%s\n' "$f" >>"$sb_held" ;; esac
+        else
+          ingest_one "$sb_rid" "$1" '' "$sb_out" >/dev/null
+          sb_ok=$?
+        fi
+        [ "$sb_ok" = 0 ] && [ -n "$sb_file" ] && printf '%s\n' "$sb_text" >"$sb_file" 2>/dev/null
       done
     done
+    [ -n "$sb_held" ] && [ -s "$sb_held" ] && held_bg "$sb_rid" "$1" "$sb_held"
+    [ -n "$sb_held" ] && rm -f "$sb_held"
     trim_log "s$sb_rid"
   ) </dev/null >/dev/null 2>&1 &
 }
@@ -2689,6 +2708,306 @@ rq_fire() { # i rid
   rq_note "$1" "$fp" "$fn" "$2" 1 "$fc" "$fe"
 }
 
+# --- held undecidable requests (SimpleTerm if/ssh-tunnel-wait#held-undecidable) ---------------------
+#
+# The hook does not wait on an undecidable request (wait none): a waiting hook
+# would delay or hide the agent's own window. When a tunnel answers held, the
+# background sender that posted the event stays: every 5 seconds it checks the
+# agent's own record of the window and sends the same request again (same req,
+# new rid, no nonce) to the tunnels that answered held. The app holds it again
+# while the wait the user looks at is open, and shows it once that wait ended.
+
+# What the sender needs that only the hook can know, taken before it returns:
+# the agent's pid (the hook's parent chain is gone later) and the terminal-
+# answer notes present now. Kind $1 names the agent's record of the window:
+# claude_ask, claude_form, agy_ask, grok_call (question, plan review),
+# grok_perm (permission window); empty when there is none.
+held_prep() { # kind
+  HB_KIND=$1 HB_APID='' HB_RESBASE=''
+  [ -n "$1" ] && [ -n "$LINKS" ] && has_tunnel || return 0
+  HB_APID=$(agent_pid)
+  HB_RESBASE=$(cat "$RUN_DIR/$SID.res" 2>/dev/null)
+}
+
+# The value of SPEC field $1 (a regular expression, type s).
+spec_s() { printf '%s\n' "$SPEC" | sed -n "s/^$1${TAB}s${TAB}//p" | head -n 1; }
+
+# The sender of undecidable request $2 (rid $1) stays for the tunnels listed
+# in file $3, which answered held. One sender per request: the mark
+# run/held.<session>.<key> holds its pid (key: req.nid for Antigravity, whose
+# req.id is new at every hook run; req.id otherwise); 8 per user.
+held_bg() { # rid ev links-file
+  hb_ev=$2 hb_lf=$3
+  HB_ID=$(spec_s 'req\.id') HB_NID=$(spec_s 'req\.nid')
+  hb_ok=0
+  case $HB_KIND in
+    claude_ask | claude_form) is_uint "$HB_APID" && hb_ok=1 ;;
+    agy_ask) is_uint "$HB_NID" && is_uint "$HB_APID" && [ -n "$(input_file "$TPATH")" ] && hb_ok=1 ;;
+    grok_call | grok_perm)
+      case $HB_ID in '' | st-*) ;; *) is_uint "$HB_APID" && [ -n "$(input_file "$TPATH")" ] && hb_ok=1 ;; esac ;;
+  esac
+  if [ "$hb_ok" != 1 ]; then
+    log "held: no record of $AGENT's window to tell it by (stop)"
+    return 0
+  fi
+  # This subshell's own pid ($$ is the hook's).
+  hb_pid=$(exec sh -c 'echo $PPID')
+  is_uint "$hb_pid" || return 0
+  hb_key=$HB_ID
+  [ "$AGENT" = agy ] && hb_key=$HB_NID
+  hb_key=$(printf '%s' "$hb_key" | tr -c 'A-Za-z0-9_.-' '_' | cut -c1-80)
+  HB_MARK=$RUN_DIR/held.$SID.$hb_key
+  if ! (set -C; printf '%s\n' "$hb_pid" >"$HB_MARK") 2>/dev/null; then
+    hp=$(head -c 32 "$HB_MARK" 2>/dev/null | tr -cd '0-9')
+    if is_uint "$hp" && kill -0 "$hp" 2>/dev/null; then
+      log "held: another sender has it (stop)"
+      return 0
+    fi
+    # A mark whose sender is gone does not count.
+    printf '%s\n' "$hb_pid" >"$HB_MARK" 2>/dev/null || return 0
+  fi
+  hn=0
+  for hm in "$RUN_DIR"/held.*; do
+    [ -f "$hm" ] && [ "$hm" != "$HB_MARK" ] || continue
+    hp=$(head -c 32 "$hm" 2>/dev/null | tr -cd '0-9')
+    is_uint "$hp" && kill -0 "$hp" 2>/dev/null && hn=$((hn + 1))
+  done
+  if [ "$hn" -ge 8 ]; then
+    log "held: too many senders (stop)"
+    rm -f "$HB_MARK"
+    return 0
+  fi
+  RQ_MARK='' RQ_WAT='' RQ_UNK=''
+  trap 'rm -f "$HB_MARK" ${RQ_MARK:+"$RQ_MARK"} "$RUN_DIR"/hb."$hb_pid".* "$hb_lf" 2>/dev/null; exit 0' TERM INT
+  held_loop
+  rm -f "$HB_MARK" ${RQ_MARK:+"$RQ_MARK"} "$RUN_DIR"/hb."$hb_pid".* 2>/dev/null
+  trap - TERM INT
+}
+
+# Every 5 seconds: seal the round, check (the limit, the agent, the links, a
+# terminal answer, the window), send it to every held tunnel at once. Returns
+# when one of the checks ends it (one log line) or no tunnel is left.
+held_loop() {
+  hb_cap=540 hb_every=5
+  if [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ]; then
+    is_uint "${SIMPLETERM_HOOK_TEST_HELD_CAP:-}" && hb_cap=$SIMPLETERM_HOOK_TEST_HELD_CAP
+    is_uint "${SIMPLETERM_HOOK_TEST_HELD_EVERY:-}" && [ "$SIMPLETERM_HOOK_TEST_HELD_EVERY" -ge 1 ] &&
+      hb_every=$SIMPLETERM_HOOK_TEST_HELD_EVERY
+  fi
+  hb_first=$(date +%s) HB_WAT='' hb_miss=0 hb_seen=0
+  RES_BASE=$HB_RESBASE
+  while :; do
+    sleep "$hb_every"
+    hb_now=$(date +%s)
+    held_seal
+    if [ $((hb_now - T0)) -ge "$hb_cap" ]; then log "held: limit (stop)"; return 0; fi
+    if ! kill -0 "$HB_APID" 2>/dev/null; then log "held: agent gone (stop)"; return 0; fi
+    # Every link gone or revoked (its tab closed): nothing left to tell.
+    [ -n "$HB_READY" ] || return 0
+    if answered_locally "$T0" "$FP"; then log "held: answered at the terminal (stop)"; return 0; fi
+    held_open
+    case $? in
+      0) hb_seen=1 hb_miss=0 ;;
+      3)
+        log "held: unknown waitingFor \"$RQ_UNK\" for ${TOOL:-$NTYPE} (stop)"
+        return 0
+        ;;
+      2)
+        # Not read: the first check within 5 s of the first send, later 3 in a row.
+        if [ "$hb_seen" = 0 ]; then
+          [ $((hb_now - hb_first)) -lt 5 ] && { rm -f "$RUN_DIR"/hb."$hb_pid".*; continue; }
+        else
+          hb_miss=$((hb_miss + 1))
+          [ "$hb_miss" -lt 3 ] && { rm -f "$RUN_DIR"/hb."$hb_pid".*; continue; }
+        fi
+        log "held: the window is not open (stop)"
+        return 0
+        ;;
+      *)
+        log "held: the window is not open (stop)"
+        return 0
+        ;;
+    esac
+    held_fire
+    [ -s "$hb_lf" ] || return 0
+  done
+}
+
+# Seals this round's event for every held tunnel (one new rid, a fresh ts and
+# tms, no nonce): HB_READY lists the indexes of the tunnels it sealed for.
+held_seal() {
+  HB_READY=''
+  TS=$(date +%s)
+  is_uint "$TS" || TS=0
+  v2_spec "$V2X@.tms${TAB}s$TAB$(v2_tms)$NL"
+  HB_RID=$(rand_hex 8)
+  is_hex "$HB_RID" 16 || return 0
+  hi=0
+  while IFS= read -r hf; do
+    hi=$((hi + 1))
+    [ -n "$hf" ] && [ -f "$hf" ] || continue
+    load_link "$hf" || continue
+    [ -f "$RUN_DIR/$L_LINK.revoked" ] && continue
+    ingest_seal "$HB_RID" "$hb_ev" '' || continue
+    printf '%s' "$BODY_" >"$RUN_DIR/hb.$hb_pid.$hi.body" && printf '%s\n' "$hf" >"$RUN_DIR/hb.$hb_pid.$hi.f" || continue
+    HB_READY="$HB_READY $hi"
+  done <"$hb_lf"
+}
+
+# Sends the sealed round to every tunnel at once; the tunnels that answer held
+# again stay in the list, any other answer drops its tunnel.
+held_fire() {
+  hjobs=''
+  for hi in $HB_READY; do
+    log "held-bg link-$hi: again"
+    (
+      load_link "$(cat "$RUN_DIR/hb.$hb_pid.$hi.f" 2>/dev/null)" || exit 0
+      BODY_=$(cat "$RUN_DIR/hb.$hb_pid.$hi.body" 2>/dev/null)
+      [ -n "$BODY_" ] || exit 0
+      ING_MT=5
+      ingest_post "$HB_RID" "$hb_ev" "$RUN_DIR/ing.$hb_pid.$hi" >"$RUN_DIR/hb.$hb_pid.$hi.ans"
+    ) </dev/null >/dev/null 2>&1 &
+    hjobs="$hjobs $!"
+  done
+  for p in $hjobs; do wait "$p" 2>/dev/null; done
+  : >"$hb_lf.new"
+  for hi in $HB_READY; do
+    case $(cat "$RUN_DIR/hb.$hb_pid.$hi.ans" 2>/dev/null) in
+      *" held") cat "$RUN_DIR/hb.$hb_pid.$hi.f" >>"$hb_lf.new" 2>/dev/null ;;
+    esac
+    rm -f "$RUN_DIR/hb.$hb_pid.$hi".* 2>/dev/null
+  done
+  mv -f "$hb_lf.new" "$hb_lf" 2>/dev/null
+}
+
+# Whether the agent's window for the request is still open, from its own
+# record (SimpleTerm if/ssh-tunnel-wait#open-window): 0 open, 1 not (closed, or
+# another window), 2 not read, 3 a Claude Code value unknown for the tool
+# (RQ_UNK holds it).
+held_open() {
+  case $HB_KIND in
+    claude_ask | claude_form) held_open_claude ;;
+    agy_ask) held_open_agy ;;
+    grok_call | grok_perm) held_open_grok ;;
+    *) return 1 ;;
+  esac
+}
+
+# Claude Code: the session file as rq_window reads it. A question from
+# PreToolUse counts `input needed` or `permission prompt`, first seen after the
+# first send and not written before the hook started (the hook runs before the
+# window); the MCP form (Notification elicitation_dialog) counts `input needed`,
+# written at most 2 s after the hook started (the window comes first). A live
+# mark of another hook of the session with the same statusUpdatedAt (parallel
+# calls, one window) means not open; so does no mark of its own.
+held_open_claude() {
+  wv=$(head -c 8192 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/$HB_APID.json" 2>/dev/null |
+    awk -v want=sessionId,status,waitingFor,statusUpdatedAt "$JSON_GET" 2>/dev/null)
+  wsid='' wst='' wfor='' wat=''
+  while IFS= read -r kv; do
+    case $kv in
+      sessionId=*) wsid=${kv#*=} ;;
+      status=*) wst=${kv#*=} ;;
+      waitingFor=*) wfor=${kv#*=} ;;
+      statusUpdatedAt=*) wat=${kv#*=} ;;
+    esac
+  done <<EOF
+$wv
+EOF
+  case $wat in '' | *[!0-9]*) wat='' ;; esac
+  [ -n "$wst" ] && [ -n "$wat" ] || return 2
+  wopen=1
+  if [ -n "$RAWSID" ] && [ "$wsid" = "$RAWSID" ] && [ "$wst" = waiting ]; then
+    case $HB_KIND:$wfor in
+      'claude_ask:input needed' | 'claude_ask:permission prompt' | 'claude_form:input needed') wopen=0 ;;
+      *) wopen=3 ;;
+    esac
+  fi
+  if [ -z "$HB_WAT" ]; then
+    [ "$wopen" = 1 ] && return 2
+    case $HB_KIND in
+      claude_ask) [ "$wat" -ge $((T0 * 1000)) ] || return 1 ;;
+      *) [ "$wat" -le $(((T0 + 2) * 1000)) ] || return 1 ;;
+    esac
+    [ "$wopen" = 3 ] && { rq_unknown "$wfor"; return 3; }
+    HB_WAT=$wat
+    RQ_MARK=$RUN_DIR/perm.$SID.$hb_pid RQ_WAT=$wat
+    printf '%s\n' "$wat" 2>/dev/null >"$RQ_MARK" || RQ_MARK=''
+  fi
+  [ "$wat" = "$HB_WAT" ] || return 1
+  [ "$wopen" = 3 ] && { rq_unknown "$wfor"; return 3; }
+  [ "$wopen" = 0 ] && [ -n "$RQ_MARK" ] || return 1
+  rq_alone
+}
+
+# Antigravity CLI: the transcript the hook input names (transcript_full.jsonl,
+# its last 64 KiB). Open: the last line is step stepIdx - 1, a PLANNER_RESPONSE
+# with an ask_question call. A step stepIdx or later (the answer) closes it.
+held_open_agy() {
+  hf=$(input_file "$TPATH")
+  [ -n "$hf" ] && [ -r "$hf" ] || return 2
+  hz=$(wc -c <"$hf" 2>/dev/null | tr -d ' ')
+  is_uint "$hz" || hz=0
+  tail -c 65536 "$hf" 2>/dev/null | awk -v nid="$HB_NID" -v cut=$((hz > 65536)) '
+    NR == 1 && cut { next }
+    $0 == "" { next }
+    {
+      si = -1
+      if (match($0, /"step_index"[ ]*:[ ]*[0-9]+/)) { v = substr($0, RSTART, RLENGTH); sub(/.*:[ ]*/, "", v); si = v + 0 }
+      if (si >= nid + 0) closed = 1
+      last = $0; lastsi = si; n++
+    }
+    END {
+      if (n == 0) exit 2
+      if (closed || lastsi != nid - 1) exit 1
+      t = ""
+      if (match(last, /"type"[ ]*:[ ]*"[A-Z_]+"/)) { t = substr(last, RSTART, RLENGTH); sub(/^.*"type"[ ]*:[ ]*"/, "", t); sub(/"$/, "", t) }
+      if (t != "PLANNER_RESPONSE" || !match(last, /"tool_calls"[ ]*:/)) exit 1
+      if (substr(last, RSTART) !~ /"name"[ ]*:[ ]*"ask_question"/) exit 1
+      exit 0
+    }'
+}
+
+# Grok Build: chat_history.jsonl beside the hook input's transcript
+# (sessions/<cwd>/<session>/updates.jsonl), its last 64 KiB. Open: the last line
+# is the assistant's call whose id is req.id, with no tool_result for it. A
+# permission window (grok_perm) also needs the last line of events.jsonl to be
+# permission_requested: after an allow the call stays without a result while
+# the tool runs. The plan review opens with the permission already resolved,
+# so it takes the question's rule.
+held_open_grok() {
+  hf=$(input_file "$TPATH")
+  [ -n "$hf" ] || return 2
+  hd=${hf%/*}
+  [ -r "$hd/chat_history.jsonl" ] || return 2
+  hz=$(wc -c <"$hd/chat_history.jsonl" 2>/dev/null | tr -d ' ')
+  is_uint "$hz" || hz=0
+  tail -c 65536 "$hd/chat_history.jsonl" 2>/dev/null | awk -v id="$HB_ID" -v cut=$((hz > 65536)) '
+    NR == 1 && cut { next }
+    $0 == "" { next }
+    {
+      last = $0; n++
+      if (index($0, "\"tool_call_id\":\"" id "\"") || index($0, "\"tool_call_id\": \"" id "\"")) closed = 1
+    }
+    END {
+      if (n == 0) exit 2
+      if (closed) exit 1
+      t = ""
+      if (match(last, /"type"[ ]*:[ ]*"[a-z_]+"/)) { t = substr(last, RSTART, RLENGTH); sub(/^.*"type"[ ]*:[ ]*"/, "", t); sub(/"$/, "", t) }
+      if (t != "assistant") exit 1
+      if (!index(last, "\"id\":\"" id "\"") && !index(last, "\"id\": \"" id "\"")) exit 1
+      exit 0
+    }' || return $?
+  [ "$HB_KIND" = grok_perm ] || return 0
+  [ -r "$hd/events.jsonl" ] || return 2
+  he=$(tail -c 65536 "$hd/events.jsonl" 2>/dev/null | awk 'NF { l = $0 } END { print l }')
+  case $he in
+    '') return 2 ;;
+    *'"type":"permission_requested"'* | *'"type": "permission_requested"'*) return 0 ;;
+  esac
+  return 1
+}
+
 # True if a tunnel answered the probe (SimpleTerm if/ssh-tunnel-http#probe): HTTP 404 with error
 # `unknown` (and not shown:false) to a decision poll of an unknown rid.
 tunnel_probe() {
@@ -4118,6 +4437,7 @@ case $AGENT in
 esac
 
 EVENT='' NTYPE='' TOOL='' DETAIL='' DESC='' SID='' CWD='' LAST='' ERR='' QTEXT='' FIRSTIN='' NTYPE2=''
+HB_KIND='' HB_APID='' HB_RESBASE=''
 TPATH='' CTXTOK='' MODEL='' GTYPE='' FULLYIDLE='' TERMREASON='' EXTRA='' GKEY='' REASON=''
 PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS='' REQIDIN='' TOOLUSEID=''
 OCTITLE='' OCCOST='' OCTIN='' OCTOUT='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX=''
@@ -5575,6 +5895,7 @@ case $AGENT:$EVENT in
       # first. This one is the safety net for a question without one.
       rk_at claude_askpre
       v2_prep "$RK_AT"
+      held_prep claude_ask
       w=$(conf_int ask_delay 2)
       trap '' HUP
       (
@@ -5605,6 +5926,11 @@ case $AGENT:$EVENT in
         setmsg "$LAST"
         rk_at claude_notif "@.ntype${TAB}s$TAB$NTYPE$NL"
         v2_prep "$RK_AT"
+        # The MCP form and its URL form have a measured record of their window (`waiting`, `input
+        # needed`, written before the notification: if/ssh-tunnel-wait#open-window).
+        hk=''
+        case $NTYPE in elicitation_dialog | elicitation_url_dialog) hk=claude_form ;; esac
+        held_prep "$hk"
         send_bg question
         ;;
     esac
@@ -5784,6 +6110,7 @@ case $AGENT:$EVENT in
         setmsg "$QTEXT"
         rk_at agy_ask
         v2_prep "$RK_AT"
+        held_prep agy_ask
         send_bg question
         ;;
       run_command | write_file | edit_file | read_file | call_mcp_tool)
@@ -5884,6 +6211,7 @@ case $AGENT:$EVENT in
       facts_add grokpre 600
       rk_at grok_notif "@.ntype${TAB}s$TAB$nt$NL"
       v2_prep "$RK_AT"
+      case $nt in plan | elicitation_dialog) held_prep grok_call ;; *) held_prep grok_perm ;; esac
     fi
     send_bg question
     ;;

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+The PowerShell hook's held sender runs, and a Claude Code URL form is told again (SimpleTerm
+`if/ssh-tunnel-wait#open-window`, issue AhMunGa/simple-term#446).
+
+- **PowerShell**: run on pwsh 7.7.0 for the first time, the held sender of `agent-hook.ps1` stopped before its
+  first round: `@($links)` on its list of held links threw `Argument types do not match`, and the error was
+  swallowed, so the PowerShell hook never told a held request again. The links are now copied one by one. The
+  sender's tests run on pwsh too (with a Claude Code MCP form; the Antigravity CLI cases on the sh hook only).
+- **Claude Code URL form** (`Notification` `elicitation_url_dialog`): Claude Code 2.1.322 writes `waiting` and
+  `input needed` in its session file for it as for the MCP form, so it is told again while that window is open,
+  in the sh and the PowerShell hook. Before, it logged `held: no record of claude's window to tell it by (stop)`.
+- README: the known limitation on held requests names the requests that still cannot be told again.
+
 A running Gemini CLI session no longer runs the agent again when the extension is removed or updated under it
 (SimpleTerm `if/plugin-locations#manifests`, `hist/plugin-locations#d3`, `hist/plugin-locations#e5`, issue
 AhMunGa/simple-term#686).
@@ -40,6 +52,33 @@ A held Claude Code question is told again on Claude Code 2.1.322 too (SimpleTerm
   spaces and `.`, `_`, `-`, cut at 40 characters). A new Claude Code version that writes another value
   shows up there.
 - The same in `agent-hook.ps1` and in every plugin's copy of `agent-hook.sh`. Nothing on the wire changes.
+
+A held request the hook does not wait on is told again while its window is open (SimpleTerm
+`if/ssh-tunnel-wait#held-undecidable`, `if/ssh-tunnel-wait#open-window`, `spec/request-wait-link#held`,
+`hist/request-wait-link` D and E, issue AhMunGa/simple-term#446).
+
+- **Who stays**: an undecidable request (`req.wait` `none`: an Antigravity CLI or Grok Build question, a
+  Grok Build permission window or plan review, a Claude Code MCP form, or a Claude Code question from
+  `PreToolUse` that the hook does not wait on) is sent from the detached sender. Before, that sender
+  dropped the answer, so a request a v2 app held back (`"held":true`, the user was looking at another
+  wait) was never shown. Now the sender reads the answer: when a tunnel of a `fmt=2` link answered held,
+  it stays, and every 5 seconds it checks the agent's own record of the window and, while it is open,
+  sends the same request again (the same `req`, a new rid and time, no nonce) to the tunnels that
+  answered held. A tunnel that answers anything but held is dropped.
+- **The window's record**: Antigravity CLI `transcript_full.jsonl` (the last step is the planner's
+  `ask_question` call one step before the request's), Grok Build `chat_history.jsonl` (the last line is
+  the assistant's call with the request's id, no result for it) and for a permission window also
+  `events.jsonl` (the last line is `permission_requested`), Claude Code its session file (`input needed`
+  for the MCP form; `input needed` or `permission prompt` for a question, first seen after the first
+  send). A request with no record (Claude Code's `agent_needs_input`, Antigravity CLI's plan
+  confirmation, Codex, OpenCode, Copilot CLI) is not told again: one log line `held: no record of <agent>'s window to tell it by (stop)`.
+- **Limits**: one sender per request (the mark `run/held.<session>.<request key>` holds its pid; a
+  second hook of the same call logs `held: another sender has it (stop)`), at most 8 per user
+  (`held: too many senders (stop)`), 540 seconds from the hook's start (`held: limit (stop)`). It also
+  stops when the agent is gone, the request was answered at the terminal, or the window is no longer
+  open, each with one log line; the mark goes with it, also on TERM or INT.
+- The same in `agent-hook.ps1` (Claude Code and Grok Build; it runs no Antigravity CLI hook) and in
+  every plugin's copy of `agent-hook.sh`. The first send is unchanged.
 
 Agents inside herdr, and the pane an agent runs in (SimpleTerm `if/event-v2#common-fields`,
 `if/hook-events-identification#identification`, issue AhMunGa/simple-term#612): the app's agent session list can
