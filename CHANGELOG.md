@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+A running Gemini CLI session no longer runs the agent again when the extension is removed or updated under it
+(SimpleTerm `if/plugin-locations#manifests`, `hist/plugin-locations#d3`, `hist/plugin-locations#e5`, issue
+AhMunGa/simple-term#686).
+
+- **What happened**: a Gemini CLI session keeps the hook commands it registered at start. Once the extension's
+  folder was gone, `sh "<script>" gemini` ended with 127 and `No such file or directory`. The folder goes away on
+  the app's remove, a user's `gemini extensions uninstall`, and the reinstall that turns on auto-update;
+  `gemini extensions update` also removes the folder and copies it again. Gemini CLI reads any exit code other
+  than 0 or 1 with text as `deny`, and a denied `AfterAgent` runs the agent again, so one prompt made up to 36
+  model calls (measured with a local model stub on 0.66.0).
+- **Now**: the two commands in `hooks/hooks.json` end with `; exit 0`. The hook always ends with 0 and prints
+  nothing on stdout, also when its script is gone: one model call per prompt (measured). `; exit 0` reads the same
+  in `bash -c` (Gemini CLI on Linux and macOS) and in PowerShell (Gemini CLI on Windows). The hook's Gemini path
+  gives its exit code no meaning, so nothing else changes. With the script gone, Gemini CLI shows the shell's
+  `No such file or directory` line as a message under the turn.
+- **Already installed**: a session that started before the update keeps the old commands. Update the extension
+  and start Gemini CLI again.
+- Claude Code, Grok Build and Codex keep their hook files: in the same measurement they did not run the agent again
+  (Claude Code and Grok Build do not run a hook whose plugin folder is gone). The Copilot CLI and Antigravity CLI
+  commands already end with 0 when they find no script; a new test holds all three to the rule.
+
 A held Claude Code question is told again on Claude Code 2.1.322 too (SimpleTerm
 `if/ssh-tunnel-wait#open-window`, `hist/request-wait-link#d7`, issue AhMunGa/simple-term#446).
 
