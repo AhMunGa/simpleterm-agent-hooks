@@ -4152,18 +4152,39 @@ function Get-RqWindow([int]$agentPid) {
     if ($wat -cnotmatch '\A[0-9]+\z') { $wat = '' }
     # Not read (no file yet, or caught while it was written): not known.
     if (-not $wst -or -not $wat) { return 2 }
-    $open = ($Script:RawSid -and $wsid -ceq $Script:RawSid -and $wst -ceq 'waiting' -and $wfor -ceq 'permission prompt')
+    # The value of the window kind (SimpleTerm if/ssh-tunnel-wait#open-window): `permission prompt` for every
+    # permission request, and for a question (AskUserQuestion) also `input needed` (Claude Code 2.1.322;
+    # 2.1.316 and 2.1.317 wrote `permission prompt`). 0 a window of this tool, 1 no wait of this session,
+    # 3 a wait with a value of no window of this tool (Set-RqUnknown; the caller logs it and stops).
+    $kind = 1
+    if ($Script:RawSid -and $wsid -ceq $Script:RawSid -and $wst -ceq 'waiting') {
+        if ($wfor -ceq 'permission prompt') { $kind = 0 }
+        elseif ($wfor -ceq 'input needed' -and $Script:Tool -ceq 'AskUserQuestion') { $kind = 0 }
+        else { $kind = 3 }
+    }
     if (-not $Script:RqWat) {
-        if (-not $open) { return 2 }
+        if ($kind -eq 1) { return 2 }
         # The window shown when the hook started (it starts 5 to 45 ms after
-        # Claude records it, 3 ms before at the earliest [measured 2.1.316]): a
-        # later one may come after the user answered this request.
+        # Claude records it, 3 ms before at the earliest [measured 2.1.316]; 52
+        # to 100 ms on 2.1.322): a later one may come after the user answered
+        # this request.
         if ([int64]$wat -gt ($Script:RqStart + 2) * 1000) { return 1 }
+        if ($kind -eq 3) { Set-RqUnknown $wfor; return 3 }
         $Script:RqWat = $wat
         if ($Script:RqMark) { [void](Write-FileB $Script:RqMark ($wat + "`n")) }
     }
-    if (-not ($open -and $wat -ceq $Script:RqWat)) { return 1 }
+    if ($wat -cne $Script:RqWat) { return 1 }
+    if ($kind -eq 3) { Set-RqUnknown $wfor; return 3 }
+    if ($kind -ne 0) { return 1 }
     return (Get-RqAlone)
+}
+
+# The waitingFor value for the log (SimpleTerm if/ssh-tunnel-wait#open-window): only ASCII letters, digits,
+# spaces and . _ -, at most 40 characters (rq_unknown).
+function Set-RqUnknown([string]$v) {
+    $v = [regex]::Replace($v, '[^A-Za-z0-9 ._-]', '')
+    if ($v.Length -gt 40) { $v = $v.Substring(0, 40) }
+    $Script:RqUnk = $v
 }
 
 # Whether no other permission hook of this session waits on the same window
@@ -4208,6 +4229,11 @@ function Test-RqHeld($links, [int64]$start, [int]$agentPid) {
     if ([DateTime]::UtcNow -lt $Script:RqHeldNext) { return $true }
     $Script:RqHeldNext = [DateTime]::UtcNow.AddSeconds(1)
     $hw = Get-RqWindow $agentPid
+    if ($hw -eq 3) {
+        Write-Log ('held: unknown waitingFor "' + $Script:RqUnk + '" for ' + $Script:Tool + ' (stop)')
+        foreach ($L in $held) { $L.held = $false }
+        return $false
+    }
     if ($hw -eq 2) {
         # Not known: a few seconds for the agent to record its window, then a
         # few reads that fail in a row; nothing is sent meanwhile.
@@ -4251,6 +4277,11 @@ function Test-RqHeld($links, [int64]$start, [int]$agentPid) {
     if ($agentPid -gt 0 -and $null -eq (Get-Process -Id $agentPid -ErrorAction SilentlyContinue)) { return $true }
     $hw = Get-RqWindow $agentPid
     if ($hw -eq 2) { return $true }
+    if ($hw -eq 3) {
+        Write-Log ('held: unknown waitingFor "' + $Script:RqUnk + '" for ' + $Script:Tool + ' (stop)')
+        foreach ($L in $held) { $L.held = $false }
+        return $false
+    }
     if ($hw -ne 0) {
         Write-Log 'held: the window is not open (stop)'
         foreach ($L in $held) { $L.held = $false }
@@ -4349,6 +4380,7 @@ function Invoke-RequestFlow([string]$ev, [string]$mode) {
     $Script:RqAgain = $start + 5
     $Script:RqStart = $start
     $Script:RqWat = ''
+    $Script:RqUnk = ''
     $Script:RqMiss = 0
     $Script:RqHeldNext = [DateTime]::MinValue
     # This session's waiting permission hooks, for Get-RqAlone.
