@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+A held Claude Code question is told again on Claude Code 2.1.322 too (SimpleTerm
+`if/ssh-tunnel-wait#open-window`, `hist/request-wait-link#d7`, issue AhMunGa/simple-term#446).
+
+- **The window value per kind**: Claude Code 2.1.322 writes `waitingFor: "input needed"` in its session
+  file for a question window (`AskUserQuestion`); 2.1.316 and 2.1.317 wrote `permission prompt`
+  (`hist/event-v2-request#e32`). The open-window check before telling a held request again took only
+  `permission prompt`, so on 2.1.322 a held question was not told again (the hook ended with
+  `held: the window is not open`). Now a question takes `permission prompt` or `input needed`, and every
+  other permission request (approval, plan, `Workflow`) still only `permission prompt`. The version is not
+  read; the other conditions stay (same `sessionId`, `waiting`, the first value at most 2 s after the hook
+  started, `statusUpdatedAt` unchanged, the parallel-call marks).
+- **An unknown value is logged once**: when the session waits with a `waitingFor` that is no value of the
+  request's tool, the hook tells nothing again and writes one line to its log on the server:
+  `held: unknown waitingFor "<value>" for <tool> (stop)` (the value keeps only ASCII letters, digits,
+  spaces and `.`, `_`, `-`, cut at 40 characters). A new Claude Code version that writes another value
+  shows up there.
+- The same in `agent-hook.ps1` and in every plugin's copy of `agent-hook.sh`. Nothing on the wire changes.
+
 Agents inside herdr, and the pane an agent runs in (SimpleTerm `if/event-v2#common-fields`,
 `if/hook-events#identification`, issue AhMunGa/simple-term#612): the app's agent session list can
 tie an alert or a request to a herdr or tmux session row whose session id it does not know yet

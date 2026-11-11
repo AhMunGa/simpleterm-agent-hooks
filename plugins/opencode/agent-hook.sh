@@ -2488,13 +2488,19 @@ rq_reject() { # i bad|changed
 # Whether the agent's own window for this request is still open, as far as
 # the hook can tell for sure (SimpleTerm if/ssh-tunnel-wait#open-window, the open-window check): 0 open, 1 not (closed, another one, or nothing to tell
 # by), 2 not known yet (the agent may record its window a moment after the
-# hook starts). Claude Code only: its session file (sessions/<agent pid>.json
-# under CLAUDE_CONFIG_DIR or ~/.claude, the first 8 KiB) says this session
-# (sessionId) waits on a permission prompt, the one first seen there
-# (statusUpdatedAt unchanged, RQ_WAT — the first one seen, written no later
-# than 2 s after the hook's start), and no other permission hook of this
-# session waits on that same window (rq_alone; without a mark of its own the
-# hook cannot be counted by the others: not confirmed).
+# hook starts), 3 this session waits with a waitingFor that is no value of
+# this tool (RQ_UNK holds it for the log; the caller stops). Claude Code only:
+# its session file (sessions/<agent pid>.json under CLAUDE_CONFIG_DIR or
+# ~/.claude, the first 8 KiB) says this session (sessionId) waits on the
+# window of the request's kind, the one first seen there (statusUpdatedAt
+# unchanged, RQ_WAT — the first one seen, written no later than 2 s after the
+# hook's start), and no other permission hook of this session waits on that
+# same window (rq_alone; without a mark of its own the hook cannot be counted
+# by the others: not confirmed). The value of the window kind is
+# `permission prompt` for every permission request, and for a question
+# (AskUserQuestion) also `input needed`: Claude Code 2.1.322 writes that for a
+# question, 2.1.316 and 2.1.317 wrote `permission prompt` [measured]. Only a
+# measured pair of tool and value counts; the version is not read.
 rq_window() {
   [ "$AGENT" = claude ] && [ -n "$AGENT_PID" ] && [ -n "$RQ_MARK" ] || return 1
   wv=$(head -c 8192 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/$AGENT_PID.json" 2>/dev/null |
@@ -2513,19 +2519,37 @@ EOF
   case $wat in '' | *[!0-9]*) wat='' ;; esac
   # Not read (no file yet, or caught while it was written): not known.
   [ -n "$wst" ] && [ -n "$wat" ] || return 2
-  wopen=0
-  [ -n "$RAWSID" ] && [ "$wsid" = "$RAWSID" ] && [ "$wst" = waiting ] && [ "$wfor" = 'permission prompt' ] || wopen=1
+  # wopen: 0 this session waits on a window of this tool, 1 it does not wait
+  # (or it is another session), 3 it waits with a value of no window of this tool.
+  wopen=1
+  if [ -n "$RAWSID" ] && [ "$wsid" = "$RAWSID" ] && [ "$wst" = waiting ]; then
+    case $wfor in
+      'permission prompt') wopen=0 ;;
+      'input needed') if [ "$TOOL" = AskUserQuestion ]; then wopen=0; else wopen=3; fi ;;
+      *) wopen=3 ;;
+    esac
+  fi
   if [ -z "$RQ_WAT" ]; then
-    [ "$wopen" = 0 ] || return 2
+    [ "$wopen" = 1 ] && return 2
     # The window shown when the hook started (it starts 5 to 45 ms after
-    # Claude records it, 3 ms before at the earliest [measured 2.1.316]): a
-    # later one may come after the user answered this request.
+    # Claude records it, 3 ms before at the earliest [measured 2.1.316]; 52 to
+    # 100 ms on 2.1.322): a later one may come after the user answered this
+    # request.
     [ "$wat" -le $(((start + 2) * 1000)) ] || return 1
+    [ "$wopen" = 3 ] && { rq_unknown "$wfor"; return 3; }
     RQ_WAT=$wat
     [ -n "$RQ_MARK" ] && printf '%s\n' "$wat" 2>/dev/null >"$RQ_MARK"
   fi
-  [ "$wopen" = 0 ] && [ "$wat" = "$RQ_WAT" ] || return 1
+  [ "$wat" = "$RQ_WAT" ] || return 1
+  [ "$wopen" = 3 ] && { rq_unknown "$wfor"; return 3; }
+  [ "$wopen" = 0 ] || return 1
   rq_alone
+}
+
+# The waitingFor value for the log (SimpleTerm if/ssh-tunnel-wait#open-window): only ASCII letters,
+# digits, spaces and . _ -, at most 40 characters.
+rq_unknown() {
+  RQ_UNK=$(printf '%s' "$1" | LC_ALL=C tr -cd 'A-Za-z0-9 ._-' | cut -c1-40)
 }
 
 # Whether no other permission hook of this session waits on the same window
@@ -2567,6 +2591,11 @@ rq_held() {
   fi
   rq_window
   hw=$?
+  if [ "$hw" = 3 ]; then
+    log "held: unknown waitingFor \"$RQ_UNK\" for $TOOL (stop)"
+    rm -f "$@"
+    return 1
+  fi
   if [ "$hw" = 2 ]; then
     # Not known: a few seconds for the agent to record its window, then a
     # few reads that fail in a row; nothing is sent meanwhile.
@@ -2615,6 +2644,11 @@ rq_held() {
   case $? in
     0) ;;
     2) return 0 ;;
+    3)
+      log "held: unknown waitingFor \"$RQ_UNK\" for $TOOL (stop)"
+      rm -f "$@"
+      return 1
+      ;;
     *)
       log "held: the window is not open (stop)"
       rm -f "$@"
@@ -2711,7 +2745,7 @@ request_flow() { # ev mode
   # nothing and leave the decision to the agent.
   rq_sig=gone
   [ "$AGENT" = opencode ] && rq_sig=terminal
-  RQ_AGAIN=$((start + 5)) RQ_WAT='' RQ_MISS=0 RQ_MARK='' RQ_FIRE=''
+  RQ_AGAIN=$((start + 5)) RQ_WAT='' RQ_MISS=0 RQ_MARK='' RQ_FIRE='' RQ_UNK=''
   # This session's waiting permission hooks, for rq_alone.
   if [ "$AGENT" = claude ]; then
     RQ_MARK=$RUN_DIR/perm.$SID.$$

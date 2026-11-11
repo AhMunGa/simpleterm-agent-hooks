@@ -3807,20 +3807,22 @@ def t_v2_held(s):
             return [((r.get("plain_json") or {}).get("res") or {}) for r in tctl("/_ctl/records")["records"]
                     if r["path"] == "/v1/ingest" and r["body"]["ev"] == "resolved"]
 
-        def state(pid, session="held-1", status="waiting", waiting_for="permission prompt", at=1793232000123):
+        def state(pid, session="held-1", status="waiting", waiting_for="permission prompt", at=1793232000123, raw=False):
+            # raw: non-ASCII text as UTF-8, the way Claude Code (JSON.stringify) writes it
             f = sessions / ("%d.json" % pid)
             tmp = sessions / ("%d.json.tmp" % pid)
             tmp.write_text(json.dumps({"pid": pid, "sessionId": session, "cwd": "/home/u/api", "status": status,
-                                       "waitingFor": waiting_for, "statusUpdatedAt": at, "updatedAt": at}))
+                                       "waitingFor": waiting_for, "statusUpdatedAt": at, "updatedAt": at},
+                                      ensure_ascii=not raw), encoding="utf-8")
             os.replace(tmp, f)
 
-        def start(session="held-1", env=None, proc=None, file_session=None, **st):
+        def start(session="held-1", env=None, proc=None, file_session=None, perm=None, **st):
             """The stand-in agent (its pid names the session file) and the hook under it. Claude Code
             records the prompt in that file 5 to 45 ms before the hook starts (3 ms after it at the
             latest; SimpleTerm hist/event-v2-request#m31), and the hook gives a file it cannot read 5 seconds.
             The agent starts the hook only once the file is there, so a loaded test machine cannot
             turn those milliseconds into seconds."""
-            cmd = [sys.executable, "-I", "-c", AGENT_GATED_PY, v2_perm(session=session)] + list(s.argv) + ["claude"]
+            cmd = [sys.executable, "-I", "-c", AGENT_GATED_PY, v2_perm(session=session, **(perm or {}))] + list(s.argv) + ["claude"]
             agent = s.popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=s.env(env), cwd=str(s.tmp))
             if proc:  # a /proc of the agent for a hook without ps
                 (proc / str(agent.pid)).mkdir(parents=True, exist_ok=True)
@@ -3926,6 +3928,35 @@ def t_v2_held(s):
         done, out = finished(agent, 20)
         s.check("held: a window recorded after the hook's start + 2 s is not its own: not told again",
                 done and len(perms()) == 1, "%d %s" % (len(perms()), s.log_text()[-200:]))
+        # The value of the window kind (SimpleTerm if/ssh-tunnel-wait#open-window, hist/request-wait-link#d7, issue
+        # AhMunGa/simple-term#446): Claude Code 2.1.322 writes `input needed` for a question window, 2.1.316 and 2.1.317
+        # wrote `permission prompt`; every other permission request takes only `permission prompt`. A value that is
+        # not one of the tool's is not the open window: nothing again, and one line in the hook's log.
+        def asks():  # a question goes as ev=question, an approval as ev=permission
+            return [r for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and r["body"]["ev"] in ("permission", "question")]
+
+        ask = {"tool": "AskUserQuestion", "suggestions": (), "tool_input": {"questions": [
+            {"question": "Which color?", "header": "Color", "multiSelect": False,
+             "options": [{"label": "Red", "description": "Warm"}, {"label": "Green", "description": "Calm"}]}]}}
+        for name, perm, wf in (("question, input needed (Claude Code 2.1.322)", ask, "input needed"),
+                               ("question, permission prompt (2.1.316, 2.1.317)", ask, "permission prompt")):
+            setup(["held"])
+            agent, hook = start(perm=perm, waiting_for=wf)
+            s.check("held: %s: told again" % name, wait_for(lambda: len(asks()) >= 2, 30),
+                    "%d %s" % (len(asks()), s.log_text()[-300:]))
+            state(agent.pid, status="busy", waiting_for=None, at=1793232009000)
+            finished(agent, 15)
+        odd = "waiting on: the user's answer \u2014 \uc9c8\ubb38, please wait a while longer than forty"
+        for name, perm, wf, shown in (("approval, input needed", None, "input needed", "input needed"),
+                                      ("question, a value not known", ask, odd, re.sub(r"[^A-Za-z0-9 ._-]", "", odd)[:40])):
+            setup(["held"])
+            line = 'held: unknown waitingFor "%s" for %s (stop)' % (shown, (perm or {}).get("tool", "Bash"))
+            n0 = s.log_text().count(line)
+            agent, hook = start(perm=perm, waiting_for=wf, raw=True)
+            done, out = finished(agent, 20)
+            s.check("held: %s: not told again, one log line with the value" % name,
+                    done and out.strip() == "" and len(asks()) == 1 and s.log_text().count(line) - n0 == 1,
+                    "%d %r %s" % (len(asks()), line, s.log_text()[-400:]))
         # Two tunnels hold it: one round is one rid for both, sent at once (the slower tunnel's answer
         # does not hold back the other's copy; its link file sorts first).
         tun2, tctl2 = s.spawn_mock()
