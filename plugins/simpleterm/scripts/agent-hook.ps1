@@ -1680,6 +1680,11 @@ function Complete-Ingest($op) {
 function Send-Now([string]$ev, [string]$rid, [string]$scope, [string]$markName, [string]$markText) {
     # Every link's event is made first, then sent: tunnels, then the relay.
     $preps = @{ tunnel = (New-Object 'System.Collections.Generic.List[object]'); relay = (New-Object 'System.Collections.Generic.List[object]') }
+    # An undecidable request (wait none; Claude Code's PreToolUse question goes as shared without a nonce,
+    # which is undecidable too): a tunnel of a v2 app may hold it back for a wait the user is looking at
+    # (held); this child then stays and tells it again (Invoke-HeldBg, held_bg).
+    $undecidable = ($Nl + [string]$Script:Spec + $Nl).Contains($Nl + 'req.wait' + $Tab + 's' + $Tab + 'none' + $Nl) -or $Script:HbKind -ceq 'claude_ask'
+    $held = New-Object 'System.Collections.Generic.List[object]'
     foreach ($file in (Get-LinkFiles)) {
         $link = Read-Link $file
         if ($null -eq $link) { continue }
@@ -1697,9 +1702,11 @@ function Send-Now([string]$ev, [string]$rid, [string]$scope, [string]$markName, 
             try {
                 $r = Complete-Ingest $op
                 if ($r.code -ceq '200' -and $markName) { [void](Write-FileB (Join-Path $RunDir $markName) ($markText + "`n")) }
+                if ($undecidable -and $pass -ceq 'tunnel' -and $r.code -ceq '200' -and $r.held -and $op.link.fmt -ceq '2') { $held.Add($op.link) }
             } catch { Write-Log 'ingest-failed' }
         }
     }
+    if ($held.Count -gt 0) { Invoke-HeldBg $ev $held }
 }
 
 # --- detached sends ------------------------------------------------------------
@@ -1717,6 +1724,10 @@ function New-Job([string]$kind) {
         waitov = [string]$Script:WaitOv; cwdbasef = [string]$Script:CwdBaseF; cwdbase = [string]$Script:CwdBase
         msg = [string]$Script:Msg; title = [string]$Script:Title; usage = [string]$Script:UsageJson; reqid = [string]$Script:ReqId
         usagev2 = [string]$Script:UsageV2
+        # The held sender's facts (Set-HeldPrep, SimpleTerm if/ssh-tunnel-wait#held-undecidable).
+        hbkind = [string]$Script:HbKind; hbapid = [string]$Script:HbApid; hbres = [string]$Script:HbRes
+        tpath = [string]$Script:TPath; rawsid = [string]$Script:RawSid; tool = [string]$Script:Tool; ntype = [string]$Script:NType
+        fp = [string]$Script:Fp; t0 = [string]$Script:T0
     }
 }
 
@@ -1827,6 +1838,16 @@ function Restore-Job($job) {
     $Script:IngMt = ''
     $Script:InputB = ''
     $Script:LinkFiles = @(Get-LinkFiles)
+    $Script:HbKind = [string]$job.hbkind
+    $Script:HbApid = [string]$job.hbapid
+    $Script:HbRes = [string]$job.hbres
+    $Script:TPath = [string]$job.tpath
+    $Script:RawSid = [string]$job.rawsid
+    $Script:Tool = [string]$job.tool
+    $Script:NType = [string]$job.ntype
+    $Script:Fp = [string]$job.fp
+    $Script:T0 = 0
+    if (Test-UInt $job.t0) { $Script:T0 = [int64]$job.t0 }
 }
 
 function Test-LaterStillDue($job) {
@@ -4136,6 +4157,239 @@ function Step-RqPoll($L, [int64]$deadline, [int64]$pollWait) {
     $P.nextAt = [DateTime]::UtcNow.AddSeconds(2)
 }
 
+# --- held undecidable requests (SimpleTerm if/ssh-tunnel-wait#held-undecidable) -----------------
+#
+# The hook does not wait on an undecidable request (wait none). When a tunnel answers held, the detached
+# child that sent the event stays: every 5 seconds it checks the agent's own record of the window and sends
+# the same request again (same req, new rid, no nonce) to the tunnels that answered held (held_bg).
+
+# What the child needs that only the hook knows: the agent's pid and the terminal-answer notes present now.
+# Kinds: claude_ask, claude_form, grok_call (question, plan review), grok_perm; '' when there is no record
+# (held_prep). Antigravity CLI does not run this hook.
+function Set-HeldPrep([string]$kind) {
+    $Script:HbKind = $kind
+    $Script:HbApid = ''
+    $Script:HbRes = ''
+    if (-not $kind -or $Script:LinkFiles.Count -eq 0 -or -not (Test-HasTunnel)) { return }
+    $Script:HbApid = [string](Get-AgentPid)
+    $Script:HbRes = [string](Get-ResLineCount)
+}
+
+# The value of SPEC field $name (type s), '' if absent (spec_s).
+function Get-SpecS([string]$name) {
+    $m = [regex]::Match([string]$Script:Spec, '(?m)^' + [regex]::Escape($name) + '\ts\t([^\n]*)$')
+    if ($m.Success) { return $m.Groups[1].Value }
+    return ''
+}
+
+function Test-Alive([string]$id) {
+    if (-not (Test-UInt $id) -or [int64]$id -le 0) { return $false }
+    return ($null -ne (Get-Process -Id ([int]$id) -ErrorAction SilentlyContinue))
+}
+
+# This child stays for the tunnels $links that answered held (held_bg): one sender per request (mark
+# run/held.<session>.<req.id> holding its pid), 8 per user.
+function Invoke-HeldBg([string]$ev, $links) {
+    $id = Get-SpecS 'req.id'
+    $ok = $false
+    if ($Script:HbKind -ceq 'claude_ask' -or $Script:HbKind -ceq 'claude_form') { $ok = (Test-UInt $Script:HbApid) -and [int64]$Script:HbApid -gt 0 }
+    elseif ($Script:HbKind -ceq 'grok_call' -or $Script:HbKind -ceq 'grok_perm') {
+        $ok = $id -and -not $id.StartsWith('st-', $Ord) -and (Test-UInt $Script:HbApid) -and [int64]$Script:HbApid -gt 0 -and (Get-InputFile $Script:TPath)
+    }
+    if (-not $ok) {
+        Write-Log ('held: no record of ' + $Script:Agent + "'s window to tell it by (stop)")
+        return
+    }
+    $key = [regex]::Replace($id, '[^A-Za-z0-9_.-]', '_')
+    if ($key.Length -gt 80) { $key = $key.Substring(0, 80) }
+    $Script:HbMark = Join-Path $RunDir ('held.' + $Sid + '.' + $key)
+    $made = $false
+    try {
+        $fs = [IO.File]::Open($Script:HbMark, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
+        try { $b = $Latin1.GetBytes([string]$PID + "`n"); $fs.Write($b, 0, $b.Length) } finally { $fs.Dispose() }
+        $made = $true
+    } catch { }
+    if (-not $made) {
+        if (Test-Alive ([regex]::Replace((Read-HeadB $Script:HbMark 32), '[^0-9]', ''))) {
+            Write-Log 'held: another sender has it (stop)'
+            return
+        }
+        # A mark whose sender is gone does not count.
+        if (-not (Write-FileB $Script:HbMark ([string]$PID + "`n"))) { return }
+    }
+    $n = 0
+    try {
+        foreach ($f in [IO.Directory]::GetFiles($RunDir, 'held.*')) {
+            if ($f -ceq $Script:HbMark) { continue }
+            if (Test-Alive ([regex]::Replace((Read-HeadB $f 32), '[^0-9]', ''))) { $n++ }
+        }
+    } catch { }
+    if ($n -ge 8) {
+        Write-Log 'held: too many senders (stop)'
+        Remove-FileQ $Script:HbMark
+        return
+    }
+    $Script:RqMark = ''
+    $Script:RqWat = ''
+    $Script:RqUnk = ''
+    try { Invoke-HeldLoop $ev $links }
+    finally {
+        Remove-FileQ $Script:HbMark
+        if ($Script:RqMark) { Remove-FileQ $Script:RqMark }
+    }
+}
+
+# Every 5 seconds: seal the round, check (the limit, the agent, the links, a terminal answer, the window),
+# send it to every held tunnel at once (held_loop, held_seal, held_fire).
+function Invoke-HeldLoop([string]$ev, $links) {
+    $cap = 540
+    $every = 5
+    if ($env:SIMPLETERM_HOOK_TEST -eq '1') {
+        if (Test-UInt $env:SIMPLETERM_HOOK_TEST_HELD_CAP) { $cap = [int64]$env:SIMPLETERM_HOOK_TEST_HELD_CAP }
+        if ((Test-UInt $env:SIMPLETERM_HOOK_TEST_HELD_EVERY) -and [int]$env:SIMPLETERM_HOOK_TEST_HELD_EVERY -ge 1) { $every = [int]$env:SIMPLETERM_HOOK_TEST_HELD_EVERY }
+    }
+    $first = Now-Epoch
+    $seen = $false
+    $miss = 0
+    $script:ResBase = 0
+    if (Test-UInt $Script:HbRes) { $script:ResBase = [int]$Script:HbRes }
+    $live = @($links)
+    while ($true) {
+        Start-Sleep -Seconds $every
+        $now = Now-Epoch
+        # Seal first, so that the checks come right before the sends.
+        $Script:Ts = [string]$now
+        Update-Spec ($Script:V2X + '@.tms' + $Tab + 's' + $Tab + (Get-Tms) + $Nl)
+        $nr = New-RandomHex 8
+        $preps = New-Object 'System.Collections.Generic.List[object]'
+        if (Test-Hex $nr 16) {
+            $Script:WaitOv = ''
+            $Script:IngMt = '5'
+            foreach ($held in $live) {
+                # Read again each round: a link removed or revoked (its tab closed) is skipped.
+                $link = Read-Link $held.file
+                if ($null -eq $link) { continue }
+                $prep = New-Ingest $link $nr $ev ''
+                if (-not $prep.seal) { $preps.Add($prep) }
+            }
+            $Script:IngMt = ''
+        }
+        if ($now - $Script:T0 -ge $cap) { Write-Log 'held: limit (stop)'; return }
+        if (-not (Test-Alive $Script:HbApid)) { Write-Log 'held: agent gone (stop)'; return }
+        # Every link gone or revoked (its tab closed): nothing left to tell.
+        if ($preps.Count -eq 0) { return }
+        if (Test-AnsweredLocally $Script:T0 $Script:Fp) { Write-Log 'held: answered at the terminal (stop)'; return }
+        $hw = Get-HeldOpen
+        if ($hw -eq 3) {
+            $t = $Script:Tool
+            if (-not $t) { $t = $Script:NType }
+            Write-Log ('held: unknown waitingFor "' + $Script:RqUnk + '" for ' + $t + ' (stop)')
+            return
+        }
+        if ($hw -eq 2) {
+            # Not read: the first check within 5 s of the first send, later 3 in a row.
+            if (-not $seen) { if ($now - $first -lt 5) { continue } }
+            else { $miss++; if ($miss -lt 3) { continue } }
+            Write-Log 'held: the window is not open (stop)'
+            return
+        }
+        if ($hw -ne 0) { Write-Log 'held: the window is not open (stop)'; return }
+        $seen = $true
+        $miss = 0
+        $ops = @()
+        $i = 0
+        foreach ($prep in $preps) {
+            $i++
+            Write-Log ('held-bg link-' + $i + ': again')
+            $ops += (Start-IngestOp $prep)
+        }
+        $next = @()
+        foreach ($op in $ops) {
+            try {
+                $r = Complete-Ingest $op
+                if ($r.code -ceq '200' -and $r.held) { $next += $op.link }
+            } catch { }
+        }
+        $live = $next
+        if ($live.Count -eq 0) { return }
+    }
+}
+
+# Whether the agent's window for the request is still open, from its own record
+# (SimpleTerm if/ssh-tunnel-wait#open-window): 0 open, 1 not, 2 not read, 3 a Claude Code value unknown
+# for the tool (held_open).
+function Get-HeldOpen {
+    if ($Script:HbKind -ceq 'claude_ask' -or $Script:HbKind -ceq 'claude_form') { return (Get-HeldOpenClaude) }
+    if ($Script:HbKind -ceq 'grok_call' -or $Script:HbKind -ceq 'grok_perm') { return (Get-HeldOpenGrok) }
+    return 1
+}
+
+# Claude Code's session file (held_open_claude): a question from PreToolUse counts `input needed` or
+# `permission prompt`, first seen after the first send and not written before the hook started; the MCP
+# form counts `input needed`, written at most 2 s after the hook started. A live mark of another hook of
+# the session with the same statusUpdatedAt (parallel calls) means not open; so does no mark of its own.
+function Get-HeldOpenClaude {
+    $dir = $env:CLAUDE_CONFIG_DIR
+    if (-not $dir) { $dir = Join-Path $HOME '.claude' }
+    $kv = Get-JsonKV (Read-HeadB (Join-Path (Join-Path $dir 'sessions') ($Script:HbApid + '.json')) 8192) @('sessionId', 'status', 'waitingFor', 'statusUpdatedAt')
+    $wsid = Get-Field $kv 'sessionId'
+    $wst = Get-Field $kv 'status'
+    $wfor = Get-Field $kv 'waitingFor'
+    $wat = Get-Field $kv 'statusUpdatedAt'
+    if ($wat -cnotmatch '\A[0-9]+\z') { $wat = '' }
+    if (-not $wst -or -not $wat) { return 2 }
+    $kind = 1
+    if ($Script:RawSid -and $wsid -ceq $Script:RawSid -and $wst -ceq 'waiting') {
+        if ($Script:HbKind -ceq 'claude_ask' -and ($wfor -ceq 'input needed' -or $wfor -ceq 'permission prompt')) { $kind = 0 }
+        elseif ($Script:HbKind -ceq 'claude_form' -and $wfor -ceq 'input needed') { $kind = 0 }
+        else { $kind = 3 }
+    }
+    if (-not $Script:RqWat) {
+        if ($kind -eq 1) { return 2 }
+        if ($Script:HbKind -ceq 'claude_ask') { if ([int64]$wat -lt $Script:T0 * 1000) { return 1 } }
+        elseif ([int64]$wat -gt ($Script:T0 + 2) * 1000) { return 1 }
+        if ($kind -eq 3) { Set-RqUnknown $wfor; return 3 }
+        $Script:RqWat = $wat
+        $Script:RqMark = Join-Path $RunDir ('perm.' + $Sid + '.' + $PID)
+        if (-not (Write-FileB $Script:RqMark ($wat + "`n"))) { $Script:RqMark = '' }
+    }
+    if ($wat -cne $Script:RqWat) { return 1 }
+    if ($kind -eq 3) { Set-RqUnknown $wfor; return 3 }
+    if ($kind -ne 0 -or -not $Script:RqMark) { return 1 }
+    return (Get-RqAlone)
+}
+
+# Grok Build (held_open_grok): chat_history.jsonl beside the hook input's transcript, its last 64 KiB. Open:
+# the last line is the assistant's call whose id is req.id, with no tool_result for it. A permission
+# window also needs the last line of events.jsonl to be permission_requested.
+function Get-HeldOpenGrok {
+    $tp = Get-InputFile $Script:TPath
+    if (-not $tp) { return 2 }
+    $dir = [IO.Path]::GetDirectoryName($tp)
+    $id = Get-SpecS 'req.id'
+    $ch = Join-Path $dir 'chat_history.jsonl'
+    if (-not [IO.File]::Exists($ch)) { return 2 }
+    $len = (New-Object IO.FileInfo($ch)).Length
+    $lines = @((Read-TailB $ch 65536).Split([char]10) | Where-Object { $_ -ne '' })
+    if ($len -gt 65536 -and $lines.Count -gt 0) { $lines = @($lines | Select-Object -Skip 1) }
+    if ($lines.Count -eq 0) { return 2 }
+    foreach ($l in $lines) {
+        if ($l.Contains('"tool_call_id":"' + $id + '"') -or $l.Contains('"tool_call_id": "' + $id + '"')) { return 1 }
+    }
+    $last = $lines[$lines.Count - 1]
+    $m = [regex]::Match($last, '"type"[ ]*:[ ]*"([a-z_]+)"')
+    if (-not $m.Success -or $m.Groups[1].Value -cne 'assistant') { return 1 }
+    if (-not $last.Contains('"id":"' + $id + '"') -and -not $last.Contains('"id": "' + $id + '"')) { return 1 }
+    if ($Script:HbKind -cne 'grok_perm') { return 0 }
+    $evf = Join-Path $dir 'events.jsonl'
+    if (-not [IO.File]::Exists($evf)) { return 2 }
+    $el = @((Read-TailB $evf 65536).Split([char]10) | Where-Object { $_.Trim() -ne '' })
+    if ($el.Count -eq 0) { return 2 }
+    $e = $el[$el.Count - 1]
+    if ($e.Contains('"type":"permission_requested"') -or $e.Contains('"type": "permission_requested"')) { return 0 }
+    return 1
+}
+
 # Whether the agent's own window for this request is still open, as far as the
 # hook can tell for sure (SimpleTerm if/ssh-tunnel-wait#open-window, the open-window check): 0
 # open, 1 not (closed, another one, or nothing to tell by), 2 not known yet
@@ -5689,6 +5943,7 @@ function Invoke-Event {
             # first. This one is the safety net for a question without one.
             Set-RkAt 'claude_askpre' ''
             Initialize-V2 $Script:RkAt
+            Set-HeldPrep 'claude_ask'
             if ($Script:LinkFiles.Count -gt 0) {
                 $job = New-Job 'ask'
                 $job.wait = [string](Get-ConfInt 'ask_delay' 2)
@@ -5719,6 +5974,8 @@ function Invoke-Event {
             Set-Msg $Script:Last
             Set-RkAt 'claude_notif' ('@.ntype' + $Tab + 's' + $Tab + $nt + $Nl)
             Initialize-V2 $Script:RkAt
+            # Only the MCP form has a measured record of its window (if/ssh-tunnel-wait#open-window).
+            if ($nt -ceq 'elicitation_dialog') { Set-HeldPrep 'claude_form' } else { Set-HeldPrep '' }
             Send-Background 'question'
         }
         return
@@ -5907,6 +6164,7 @@ function Invoke-Event {
             Add-FactsFile 'grokpre' 600
             Set-RkAt 'grok_notif' ('@.ntype' + $Tab + 's' + $Tab + $nt + $Nl)
             Initialize-V2 $Script:RkAt
+            if ($nt -ceq 'plan' -or $nt -ceq 'elicitation_dialog') { Set-HeldPrep 'grok_call' } else { Set-HeldPrep 'grok_perm' }
         }
         Send-Background 'question'
         return

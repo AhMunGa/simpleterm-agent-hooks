@@ -20,6 +20,33 @@ A held Claude Code question is told again on Claude Code 2.1.322 too (SimpleTerm
   shows up there.
 - The same in `agent-hook.ps1` and in every plugin's copy of `agent-hook.sh`. Nothing on the wire changes.
 
+A held request the hook does not wait on is told again while its window is open (SimpleTerm
+`if/ssh-tunnel-wait#held-undecidable`, `if/ssh-tunnel-wait#open-window`, `spec/request-wait-link#held`,
+`hist/request-wait-link` D and E, issue AhMunGa/simple-term#446).
+
+- **Who stays**: an undecidable request (`req.wait` `none`: an Antigravity CLI or Grok Build question, a
+  Grok Build permission window or plan review, a Claude Code MCP form, or a Claude Code question from
+  `PreToolUse` that the hook does not wait on) is sent from the detached sender. Before, that sender
+  dropped the answer, so a request a v2 app held back (`"held":true`, the user was looking at another
+  wait) was never shown. Now the sender reads the answer: when a tunnel of a `fmt=2` link answered held,
+  it stays, and every 5 seconds it checks the agent's own record of the window and, while it is open,
+  sends the same request again (the same `req`, a new rid and time, no nonce) to the tunnels that
+  answered held. A tunnel that answers anything but held is dropped.
+- **The window's record**: Antigravity CLI `transcript_full.jsonl` (the last step is the planner's
+  `ask_question` call one step before the request's), Grok Build `chat_history.jsonl` (the last line is
+  the assistant's call with the request's id, no result for it) and for a permission window also
+  `events.jsonl` (the last line is `permission_requested`), Claude Code its session file (`input needed`
+  for the MCP form; `input needed` or `permission prompt` for a question, first seen after the first
+  send). A request with no record (Claude Code's URL form and `agent_needs_input`, Antigravity CLI's plan
+  confirmation, Codex, OpenCode, Copilot CLI) is not told again: one log line `held: no record of <agent>'s window to tell it by (stop)`.
+- **Limits**: one sender per request (the mark `run/held.<session>.<request key>` holds its pid; a
+  second hook of the same call logs `held: another sender has it (stop)`), at most 8 per user
+  (`held: too many senders (stop)`), 540 seconds from the hook's start (`held: limit (stop)`). It also
+  stops when the agent is gone, the request was answered at the terminal, or the window is no longer
+  open, each with one log line; the mark goes with it, also on TERM or INT.
+- The same in `agent-hook.ps1` (Claude Code and Grok Build; it runs no Antigravity CLI hook) and in
+  every plugin's copy of `agent-hook.sh`. The first send is unchanged.
+
 Agents inside herdr, and the pane an agent runs in (SimpleTerm `if/event-v2#common-fields`,
 `if/hook-events-identification#identification`, issue AhMunGa/simple-term#612): the app's agent session list can
 tie an alert or a request to a herdr or tmux session row whose session id it does not know yet
