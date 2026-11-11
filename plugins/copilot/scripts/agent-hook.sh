@@ -5084,11 +5084,17 @@ bg_all_old() {
 # turn's mark (turn_mark); the background tasks and schedules come from the
 # event's facts.
 TASKS='' TLAST='' TGOAL=''
-turn_at() { # end [asks] [late]
-  TURN_AT="@.turn${TAB}s${TAB}1$NL@.end${TAB}s$TAB$1$NL"
+# Who started the turn that ends now (SimpleTerm if/event-v2-turn#fields `by`): the
+# turn's mark (turn_mark), unknown when its start was not seen.
+turn_by() {
   tb=${TURN_BY:-}
   [ -z "$tb" ] && [ -f "$RUN_DIR/$SID.turn" ] && tb=$(sed -n 1p "$RUN_DIR/$SID.turn" 2>/dev/null)
   case $tb in user | task | schedule | agent) ;; auto) tb=agent ;; *) tb=unknown ;; esac
+  printf '%s' "$tb"
+}
+turn_at() { # end [asks] [late]
+  TURN_AT="@.turn${TAB}s${TAB}1$NL@.end${TAB}s$TAB$1$NL"
+  tb=$(turn_by)
   TURN_AT="$TURN_AT@.by${TAB}s$TAB$tb$NL"
   [ -n "${2:-}" ] && TURN_AT="$TURN_AT@.asks${TAB}s$TAB$2$NL"
   # OpenCode's LAST is the session's title, not the last message.
@@ -5110,13 +5116,24 @@ stop_done() {
   [ "$STOPACT" = true ] && XFLAGS=',"stop_hook_active":true'
   turn_at done "$TASKS"
   v2_prep "$TURN_AT"
-  done_later
+  sd=done
+  if [ "$(turn_by)" = schedule ] && [ "$TASKS" != true ]; then
+    # The last turn a schedule started, not one that ended asking
+    # (SimpleTerm spec/turn-state#scheduled): no alert anywhere. The tunnels
+    # only (the app lists it), at once (no alert waits on it), and the screen
+    # says it was a scheduled turn so that the agent's own 7501 done stays
+    # quiet too.
+    sd=done_scheduled
+    send_bg done "" tunnel
+  else
+    done_later
+  fi
   # The turn's done is sent (or pending): Claude Code's idle_prompt, 60 s
   # later, repeats it (the next turn note takes the mark back).
   # (printf, not `:`: a failed redirection of a special builtin ends the shell.)
   printf '' 2>/dev/null >"$RUN_DIR/$SID.done"
   usage_report
-  print_state done
+  print_state "$sd"
   turn_end
 }
 
@@ -5128,10 +5145,11 @@ stop_done() {
 #  - only services are left (a dev server, a watcher: nothing the agent
 #    waits for), or
 #  - the last message asks the user something: then they are told (pause ask).
-# A turn the agent started itself while a schedule (/loop, cron) is set stays
+# A turn a schedule started while a schedule (/loop, cron) is still set stays
 # quiet: `background` with "scheduled: ..."; the Stop that finds the
-# schedule gone is the done. TURN_USER defaults to 1 (a person) when the
-# turn's start was not seen.
+# schedule gone is the done. Any other turn with no work left ends in done
+# though a schedule is set (SimpleTerm spec/turn-state#background).
+# TURN_USER defaults to 1 (a person) when the turn's start was not seen.
 stop_flow() {
   TURN_USER=1 PREV_IDS='' t1='' t2='' TURN_BY=''
   if [ -f "$RUN_DIR/$SID.turn" ]; then
@@ -5161,7 +5179,13 @@ stop_flow() {
     if [ "$BG_N" -gt 0 ]; then stop_done "$BG_M"; else stop_done; fi
     return 0
   fi
-  if [ "$BG_N" -gt 0 ] && [ "$BG_SVC" -eq "$BG_N" ] && { [ "$CRON_N" -eq 0 ] || [ "$TURN_USER" = 1 ]; }; then
+  # Only a turn a schedule started waits for the schedule: one a task's
+  # report or the agent started ends here when no work of its own is left.
+  if [ "$BG_N" -eq 0 ] && [ "$TURN_BY" != schedule ]; then
+    stop_done
+    return 0
+  fi
+  if [ "$BG_N" -gt 0 ] && [ "$BG_SVC" -eq "$BG_N" ] && { [ "$CRON_N" -eq 0 ] || [ "$TURN_BY" != schedule ]; }; then
     bg_summary
     stop_done "$BG_M"
     return 0
@@ -5479,7 +5503,9 @@ case $AGENT:$EVENT in
     v2_prep "$TURN_AT"
     send_bg "$ev"
     usage_report
-    print_state done
+    # The turn failed: the badge is cleared, not a green done; the error is
+    # the event above (the screen's state values have no error).
+    print_state idle
     sess_turn idle
     ;;
   codex:SessionStart | codex:PostCompact)

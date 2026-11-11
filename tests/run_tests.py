@@ -1230,12 +1230,14 @@ def t_schedules(s):
     out = stop("sc3", cron[:1], "The deploy failed. Should I roll back?")
     rec = wait_for(lambda: ingests(s, "question"), 20)
     s.check("schedule: a question in a scheduled turn -> question", len(rec) == 1 and "state=waiting" in seqs(out), str(ingests(s))[:300])
-    # The Stop that finds the schedule gone is the done, once.
+    # The Stop that finds the schedule gone is the done, once: to the tunnels only, and the screen says it was a
+    # scheduled turn (SimpleTerm spec/turn-state#scheduled; the tunnel side is t_schedule_end).
     s.ctl("/_ctl/reset", {})
     s.run("claude", cc_event("sc3", "UserPromptSubmit", prompt="x", source="loop_wakeup"), st)
     out = stop("sc3", [], "The deploy finished; the loop ended.")
-    rec = wait_for(lambda: ingests(s, "done"), 20)
-    s.check("schedule: no schedule left -> done once", len(rec) == 1 and seqs(out) == "\x1b]9;simpleterm:state=done\x07", str(ingests(s))[:300])
+    time.sleep(1.5)
+    s.check("schedule: no schedule left -> done_scheduled on the screen, nothing to the relay",
+            not ingests(s) and seqs(out) == "\x1b]9;simpleterm:state=done_scheduled\x07", repr(out) + str(ingests(s))[:300])
     # Grok Build.
     s.ctl("/_ctl/reset", {})
     gcron = [{"id": "g1", "schedule": "every 5 minutes", "recurring": True, "prompt": "check it"}]
@@ -1252,6 +1254,84 @@ def t_schedules(s):
                           lastAssistantMessage="Hello.", backgroundTasks=[], sessionCrons=gcron)
     s.run("claude", inp, env)
     s.check("schedule: Grok Build typed turn -> done", wait_for(lambda: ingests(s, "done"), 20))
+
+
+def t_schedule_end(s):
+    """The end of a turn a schedule started (SimpleTerm spec/turn-state#scheduled, AhMunGa/simple-term#469): with no
+    schedule left it is a done to the tunnels only, at once, and Claude's screen says done_scheduled; one that ended
+    asking is a plain done on the screen, the tunnels and the relay. A turn a task's report started ends in done
+    while a schedule remains (SimpleTerm spec/turn-state#background). A StopFailure clears the badge (idle) instead
+    of a green done; the error itself goes as an event."""
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_A, {}), (LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})], conf={"done_delay": None})
+        st = {"SIMPLETERM": "1"}
+        cron = [{"id": "c1", "schedule": "*/5 * * * *", "recurring": True, "prompt": "check the deploy"}]
+
+        def reset():
+            s.ctl("/_ctl/reset", {})
+            tctl("/_ctl/reset", {})
+            tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T)}})
+
+        def stop(sid, crons, last):
+            return s.run("claude", cc_event(sid, "Stop", stop_hook_active=False, last_assistant_message=last,
+                                            background_tasks=[], session_crons=crons), st)[1]
+
+        def tunnel(ev):
+            return [r for r in ingests(s, ctl=tctl) if (r.get("body") or {}).get("ev") == ev]
+
+        def turn(rec):
+            return (rec[0].get("plain_json") or {}).get("turn", {}) if rec else {}
+
+        reset()
+        s.run("claude", cc_event("se1", "UserPromptSubmit", prompt="check the deploy", source="loop_wakeup"), st)
+        t0 = time.time()
+        out = stop("se1", [], "The deploy finished; the loop ended.")
+        s.check("schedule end: the screen says done_scheduled", seqs(out) == "\x1b]9;simpleterm:state=done_scheduled\x07", repr(out))
+        d = wait_for(lambda: tunnel("done"), 10)
+        s.check("schedule end: one done with by schedule to the tunnel, at once (no done_delay)",
+                len(d) == 1 and turn(d).get("by") == "schedule" and d[0]["received"] - t0 < 2.5,
+                str([(turn([r]), round(r["received"] - t0, 2)) for r in d])[:300])
+        time.sleep(max(0, t0 + 4.5 - time.time()))  # past the shipped done_delay (3 s)
+        s.check("schedule end: nothing to the relay", not ingests(s), str(ingests(s))[:300])
+
+        # Decision 9 (SimpleTerm hist/turn-state#d9): a scheduled turn that ended asking is a plain done everywhere.
+        reset()
+        s.run("claude", cc_event("se2", "UserPromptSubmit", prompt="check the deploy", source="loop_wakeup"), st)
+        out = stop("se2", [], "The deploy failed. Should I roll back?")
+        s.check("schedule end asking: done on the screen", seqs(out) == "\x1b]9;simpleterm:state=done\x07", repr(out))
+        r = wait_for(lambda: ingests(s, "done"), 20)
+        s.check("schedule end asking: done to the relay, by schedule, asks", len(r) == 1 and turn(r).get("by") == "schedule"
+                and turn(r).get("asks") is True, str(r)[:300])
+        s.check("schedule end asking: and to the tunnel", wait_for(lambda: tunnel("done"), 10), str(ingests(s, ctl=tctl))[:300])
+
+        # A task's report woke the agent while a schedule is still set: its end is a done (it is no scheduled turn).
+        reset()
+        s.run("claude", cc_event("se3", "UserPromptSubmit",
+                                 prompt="<task-notification>\n<task-id>b4y66jodr</task-id>\n<status>completed</status>"), st)
+        out = stop("se3", cron, "The tests passed.")
+        s.check("task turn with a schedule set: done on the screen", seqs(out) == "\x1b]9;simpleterm:state=done\x07", repr(out))
+        r = wait_for(lambda: ingests(s, "done"), 20)
+        s.check("task turn with a schedule set: done to the relay, by task", len(r) == 1 and turn(r).get("by") == "task", str(r)[:300])
+        # A turn the schedule started with the schedule still set stays a pause (the loop stays quiet).
+        reset()
+        s.run("claude", cc_event("se3", "UserPromptSubmit", prompt="check the deploy", source="loop_wakeup"), st)
+        out = stop("se3", cron, "Still deploying.")
+        s.check("scheduled turn with a schedule set: still background", seqs(out).startswith("\x1b]9;simpleterm:state=background scheduled:"), repr(out))
+        st_ev = wait_for(lambda: [x for x in tunnel("state") if (x.get("plain_json") or {}).get("st") == "scheduled"], 10)
+        time.sleep(1.5)
+        s.check("scheduled turn with a schedule set: state scheduled, no done anywhere",
+                st_ev and not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300])
+
+        # StopFailure: the badge is cleared (idle), not a green done; the error goes as an event.
+        reset()
+        out = s.run("claude", cc_event("se4", "StopFailure", error="server_error", error_details="overloaded",
+                                       last_assistant_message=""), st)[1]
+        s.check("StopFailure: the screen says idle", seqs(out) == "\x1b]9;simpleterm:state=idle\x07", repr(out))
+        s.check("StopFailure: the error goes", wait_for(lambda: ingests(s, "error"), 20), str(ingests(s))[:300])
+    finally:
+        tun.terminate()
+        tun.wait(5)
 
 
 def t_done_delay(s):
@@ -4766,7 +4846,7 @@ def copies_check():
 
 
 TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t_timeout, t_multi_link,
-         t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_work_7501, t_question_while_background, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_done_delay, t_background_events_and_badges, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
+         t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_work_7501, t_question_while_background, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_schedule_end, t_done_delay, t_background_events_and_badges, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js,

@@ -66,6 +66,25 @@ AhMunGa/simple-term#470). No hook changed.
   links an earlier SimpleTerm app made into `~/.simpleterm/src` (`curl -o` would write through
   them). Running an install again changes nothing, but Gemini CLI and Grok Build exit 1 then.
 
+The end of a turn a schedule started (SimpleTerm `spec/turn-state#scheduled`,
+`if/hook-events-turn#background`, issue AhMunGa/simple-term#469):
+
+- **The last scheduled turn is quiet**: the `Stop` that finds no schedule left after a turn a
+  schedule started (`/loop`, `ScheduleWakeup`, CronCreate; Grok Build `scheduler-fired-`) sends its
+  `done` (`turn.by: schedule`) to the tunnels only and at once (no `done_delay`: no alert waits on
+  it), nothing to the relay, and Claude Code's screen gets the new state value
+  `simpleterm:state=done_scheduled` (`if/terminal-signals#structured`), so the app lists the result
+  without an alert and keeps Claude's own OSC 7501 `done` quiet too. A turn that ended asking
+  (`turn.asks`) is still a plain `done` on the screen, the tunnels and the relay. An older app drops
+  the new value and alerts on the agent's own `done` as before.
+- **A task's turn ends while a schedule is set**: only a turn a schedule started waits for the
+  schedule; a turn a task's report (or the agent) started ends in `done` when none of its work is
+  left (`spec/turn-state#background`). Before, a set schedule kept it quiet.
+- **A failed turn clears the badge**: Claude Code's `StopFailure` writes `simpleterm:state=idle`
+  instead of `done` (a failed turn showed a green done badge where Claude does not speak OSC 7501);
+  the `error` or `auth` event is unchanged.
+- The same in `agent-hook.ps1` and in every plugin's copy of `agent-hook.sh`.
+
 ## 0.5.1 - 2026-11-04
 
 A request held back for a wait is told again while it is still open (SimpleTerm
