@@ -1217,6 +1217,7 @@ function Get-Spec([string]$text) {
     if ((SpP 'cfg.var').Length -gt 0 -and (SpP 'cfg.path').Length -gt 0) { SpO 'cfg'; SpS 'cfg.var' (SpP 'cfg.var') $false; SpS 'cfg.path' (SpP 'cfg.path') $false }
     SpS 'pm' (SpP 'pm') $false
     SpS 'mux' (SpP 'mux') $false
+    SpS 'pane' (SpP 'pane') $false
     SpR 'tms' (SpP 'tms')
     if ((SpP 'rkind').Length -gt 0) { SpReq (SpP 'rkind') }
     if ((SpP 'turn') -ceq '1') { SpTurn }
@@ -2122,8 +2123,25 @@ function Initialize-Common {
     }
     if ($Script:Agent -ceq 'codex') { $Script:PMode = Get-CodexPm }
     if ($Script:PMode -cmatch '\A[A-Za-z0-9._:/-]+\z' -and $Script:PMode.Length -le 48) { Add-At 'pm' $Script:PMode }
-    if ($env:TMUX) { Add-At 'mux' 'tmux' }
-    elseif ($env:STY) { Add-At 'mux' 'screen' }
+    Get-Mux
+    if ($Script:MuxV) { Add-At 'mux' $Script:MuxV }
+    if ($Script:PaneV) { Add-At 'pane' $Script:PaneV }
+}
+
+# The multiplexer the agent runs in and the id of its pane there (SimpleTerm
+# if/event-v2#common-fields, if/hook-events#identification), as mux_detect in
+# agent-hook.sh: $Script:MuxV (tmux, screen, herdr or empty) and $Script:PaneV
+# (empty when none may be sent). tmux and screen come first: herdr drops TMUX,
+# TMUX_PANE and STY from its panes, so with both the other one is nearer.
+function Get-Mux {
+    $Script:MuxV = ''
+    $Script:PaneV = ''
+    if ($env:TMUX) { $Script:MuxV = 'tmux'; $Script:PaneV = [string]$env:TMUX_PANE }
+    elseif ($env:STY) { $Script:MuxV = 'screen' }
+    elseif ($env:HERDR_ENV -ceq '1' -and $env:HERDR_PANE_ID) { $Script:MuxV = 'herdr'; $Script:PaneV = [string]$env:HERDR_PANE_ID }
+    # Codex's default daemon runs every hook with the environment of the TUI that started it.
+    if ($Script:Agent -ceq 'codex') { $Script:PaneV = '' }
+    if ($Script:PaneV -cnotmatch '\A[A-Za-z0-9%._:-]{1,64}\z') { $Script:PaneV = '' }
 }
 
 # True if $dir (one trailing / or \ dropped) is ~/<name>.
@@ -2362,7 +2380,9 @@ function Write-SessRecord([string]$state, [string]$prompt) {
     }
     if ($cvv -and $cpp) { $j += ',"cfg":{"var":"' + $cvv + '","path":"' + (Limit-Json $cpp 100000 1024) + '"}' }
     $j += ',"state":"' + $state + '"'
-    if ($env:TMUX) { $j += ',"mux":"tmux"' } elseif ($env:STY) { $j += ',"mux":"screen"' }
+    # No pane: a resumed session runs in another one (SimpleTerm hist/session-record#d25).
+    Get-Mux
+    if ($Script:MuxV) { $j += ',"mux":"' + $Script:MuxV + '"' }
     $j += '}'
     if ($j.Length -gt 4096) { return }
     $tmp = $Script:Sess + '.json.' + $PID

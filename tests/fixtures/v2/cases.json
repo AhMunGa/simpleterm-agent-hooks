@@ -3210,6 +3210,636 @@
    "conf": {},
    "files": {},
    "note": ""
+  },
+  {
+   "name": "claude_herdr",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "npm test -- --watch=false",
+       "description": "Run the test suite"
+      },
+      "permission_suggestions": [
+       {
+        "type": "addRules",
+        "rules": [
+         {
+          "toolName": "Bash",
+          "ruleContent": "npm test *"
+         }
+        ],
+        "behavior": "allow",
+        "destination": "localSettings"
+       },
+       {
+        "type": "addDirectories",
+        "directories": [
+         "/home/me/other"
+        ],
+        "destination": "session"
+       },
+       {
+        "type": "setMode",
+        "mode": "acceptEdits",
+        "destination": "session"
+       }
+      ]
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2",
+    "relay1"
+   ],
+   "env": {
+    "HERDR_ENV": "1",
+    "HERDR_PANE_ID": "w1:p3"
+   },
+   "conf": {},
+   "files": {},
+   "note": "inside herdr (HERDR_ENV=1 and HERDR_PANE_ID): mux herdr and pane on every link, the relay too"
+  },
+  {
+   "name": "claude_tmux_pane",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "npm test -- --watch=false",
+       "description": "Run the test suite"
+      },
+      "permission_suggestions": [
+       {
+        "type": "addRules",
+        "rules": [
+         {
+          "toolName": "Bash",
+          "ruleContent": "npm test *"
+         }
+        ],
+        "behavior": "allow",
+        "destination": "localSettings"
+       },
+       {
+        "type": "addDirectories",
+        "directories": [
+         "/home/me/other"
+        ],
+        "destination": "session"
+       },
+       {
+        "type": "setMode",
+        "mode": "acceptEdits",
+        "destination": "session"
+       }
+      ]
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2"
+   ],
+   "env": {
+    "TMUX": "/tmp/tmux-1000/default,4242,0",
+    "TMUX_PANE": "%13"
+   },
+   "conf": {},
+   "files": {},
+   "note": "inside tmux: mux tmux and pane TMUX_PANE"
+  },
+  {
+   "name": "claude_tmux_in_herdr",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "npm test -- --watch=false",
+       "description": "Run the test suite"
+      },
+      "permission_suggestions": [
+       {
+        "type": "addRules",
+        "rules": [
+         {
+          "toolName": "Bash",
+          "ruleContent": "npm test *"
+         }
+        ],
+        "behavior": "allow",
+        "destination": "localSettings"
+       },
+       {
+        "type": "addDirectories",
+        "directories": [
+         "/home/me/other"
+        ],
+        "destination": "session"
+       },
+       {
+        "type": "setMode",
+        "mode": "acceptEdits",
+        "destination": "session"
+       }
+      ]
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel"
+   ],
+   "env": {
+    "TMUX": "/tmp/tmux-1000/default,4242,0",
+    "TMUX_PANE": "%13",
+    "HERDR_ENV": "1",
+    "HERDR_PANE_ID": "w1:p3"
+   },
+   "conf": {},
+   "files": {},
+   "note": "a tmux started in a herdr pane keeps HERDR_* (herdr drops TMUX from its own panes): the nearer tmux and its pane"
+  },
+  {
+   "name": "claude_screen_in_herdr",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "npm test -- --watch=false",
+       "description": "Run the test suite"
+      },
+      "permission_suggestions": [
+       {
+        "type": "addRules",
+        "rules": [
+         {
+          "toolName": "Bash",
+          "ruleContent": "npm test *"
+         }
+        ],
+        "behavior": "allow",
+        "destination": "localSettings"
+       },
+       {
+        "type": "addDirectories",
+        "directories": [
+         "/home/me/other"
+        ],
+        "destination": "session"
+       },
+       {
+        "type": "setMode",
+        "mode": "acceptEdits",
+        "destination": "session"
+       }
+      ]
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel"
+   ],
+   "env": {
+    "HERDR_ENV": "1",
+    "HERDR_PANE_ID": "w1:p3",
+    "STY": "4242.pts-0.box"
+   },
+   "conf": {},
+   "files": {},
+   "note": "a screen started in a herdr pane: mux screen, no pane"
+  },
+  {
+   "name": "claude_herdr_bad_pane",
+   "agent": "claude",
+   "src": "Claude Code 2.1.316 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "872e63d5-f55f-46fa-93db-a0062d1259fb",
+      "transcript_path": "/home/me/.claude/projects/-home-me-work-api/872e63d5.jsonl",
+      "cwd": "/home/me/work/api",
+      "permission_mode": "default",
+      "prompt_id": "1a533fe1-0f09-4d71-838d-6ff2442e77c3",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "npm test -- --watch=false",
+       "description": "Run the test suite"
+      },
+      "permission_suggestions": [
+       {
+        "type": "addRules",
+        "rules": [
+         {
+          "toolName": "Bash",
+          "ruleContent": "npm test *"
+         }
+        ],
+        "behavior": "allow",
+        "destination": "localSettings"
+       },
+       {
+        "type": "addDirectories",
+        "directories": [
+         "/home/me/other"
+        ],
+        "destination": "session"
+       },
+       {
+        "type": "setMode",
+        "mode": "acceptEdits",
+        "destination": "session"
+       }
+      ]
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel"
+   ],
+   "env": {
+    "HERDR_ENV": "1",
+    "HERDR_PANE_ID": "w1:p3/x"
+   },
+   "conf": {},
+   "files": {},
+   "note": "a pane id outside [A-Za-z0-9%._:-]{1,64}: mux herdr, no pane"
+  },
+  {
+   "name": "codex_herdr",
+   "agent": "codex",
+   "src": "Codex 0.165.0 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "steps": [
+    {
+     "args": [
+      "codex"
+     ],
+     "input": {
+      "session_id": "019a1b55-87e1-73b0-b300-43de9f826b82",
+      "turn_id": "019a1b55-d144-7ca2-9f51-3c954b6f607e",
+      "transcript_path": "HOMEP/rollout.jsonl",
+      "cwd": "/home/me/work/api",
+      "hook_event_name": "PermissionRequest",
+      "model": "gpt-5.5",
+      "permission_mode": "default",
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo hi > x",
+       "description": "May I run it?"
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2"
+   ],
+   "env": {
+    "HERDR_ENV": "1",
+    "HERDR_PANE_ID": "w1:p3"
+   },
+   "conf": {},
+   "files": {
+    "rollout.jsonl": "{\"timestamp\":\"2026-11-02T08:17:19.359Z\",\"ordinal\":0,\"type\":\"session_meta\",\"payload\":{\"session_id\":\"019a1b55-87e1-73b0-b300-43de9f826b82\",\"id\":\"019a1b55-87e1-73b0-b300-43de9f826b82\",\"cwd\":\"/home/me/work/api\",\"originator\":\"codex-tui\",\"cli_version\":\"0.165.0\",\"source\":\"cli\"}}\n{\"timestamp\":\"2026-11-02T08:17:35.065Z\",\"ordinal\":39,\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"019a1b55-d144-7ca2-9f51-3c954b6f607e\",\"cwd\":\"/home/me/work/api\",\"approval_policy\":\"on-request\",\"approvals_reviewer\":\"user\",\"sandbox_policy\":{\"type\":\"read-only\"},\"collaboration_mode\":{\"mode\":\"plan\",\"model\":\"gpt-5.5\"}}}\n"
+   },
+   "note": "Codex inside herdr: mux herdr, never a pane (its default daemon runs hooks with the first TUI's environment)"
+  },
+  {
+   "name": "opencode2_herdr",
+   "agent": "opencode",
+   "src": "OpenCode, from the plugin bridge (2.2.5 permission.asked, measured v2a8); same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "steps": [
+    {
+     "args": [
+      "opencode"
+     ],
+     "input": {
+      "hook_event_name": "PermissionRequest",
+      "session_id": "ses_9",
+      "cwd": "/home/me/work/api",
+      "tool_name": "edit",
+      "tool_input": {
+       "command": "hello.txt"
+      },
+      "oc": "2",
+      "request_id": "per_01JDX2",
+      "save": [
+       "*"
+      ],
+      "resources": [
+       "hello.txt"
+      ],
+      "metadata": {
+       "files": [
+        {
+         "file": "hello.txt",
+         "patch": "--- a/hello.txt\n+++ b/hello.txt\n@@ -1 +1 @@\n-hi\n+hello\n"
+        }
+       ]
+      },
+      "others": [
+       "per_01JDX3"
+      ]
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2"
+   ],
+   "env": {
+    "HERDR_ENV": "1",
+    "HERDR_PANE_ID": "w1:p3"
+   },
+   "conf": {},
+   "files": {},
+   "note": "OpenCode 2.x inside herdr: mux unknown, no pane (its service keeps the first TUI's environment)"
+  },
+  {
+   "name": "opencode119_herdr",
+   "agent": "opencode",
+   "src": "OpenCode, from the plugin bridge (1.19.5 permission.asked, measured a1/a6); same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "steps": [
+    {
+     "args": [
+      "opencode"
+     ],
+     "input": {
+      "hook_event_name": "PermissionRequest",
+      "session_id": "ses_9",
+      "cwd": "/home/me/work/api",
+      "tool_name": "bash",
+      "tool_input": {
+       "command": "echo a1"
+      },
+      "oc": "1.19",
+      "request_id": "per_a1",
+      "patterns": [
+       "echo a1"
+      ],
+      "always": [
+       "echo *"
+      ],
+      "metadata": {
+       "command": "echo a1"
+      },
+      "others": [
+       "per_a2"
+      ],
+      "message_id": "msg_01"
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel"
+   ],
+   "env": {
+    "HERDR_ENV": "1",
+    "HERDR_PANE_ID": "w1:p3"
+   },
+   "conf": {},
+   "files": {},
+   "note": "OpenCode 1.x inside herdr: the TUI's environment, mux herdr and pane"
+  },
+  {
+   "name": "copilot_herdr",
+   "agent": "copilot",
+   "src": "GitHub Copilot CLI 1.0.105 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "steps": [
+    {
+     "args": [
+      "copilot",
+      "notification"
+     ],
+     "input": {
+      "sessionId": "246c0f5b-8a7a-47f9-a1ef-8d3f2cf9653a",
+      "cwd": "/home/me/work/api",
+      "timestamp": 1793608018859,
+      "hook_event_name": "Notification",
+      "message": "Run command: npm test",
+      "notification_type": "permission_prompt",
+      "title": "Permission needed"
+     },
+     "env": {
+      "COPILOT_CLI": "1",
+      "COPILOT_CLI_BINARY_VERSION": "1.0.105"
+     }
+    }
+   ],
+   "links": [
+    "tunnel"
+   ],
+   "env": {
+    "HERDR_ENV": "1",
+    "HERDR_PANE_ID": "w1:p3"
+   },
+   "conf": {},
+   "files": {},
+   "note": "Copilot CLI inside herdr: mux herdr and pane"
+  },
+  {
+   "name": "grok_herdr",
+   "agent": "grok",
+   "src": "Grok Build 1.0.70 [measured shapes]; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "hookEventName": "pre_tool_use",
+      "sessionId": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "cwd": "/home/me/work/api",
+      "workspaceRoot": "/home/me/work/api",
+      "timestamp": "2026-11-01T10:08:55.902298+00:00",
+      "transcriptPath": "/home/me/.grok/sessions/x/01a19695/updates.jsonl",
+      "permissionMode": "default",
+      "hook_event_name": "PreToolUse",
+      "session_id": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "toolName": "run_terminal_command",
+      "toolUseId": "call-6f76-0",
+      "toolInput": {
+       "command": "./tool.sh s2",
+       "description": "Run s2 tool script"
+      }
+     },
+     "env": {
+      "GROK_HOOK_EVENT": "pre_tool_use"
+     }
+    },
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "hookEventName": "notification",
+      "sessionId": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "cwd": "/home/me/work/api",
+      "workspaceRoot": "/home/me/work/api",
+      "timestamp": "2026-11-01T10:08:55.902298+00:00",
+      "transcriptPath": "/home/me/.grok/sessions/x/01a19695/updates.jsonl",
+      "permissionMode": "default",
+      "hook_event_name": "Notification",
+      "session_id": "01a19695-147b-7243-a5bb-5c92908bd684",
+      "notificationType": "permission_prompt",
+      "message": "Tool permission requested",
+      "level": "info"
+     },
+     "env": {
+      "GROK_HOOK_EVENT": "notification"
+     }
+    }
+   ],
+   "links": [
+    "tunnel"
+   ],
+   "env": {
+    "HERDR_ENV": "1",
+    "HERDR_PANE_ID": "w1:p3"
+   },
+   "conf": {},
+   "files": {},
+   "note": "Grok Build inside herdr: mux herdr and pane"
+  },
+  {
+   "name": "agy_herdr",
+   "agent": "agy",
+   "src": "Antigravity CLI 1.4.12 [measured shapes]; agy_wait > 0, no tunnel; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "steps": [
+    {
+     "args": [
+      "agy",
+      "PreToolUse"
+     ],
+     "input": {
+      "conversationId": "f3e001f9-7d64-4f02-b6fa-5cd414bbfb15",
+      "workspacePaths": [
+       "/home/me/work/api"
+      ],
+      "modelName": "gemini-3.1-pro-low",
+      "transcriptPath": "/home/me/.gemini/antigravity-cli/brain/f3e001f9/.system_generated/logs/transcript_full.jsonl",
+      "stepIdx": 4,
+      "toolCall": {
+       "name": "run_command",
+       "args": {
+        "CommandLine": "make test",
+        "WaitMsBeforeAsync": 0
+       }
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "relay2"
+   ],
+   "env": {
+    "HERDR_ENV": "1",
+    "HERDR_PANE_ID": "w1:p3"
+   },
+   "conf": {
+    "agy_wait": 5
+   },
+   "files": {},
+   "note": "Antigravity CLI inside herdr: mux herdr and pane (relay only, as agy_run_command)"
+  },
+  {
+   "name": "budget_stage2_herdr",
+   "agent": "claude",
+   "src": "synthetic: the relay drops req.ask whole (stage 2) after the field limits; same input, multiplexer environment (if/event-v2#common-fields, if/hook-events#identification)",
+   "steps": [
+    {
+     "args": [
+      "claude"
+     ],
+     "input": {
+      "session_id": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+      "transcript_path": "/x/t.jsonl",
+      "cwd": "/home/me/작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업",
+      "permission_mode": "default",
+      "hook_event_name": "PermissionRequest",
+      "tool_name": "Bash",
+      "agent_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "agent_type": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+      "tool_input": {
+       "command": "echo 가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다",
+       "description": "설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명"
+      }
+     },
+     "env": {}
+    }
+   ],
+   "links": [
+    "tunnel",
+    "relay2"
+   ],
+   "env": {
+    "HERDR_ENV": "1",
+    "HERDR_PANE_ID": "w1:p333333333333333333333333333333333333333333333333333333333333"
+   },
+   "conf": {},
+   "files": {},
+   "note": "a 64-character pane on the relay after stage 2: kept like mux (if/event-v2-limits#shrinking)"
   }
  ]
 }

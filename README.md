@@ -409,9 +409,11 @@ fields and skip the rest). The contract is in the SimpleTerm app's specs (`index
 - **Who sent it**: the format (`fmt`: 2), the plugin's version, the agent's version (from its
   transcript or rollout, `COPILOT_CLI_BINARY_VERSION`, or for OpenCode, Antigravity and Grok Build a
   cached `--version`, run in the background when the executable changes), the session and turn
-  ids, the subagent, the working folder, the permission mode, a multiplexer (`tmux`, `screen`;
-  `unknown` for OpenCode 2.x, whose service keeps the first TUI's environment). These are for
-  diagnosis and records; nothing is switched on or off by a version.
+  ids, the subagent, the working folder, the permission mode, a multiplexer (`tmux`, `screen`,
+  `herdr`; `unknown` for OpenCode 2.x, whose service keeps the first TUI's environment) and the id of
+  the agent's pane there (`pane`: `TMUX_PANE`, `HERDR_PANE_ID`; never for Codex or OpenCode 2.x),
+  with which the app ties an event to a herdr or tmux session row. These are for diagnosis and
+  records; nothing is switched on or off by a version.
 - **What is asked** (`req`): the window's kind (shell, edit, read, web, mcp, question, plan, form,
   login, other), the tool, the request itself (the command and its description, the file and the
   change as a replacement, a whole new file or a patch, the URL, the MCP server, tool and
@@ -754,10 +756,11 @@ Not tested on Windows yet.
   plugin cannot reach yet), and OpenCode's last message is not in a turn's end.
 - **Claude Code MCP forms** are alerts without the server's name (the `Notification` has none).
 - **Codex's daemon mode** (its default): hooks run in Codex's shared daemon with the environment of
-  the terminal that started it, so `SIMPLETERM` (session records) and `TMUX`/`STY` (`mux`) may be
-  another session's; a Codex session's end comes when the daemon closes the conversation (about 30
-  minutes after you quit or the SSH connection drops). `codex --no-daemon` runs hooks in the session
-  itself. SimpleTerm `hist/event-v2-turn#r17`, issue #447.
+  the terminal that started it, so `SIMPLETERM` (session records) and `TMUX`/`STY`/`HERDR_*` (`mux`)
+  may be another session's (the hook sends no `pane` for Codex for that reason); a Codex session's
+  end comes when the daemon closes the conversation (about 30 minutes after you quit or the SSH
+  connection drops). `codex --no-daemon` runs hooks in the session itself. SimpleTerm
+  `hist/event-v2-turn#r17`, issue #447.
 - **A held request is told again for Claude Code only.** Other agents' requests held back for a wait
   you are looking at stay off the device once you answer that wait (their hooks do not wait, and no
   record of theirs tells an open prompt; other devices get the relay's push; SimpleTerm issue #446).

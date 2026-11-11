@@ -4198,6 +4198,113 @@ def t_v2_sessions(s):
     s.check("retention: an old record with a fresh .beat stays, an old one goes", "keep.json" in names and "old.json" not in names, str(sorted(names)[:5]))
 
 
+def t_v2_mux(s):
+    """SimpleTerm if/event-v2#common-fields, if/hook-events#identification: `mux` and `pane` from the hook
+    environment (herdr: HERDR_ENV=1 with HERDR_PANE_ID; tmux and screen first, as the nearer multiplexer),
+    `pane` right after `mux`, the same on the relay and the tunnel and in the tunnel's states; the session
+    record names the multiplexer but never the pane (SimpleTerm if/session-record#fields, hist/session-record#d25)."""
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2}), (LINK_A, {"fmt": 2, "push": "disabled"})],
+                conf={"claude_wait": 5})
+        tctl("/_ctl/reset", {})
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, push="suppressed", unknown_error="unknown")}})
+        herdr = {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p3"}
+        tmux = {"TMUX": "/tmp/tmux-1000/default,4242,0", "TMUX_PANE": "%13"}
+        cases = [  # (session, hook environment, mux, pane)
+            ("mx-none", {}, None, None),
+            ("mx-herdr", herdr, "herdr", "w1:p3"),
+            ("mx-herdr-no-env", {"HERDR_PANE_ID": "w1:p3"}, None, None),
+            ("mx-herdr-env-0", {"HERDR_ENV": "0", "HERDR_PANE_ID": "w1:p3"}, None, None),
+            ("mx-herdr-no-pane", {"HERDR_ENV": "1"}, None, None),
+            ("mx-herdr-empty-pane", {"HERDR_ENV": "1", "HERDR_PANE_ID": ""}, None, None),
+            ("mx-pane-64", dict(herdr, HERDR_PANE_ID="p" * 64), "herdr", "p" * 64),
+            ("mx-pane-65", dict(herdr, HERDR_PANE_ID="p" * 65), "herdr", None),
+            ("mx-pane-space", dict(herdr, HERDR_PANE_ID="w1 p3"), "herdr", None),
+            ("mx-pane-quote", dict(herdr, HERDR_PANE_ID='w1"p3'), "herdr", None),
+            ("mx-pane-non-ascii", dict(herdr, HERDR_PANE_ID="w1:pé"), "herdr", None),
+            ("mx-tmux", tmux, "tmux", "%13"),
+            ("mx-tmux-no-pane", {"TMUX": tmux["TMUX"]}, "tmux", None),
+            ("mx-tmux-in-herdr", dict(herdr, **tmux), "tmux", "%13"),
+            ("mx-screen-in-herdr", dict(herdr, STY="4242.pts-0.box"), "screen", None),
+        ]
+        for sid, env, _, _ in cases:
+            s.run("claude", v2_perm(session=sid), env)
+
+        def plains(recs, ev):
+            got = {}
+            for r in recs:
+                if r["path"] == "/v1/ingest" and r.get("body", {}).get("ev") == ev and r.get("plain"):
+                    got[(r.get("plain_json") or {}).get("sid")] = r["plain"]
+            return got
+        wait_for(lambda: len(plains(tctl("/_ctl/records")["records"], "permission")) >= len(cases), 15)
+        links = (("relay", plains(s.records(), "permission")), ("tunnel", plains(tctl("/_ctl/records")["records"], "permission")))
+        for sid, env, mux, pane in cases:
+            for where, got in links:
+                raw = got.get(sid)
+                j = json.loads(raw) if raw else {}
+                ok = raw is not None and j.get("mux") == mux and j.get("pane") == pane
+                if pane:
+                    ok = ok and ('"mux":"%s","pane":"%s",' % (mux, pane)) in raw
+                s.check("mux %s: %s has mux %s, pane %s" % (sid, where, mux, pane), ok, str(raw)[:300])
+        # A SimpleTerm session's prompt: the tunnel's state event and the session record.
+        sd = s.home / ".simpleterm" / "sessions" / "claude-code"
+        tctl("/_ctl/reset", {})
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, push="suppressed", unknown_error="unknown")}})
+        recs = (("mx-rec-herdr", herdr, "herdr", "w1:p3"), ("mx-rec-tmux", tmux, "tmux", "%13"), ("mx-rec-none", {}, None, None))
+        for sid, env, _, _ in recs:
+            s.run("claude", json.dumps({"session_id": sid, "cwd": "/w", "hook_event_name": "UserPromptSubmit", "prompt": "go"}), dict(env, SIMPLETERM="1"))
+        wait_for(lambda: len(plains(tctl("/_ctl/records")["records"], "state")) >= len(recs), 10)
+        states = plains(tctl("/_ctl/records")["records"], "state")
+        for sid, env, mux, pane in recs:
+            j = json.loads(states[sid]) if sid in states else {}
+            s.check("mux %s: state has mux %s, pane %s" % (sid, mux, pane), sid in states and j.get("mux") == mux and j.get("pane") == pane, str(states.get(sid))[:300])
+            rec = sd / (sid + ".json")
+            r = json.loads(rec.read_text()) if rec.exists() else None
+            s.check("mux %s: session record has mux %s and no pane" % (sid, mux), r is not None and r.get("mux") == mux and "pane" not in r, str(r)[:300])
+        # The events a hook run sends after its first: the result of a decision (`resolved`) …
+        tctl("/_ctl/reset", {})
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown",
+                                                           decisions=[{"decision": "allow", "after": 0.5, "dext": {"act": "allow"}}])}})
+        rc, out, err, el = s.run("claude", v2_perm(session="mx-res-herdr"), herdr)
+        wait_for(lambda: plains(tctl("/_ctl/records")["records"], "resolved"), 10)
+        raw = plains(tctl("/_ctl/records")["records"], "resolved").get("mx-res-herdr")
+        s.check("mux mx-res-herdr: resolved has mux herdr, pane w1:p3",
+                behavior(out).get("behavior") == "allow" and raw is not None and '"mux":"herdr","pane":"w1:p3",' in raw, out + str(raw)[:300])
+        # … a turn's end (`done`), inside tmux …
+        tctl("/_ctl/reset", {})
+        s.run("claude", json.dumps({"session_id": "mx-done-tmux", "cwd": "/w", "hook_event_name": "Stop", "stop_hook_active": False,
+                                    "last_assistant_message": "Done."}), tmux)
+        wait_for(lambda: plains(tctl("/_ctl/records")["records"], "done"), 20)
+        raw = plains(tctl("/_ctl/records")["records"], "done").get("mx-done-tmux")
+        s.check("mux mx-done-tmux: done has mux tmux, pane %13", raw is not None and '"mux":"tmux","pane":"%13",' in raw, str(raw)[:300])
+        if s.kind == "sh":
+            # … and a usage report (Copilot's quota file, sh only).
+            ev = write(s.tmp / "mxcop" / "events.jsonl", COPILOT_QUOTA_LINE + "\n")
+            tctl("/_ctl/reset", {})
+            s.run("copilot", json.dumps({"hookName": "agentStop", "sessionId": "mx-use-herdr", "cwd": "/w/c", "transcriptPath": str(ev)}), herdr)
+            wait_for(lambda: plains(tctl("/_ctl/records")["records"], "usage"), 20)
+            raw = plains(tctl("/_ctl/records")["records"], "usage").get("mx-use-herdr")
+            s.check("mux mx-use-herdr: usage has mux herdr, pane w1:p3", raw is not None and '"mux":"herdr","pane":"w1:p3",' in raw, str(raw)[:300])
+    finally:
+        tun.terminate()
+        tun.wait(5)
+    if not NODE or s.kind != "sh":
+        return
+    # Through the OpenCode plugins, which hand the hook their own environment: 1.x is the TUI's
+    # (mux herdr and the pane), a 2.x service keeps its first TUI's (mux unknown, no pane).
+    d = str(s.tmp)
+    ask19 = {"type": "permission.asked", "properties": {"id": "per_m1", "sessionID": "ses_m1", "permission": "bash", "patterns": ["echo a1"],
+                                                       "metadata": {"command": "echo a1"}, "always": ["echo *"], "tool": {"messageID": "msg_1", "callID": "c1"}}}
+    ask2 = {"id": "e1", "type": "permission.asked", "location": {"directory": d},
+            "data": {"id": "per_m2", "sessionID": "ses_m2", "action": "shell", "resources": ["npm run build"], "save": ["npm *"]}}
+    for kind, ev, mux, pane in (("v1", ask19, "herdr", "w1:p3"), ("v2", ask2, "unknown", None)):
+        s.setup([(LINK_A, {"fmt": 2, "push": "disabled"})])
+        node_plugin(s, kind, {"directory": d, "env": herdr, "steps": [{"event": ev}], "wait": 3000})
+        p = (wait_for(lambda: ingests(s, "permission"), 10) or [{}])[0].get("plain_json") or {}
+        s.check("mux opencode %s plugin inside herdr: mux %s, pane %s" % (kind, mux, pane), p.get("mux") == mux and p.get("pane") == pane, str(p)[:300])
+
+
 def t_v2_versions(s):
     """SimpleTerm if/hook-events#version-cache: the agent's version where the agent gives none: `--version`, run in the background
     when the executable is new or newer than the cache (SimpleTerm hist/event-v2#d13); the first dotted number is taken."""
@@ -4633,7 +4740,7 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js,
          t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_usage_ask_gate, t_conf_vectors, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_held, t_v2_not_sent,
-         t_v2_state, t_v2_sessions, t_v2_opencode_js, t_copilot_hooks, t_copilot,
+         t_v2_state, t_v2_sessions, t_v2_mux, t_v2_opencode_js, t_copilot_hooks, t_copilot,
          t_v2_versions, t_v2_claude_question_once]
 
 # Tests of the sh hook only (scripts and behaviour the PowerShell hook does not have).

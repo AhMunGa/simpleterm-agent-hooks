@@ -608,5 +608,108 @@
   "stdout": [
    ""
   ]
+ },
+ "claude_herdr": {
+  "plain": [
+   "relay1 permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"claude-code\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"approve Bash: npm test -- --watch=false\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"872e63d5-f55f-46fa-93db-a0062d1259fb\",\"mux\":\"herdr\",\"pane\":\"w1:p3\",\"req\":{\"id\":\"st-0123456789abcdef\",\"win\":\"shell\",\"tool\":\"Bash\",\"wait\":\"shared\",\"ask\":{\"cmd\":\"npm test -- --watch=false\",\"desc\":\"Run the test suite\"},\"can\":[\"allow\",\"deny\"]},\"ts\":1793232000}",
+   "relay2 permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"claude-code\",\"host\":\"box-b\",\"cwd\":\"api\",\"msg\":\"approve Bash: npm test -- --watch=false\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"872e63d5-f55f-46fa-93db-a0062d1259fb\",\"mux\":\"herdr\",\"pane\":\"w1:p3\",\"req\":{\"id\":\"st-0123456789abcdef\",\"win\":\"shell\",\"tool\":\"Bash\",\"wait\":\"shared\",\"ask\":{\"cmd\":\"npm test -- --watch=false\",\"desc\":\"Run the test suite\"},\"can\":[\"allow\",\"allow_scope\",\"deny\",\"deny_reason\"],\"scopes\":[{\"label\":\"Bash(npm test *)\",\"kind\":\"rule\",\"dest\":\"localSettings\"},{\"label\":\"acceptEdits\",\"kind\":\"mode\",\"dest\":\"session\"}]},\"ts\":1793232000}",
+   "tunnel permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"claude-code\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"approve Bash: npm test -- --watch=false\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"872e63d5-f55f-46fa-93db-a0062d1259fb\",\"tid\":\"1a533fe1-0f09-4d71-838d-6ff2442e77c3\",\"dir\":\"/home/me/work/api\",\"pm\":\"default\",\"mux\":\"herdr\",\"pane\":\"w1:p3\",\"tms\":1793232000123,\"req\":{\"id\":\"st-0123456789abcdef\",\"win\":\"shell\",\"tool\":\"Bash\",\"wait\":\"shared\",\"ask\":{\"cmd\":\"npm test -- --watch=false\",\"desc\":\"Run the test suite\"},\"can\":[\"allow\",\"allow_scope\",\"deny\",\"deny_reason\"],\"scopes\":[{\"label\":\"Bash(npm test *)\",\"kind\":\"rule\",\"dest\":\"localSettings\"},{\"label\":\"acceptEdits\",\"kind\":\"mode\",\"dest\":\"session\"}]},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   ""
+  ]
+ },
+ "claude_tmux_pane": {
+  "plain": [
+   "relay2 permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"claude-code\",\"host\":\"box-b\",\"cwd\":\"api\",\"msg\":\"approve Bash: npm test -- --watch=false\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"872e63d5-f55f-46fa-93db-a0062d1259fb\",\"mux\":\"tmux\",\"pane\":\"%13\",\"req\":{\"id\":\"st-0123456789abcdef\",\"win\":\"shell\",\"tool\":\"Bash\",\"wait\":\"shared\",\"ask\":{\"cmd\":\"npm test -- --watch=false\",\"desc\":\"Run the test suite\"},\"can\":[\"allow\",\"allow_scope\",\"deny\",\"deny_reason\"],\"scopes\":[{\"label\":\"Bash(npm test *)\",\"kind\":\"rule\",\"dest\":\"localSettings\"},{\"label\":\"acceptEdits\",\"kind\":\"mode\",\"dest\":\"session\"}]},\"ts\":1793232000}",
+   "tunnel permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"claude-code\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"approve Bash: npm test -- --watch=false\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"872e63d5-f55f-46fa-93db-a0062d1259fb\",\"tid\":\"1a533fe1-0f09-4d71-838d-6ff2442e77c3\",\"dir\":\"/home/me/work/api\",\"pm\":\"default\",\"mux\":\"tmux\",\"pane\":\"%13\",\"tms\":1793232000123,\"req\":{\"id\":\"st-0123456789abcdef\",\"win\":\"shell\",\"tool\":\"Bash\",\"wait\":\"shared\",\"ask\":{\"cmd\":\"npm test -- --watch=false\",\"desc\":\"Run the test suite\"},\"can\":[\"allow\",\"allow_scope\",\"deny\",\"deny_reason\"],\"scopes\":[{\"label\":\"Bash(npm test *)\",\"kind\":\"rule\",\"dest\":\"localSettings\"},{\"label\":\"acceptEdits\",\"kind\":\"mode\",\"dest\":\"session\"}]},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   ""
+  ]
+ },
+ "claude_tmux_in_herdr": {
+  "plain": [
+   "tunnel permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"claude-code\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"approve Bash: npm test -- --watch=false\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"872e63d5-f55f-46fa-93db-a0062d1259fb\",\"tid\":\"1a533fe1-0f09-4d71-838d-6ff2442e77c3\",\"dir\":\"/home/me/work/api\",\"pm\":\"default\",\"mux\":\"tmux\",\"pane\":\"%13\",\"tms\":1793232000123,\"req\":{\"id\":\"st-0123456789abcdef\",\"win\":\"shell\",\"tool\":\"Bash\",\"wait\":\"shared\",\"ask\":{\"cmd\":\"npm test -- --watch=false\",\"desc\":\"Run the test suite\"},\"can\":[\"allow\",\"allow_scope\",\"deny\",\"deny_reason\"],\"scopes\":[{\"label\":\"Bash(npm test *)\",\"kind\":\"rule\",\"dest\":\"localSettings\"},{\"label\":\"acceptEdits\",\"kind\":\"mode\",\"dest\":\"session\"}]},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   ""
+  ]
+ },
+ "claude_screen_in_herdr": {
+  "plain": [
+   "tunnel permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"claude-code\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"approve Bash: npm test -- --watch=false\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"872e63d5-f55f-46fa-93db-a0062d1259fb\",\"tid\":\"1a533fe1-0f09-4d71-838d-6ff2442e77c3\",\"dir\":\"/home/me/work/api\",\"pm\":\"default\",\"mux\":\"screen\",\"tms\":1793232000123,\"req\":{\"id\":\"st-0123456789abcdef\",\"win\":\"shell\",\"tool\":\"Bash\",\"wait\":\"shared\",\"ask\":{\"cmd\":\"npm test -- --watch=false\",\"desc\":\"Run the test suite\"},\"can\":[\"allow\",\"allow_scope\",\"deny\",\"deny_reason\"],\"scopes\":[{\"label\":\"Bash(npm test *)\",\"kind\":\"rule\",\"dest\":\"localSettings\"},{\"label\":\"acceptEdits\",\"kind\":\"mode\",\"dest\":\"session\"}]},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   ""
+  ]
+ },
+ "claude_herdr_bad_pane": {
+  "plain": [
+   "tunnel permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"claude-code\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"approve Bash: npm test -- --watch=false\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"872e63d5-f55f-46fa-93db-a0062d1259fb\",\"tid\":\"1a533fe1-0f09-4d71-838d-6ff2442e77c3\",\"dir\":\"/home/me/work/api\",\"pm\":\"default\",\"mux\":\"herdr\",\"tms\":1793232000123,\"req\":{\"id\":\"st-0123456789abcdef\",\"win\":\"shell\",\"tool\":\"Bash\",\"wait\":\"shared\",\"ask\":{\"cmd\":\"npm test -- --watch=false\",\"desc\":\"Run the test suite\"},\"can\":[\"allow\",\"allow_scope\",\"deny\",\"deny_reason\"],\"scopes\":[{\"label\":\"Bash(npm test *)\",\"kind\":\"rule\",\"dest\":\"localSettings\"},{\"label\":\"acceptEdits\",\"kind\":\"mode\",\"dest\":\"session\"}]},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   ""
+  ]
+ },
+ "codex_herdr": {
+  "plain": [
+   "relay2 question {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"question\",\"app\":\"codex\",\"host\":\"box-b\",\"cwd\":\"api\",\"msg\":\"approve Bash: echo hi > x\",\"fmt\":2,\"pv\":\"@PV@\",\"av\":\"0.165.0\",\"sid\":\"019a1b55-87e1-73b0-b300-43de9f826b82\",\"mux\":\"herdr\",\"req\":{\"id\":\"st-0123456789abcdef\",\"win\":\"shell\",\"tool\":\"Bash\",\"wait\":\"none\",\"ask\":{\"cmd\":\"echo hi > x\",\"desc\":\"May I run it?\"}},\"ts\":1793232000}",
+   "tunnel permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"codex\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"approve Bash: echo hi > x\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"av\":\"0.165.0\",\"avs\":\"rollout\",\"sid\":\"019a1b55-87e1-73b0-b300-43de9f826b82\",\"tid\":\"019a1b55-d144-7ca2-9f51-3c954b6f607e\",\"dir\":\"/home/me/work/api\",\"pm\":\"on-request/read-only\",\"mux\":\"herdr\",\"tms\":1793232000123,\"req\":{\"id\":\"st-0123456789abcdef\",\"win\":\"shell\",\"tool\":\"Bash\",\"wait\":\"hidden\",\"ask\":{\"cmd\":\"echo hi > x\",\"desc\":\"May I run it?\"},\"can\":[\"allow\",\"deny\",\"deny_reason\"]},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   ""
+  ]
+ },
+ "opencode2_herdr": {
+  "plain": [
+   "relay2 permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"opencode\",\"host\":\"box-b\",\"cwd\":\"api\",\"msg\":\"approve edit: hello.txt\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"ses_9\",\"mux\":\"unknown\",\"req\":{\"id\":\"per_01JDX2\",\"win\":\"edit\",\"tool\":\"edit\",\"wait\":\"shared\",\"ask\":{\"path\":\"hello.txt\"},\"can\":[\"allow\",\"allow_scope\",\"deny\",\"deny_reason\"],\"scopes\":[{\"label\":\"*\",\"kind\":\"pattern\",\"dest\":\"project\"}],\"affects\":[\"allow_scope\",\"deny\",\"deny_reason\"],\"others\":[\"per_01JDX3\"]},\"ts\":1793232000}",
+   "tunnel permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"opencode\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"approve edit: hello.txt\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"ses_9\",\"dir\":\"/home/me/work/api\",\"mux\":\"unknown\",\"tms\":1793232000123,\"req\":{\"id\":\"per_01JDX2\",\"win\":\"edit\",\"tool\":\"edit\",\"wait\":\"shared\",\"ask\":{\"path\":\"hello.txt\",\"change\":{\"form\":\"patch\",\"fmt\":\"unified\",\"text\":\"--- a/hello.txt\\n+++ b/hello.txt\\n@@ -1 +1 @@\\n-hi\\n+hello\\n\"}},\"can\":[\"allow\",\"allow_scope\",\"deny\",\"deny_reason\"],\"scopes\":[{\"label\":\"*\",\"kind\":\"pattern\",\"dest\":\"project\"}],\"affects\":[\"allow_scope\",\"deny\",\"deny_reason\"],\"others\":[\"per_01JDX3\"]},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   ""
+  ]
+ },
+ "opencode119_herdr": {
+  "plain": [
+   "tunnel permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"opencode\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"approve bash: echo a1\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"ses_9\",\"tid\":\"msg_01\",\"dir\":\"/home/me/work/api\",\"mux\":\"herdr\",\"pane\":\"w1:p3\",\"tms\":1793232000123,\"req\":{\"id\":\"per_a1\",\"win\":\"shell\",\"tool\":\"bash\",\"wait\":\"shared\",\"ask\":{\"cmd\":\"echo a1\"},\"can\":[\"allow\",\"allow_scope\",\"deny\"],\"scopes\":[{\"label\":\"echo *\",\"kind\":\"pattern\",\"dest\":\"process\"}],\"affects\":[\"allow_scope\",\"deny\"],\"others\":[\"per_a2\"]},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   ""
+  ]
+ },
+ "copilot_herdr": {
+  "plain": [
+   "tunnel question {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"question\",\"app\":\"copilot-cli\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"Run command: npm test\",\"fmt\":2,\"pv\":\"@PV@\",\"av\":\"1.0.105\",\"avs\":\"env\",\"sid\":\"246c0f5b-8a7a-47f9-a1ef-8d3f2cf9653a\",\"dir\":\"/home/me/work/api\",\"mux\":\"herdr\",\"pane\":\"w1:p3\",\"tms\":1793232000123,\"req\":{\"id\":\"st-0123456789abcdef\",\"win\":\"shell\",\"wait\":\"none\",\"ask\":{\"cmd\":\"npm test\"}},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   ""
+  ]
+ },
+ "grok_herdr": {
+  "plain": [
+   "tunnel question {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"question\",\"app\":\"grok-build\",\"host\":\"dev-box\",\"cwd\":\"api\",\"msg\":\"Tool permission requested\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"01a19695-147b-7243-a5bb-5c92908bd684\",\"dir\":\"/home/me/work/api\",\"pm\":\"default\",\"mux\":\"herdr\",\"pane\":\"w1:p3\",\"tms\":1793232000123,\"req\":{\"id\":\"call-6f76-0\",\"win\":\"shell\",\"tool\":\"run_terminal_command\",\"wait\":\"none\",\"ask\":{\"cmd\":\"./tool.sh s2\",\"desc\":\"Run s2 tool script\"}},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   "",
+   ""
+  ]
+ },
+ "agy_herdr": {
+  "plain": [
+   "relay2 permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"antigravity\",\"host\":\"box-b\",\"cwd\":\"api\",\"msg\":\"approve run_command: make test\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"f3e001f9-7d64-4f02-b6fa-5cd414bbfb15\",\"mux\":\"herdr\",\"pane\":\"w1:p3\",\"req\":{\"id\":\"st-0123456789abcdef\",\"win\":\"shell\",\"tool\":\"run_command\",\"wait\":\"hidden\",\"ask\":{\"cmd\":\"make test\"},\"can\":[\"allow\",\"deny\",\"deny_reason\"]},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   "{\"decision\":\"allow\"}"
+  ]
+ },
+ "budget_stage2_herdr": {
+  "plain": [
+   "relay2 permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"claude-code\",\"host\":\"box-b\",\"cwd\":\"작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업\",\"msg\":\"approve Bash: echo 가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss\",\"sub\":{\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"type\":\"tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt\"},\"mux\":\"herdr\",\"pane\":\"w1:p333333333333333333333333333333333333333333333333333333333333\",\"req\":{\"id\":\"st-0123456789abcdef\",\"win\":\"shell\",\"tool\":\"Bash\",\"wait\":\"shared\",\"can\":[\"allow\",\"deny\",\"deny_reason\"]},\"cut\":{\"cwd\":360,\"msg\":1099,\"sub.type\":80,\"req.ask\":616},\"ts\":1793232000}",
+   "tunnel permission {\"v\":1,\"rid\":\"0123456789abcdef\",\"ev\":\"permission\",\"app\":\"claude-code\",\"host\":\"dev-box\",\"cwd\":\"작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업\",\"msg\":\"approve Bash: echo 가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가\",\"nonce\":\"ffeeddccbbaa99887766554433221100\",\"fmt\":2,\"pv\":\"@PV@\",\"sid\":\"ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss\",\"sub\":{\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"type\":\"tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt\"},\"dir\":\"/home/me/작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업작업\",\"pm\":\"default\",\"mux\":\"herdr\",\"pane\":\"w1:p333333333333333333333333333333333333333333333333333333333333\",\"tms\":1793232000123,\"req\":{\"id\":\"st-0123456789abcdef\",\"win\":\"shell\",\"tool\":\"Bash\",\"wait\":\"shared\",\"ask\":{\"cmd\":\"echo 가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다가나다\",\"desc\":\"설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설명설\"},\"can\":[\"allow\",\"deny\",\"deny_reason\"]},\"cut\":{\"cwd\":360,\"msg\":1099,\"sub.type\":80,\"req.ask.desc\":1200},\"ts\":1793232000}"
+  ],
+  "stdout": [
+   ""
+  ]
  }
 }

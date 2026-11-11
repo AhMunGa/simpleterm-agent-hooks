@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+Agents inside herdr, and the pane an agent runs in (SimpleTerm `if/event-v2#common-fields`,
+`if/hook-events#identification`, issue AhMunGa/simple-term#612): the app's agent session list can
+tie an alert or a request to a herdr or tmux session row whose session id it does not know yet
+(before an agent's first prompt, or Copilot CLI after `/clear`).
+
+- **`mux` `herdr`**: a hook whose environment has `HERDR_ENV=1` and `HERDR_PANE_ID` sends
+  `"mux":"herdr"`. `TMUX` and `STY` are still read first: herdr (0.9.5, measured) removes `TMUX`,
+  `TMUX_PANE` and `STY` from its panes, so when both are there a tmux or screen was started inside a
+  herdr pane and is the nearer multiplexer. OpenCode 2.x stays `unknown`.
+- **`pane`** (new, optional, right after `mux`): the multiplexer's own id of the agent's pane,
+  `HERDR_PANE_ID` (such as `w1:p3`) inside herdr and `TMUX_PANE` (such as `%13`) inside tmux; none
+  inside screen. Sent only when it fits `[A-Za-z0-9%._:-]{1,64}`, and never for Codex (its default
+  daemon runs every hook with the environment of the TUI that started it, so the id would name
+  another pane) or OpenCode 2.x (`mux` `unknown`). The tunnel and the relay get the same value (an
+  opaque id, not a secret), and no relay cut drops it, as with `mux` (`if/event-v2-limits#shrinking`).
+  Every v2 event carries it (requests, results, states, turn ends, usage). The session record
+  (`if/session-record`) does not (a resumed session runs in another pane); its `mux` can now be
+  `herdr`.
+- The same in `agent-hook.ps1` (Claude Code, Codex, Grok Build) and in every plugin's copy of
+  `agent-hook.sh`. The OpenCode plugins hand the hook their own environment as before.
+- **Which app reads it**: the SimpleTerm app reads `pane` and `herdr` from #612 (the agent session
+  list). An older app ignores `pane` and reads `herdr` as a multiplexer name it does not know, which
+  already means "inside a multiplexer" (no key is sent, no OSC 7501 wait is matched), as inside tmux.
+  With an older plugin a newer app ties rows by session id only.
+- Outside herdr, tmux and screen the events and records are byte for byte those of 0.5.1 (the shared
+  fixtures); inside tmux the events gain `pane`.
+
 ## 0.5.1 - 2026-11-04
 
 A request held back for a wait is told again while it is still open (SimpleTerm
