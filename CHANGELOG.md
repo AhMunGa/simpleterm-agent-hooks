@@ -97,6 +97,16 @@ The end of a turn a schedule started (SimpleTerm `spec/turn-state#scheduled`,
   it, written before `agentStop` (`hist/turn-state#d11`). A one-shot `/after` run (measured on
   1.0.109) leaves no schedule at its `agentStop` (`hist/hook-events#e12`). `agent-hook.sh` only:
   Copilot runs no `agent-hook.ps1`.
+- **The report of work a scheduled turn started is the schedule's** (`spec/turn-state#background`,
+  `if/hook-events-turn#background`, `hist/turn-state#d14`): a `/loop` turn that ran a background
+  agent sent a `done` with each report (the rule above; before #469 it sent nothing), and a Copilot
+  scheduled run's background shell did the same before. A scheduled turn's `Stop` now keeps the ids
+  of the work it started (the newest 32, until no schedule is left or the session ends), and a
+  report turn on one of them ends like a scheduled turn, a report on a report too: Claude Code's
+  `<task-notification>` by its `<task-id>`, Grok Build's `task-completed-` and
+  `subagent-completed-` by the id after it, Copilot's `<system_notification>` by the shell of the
+  last `shell_completed` in `events.jsonl`. The report of work your own turn started still ends in
+  `done` (`hist/hook-events#e15`). Codex has no schedules; OpenCode 2.x and Antigravity follow.
 - **A failed turn shows an error**: Claude Code's `StopFailure` writes `simpleterm:state=idle` and
   then the new state value `simpleterm:state=error` in the same output, instead of `done` (a failed
   turn showed a green done badge where Claude does not speak OSC 7501). The app shows the error badge

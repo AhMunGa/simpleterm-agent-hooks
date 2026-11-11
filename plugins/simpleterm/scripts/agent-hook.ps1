@@ -5079,6 +5079,7 @@ function Get-PromptSum([string]$text) {
 # turn names (scheduler_delete("<id>")), for its Stop.
 function Set-PromptOrigin {
     $by = 'user'
+    $rid = ''
     $Script:PromptSched = ''
     if ($Script:Agent -ceq 'grok') {
         $p = $Script:PromptId
@@ -5107,6 +5108,8 @@ function Set-PromptOrigin {
                 }
             }
         }
+        if ($p.StartsWith('task-completed-', $Ord)) { $rid = $p.Substring(15) }
+        elseif ($p.StartsWith('subagent-completed-', $Ord)) { $rid = $p.Substring(19) }
     } else {
         $src = $Script:Src
         $pr = $Script:Prompt
@@ -5123,9 +5126,46 @@ function Set-PromptOrigin {
                 if ($null -ne $t -and (Split-Words $t) -ccontains (Get-PromptSum $pr)) { $by = 'schedule' }
             }
         } else { $by = 'agent' }
+        # The task a <task-notification> reports on (its <task-id>, the id of
+        # the background_tasks item), whatever the source says.
+        $a = $pr.IndexOf('<task-id>', $Ord)
+        if ($pr.StartsWith('<task-notification>', $Ord) -and $a -ge 0) {
+            $r = $pr.Substring($a + 9)
+            $b = $r.IndexOf('</task-id>', $Ord)
+            if ($b -gt 0) { $rid = $r.Substring(0, $b) }
+        }
+    }
+    # A report on work a scheduled turn started is the schedule's turn too
+    # (SimpleTerm spec/turn-state#background, hist/turn-state#d14).
+    if ($rid -and $rid.Length -le 128 -and $rid -cmatch '\A[A-Za-z0-9._:-]+\z' -and ($by -ceq 'task' -or $by -ceq 'agent')) {
+        $t = Read-FileB (Join-Path $RunDir ($Script:Sid + '.schedtasks'))
+        if ($null -ne $t -and (Split-Words $t) -ccontains $rid) { $by = 'schedule' }
     }
     $Script:PromptBy = $by
     $Script:PromptUser = ($by -ceq 'user')
+}
+
+# $Sid.schedtasks: the ids of the background work a scheduled turn started, so
+# that the turn its report starts is the schedule's too (SimpleTerm
+# spec/turn-state#background, hist/turn-state#d14), a chain included. Set at
+# each Stop, after the turn is judged: a scheduled turn adds the ids that were
+# not running when it began, and the newest 32 are kept; a Stop with no
+# schedule left, and the session's end, remove the file. The same as
+# sched_tasks in agent-hook.sh.
+function Update-SchedTasks {
+    $f = Join-Path $RunDir ($Script:Sid + '.schedtasks')
+    if ($Script:CronN -eq 0) { Remove-FileQ $f; return }
+    $keep = New-Object 'System.Collections.Generic.List[string]'
+    $t = Read-FileB $f
+    if ($null -ne $t) { foreach ($i in (Split-Words $t)) { if ($i -cmatch '\A[A-Za-z0-9._:-]+\z') { $keep.Add($i) } } }
+    if ($Script:TurnBy -ceq 'schedule') {
+        $prev = Split-Words $Script:PrevIds
+        foreach ($i in (Split-Words $Script:BgIds)) {
+            if ($i -cmatch '\A[A-Za-z0-9._:-]+\z' -and $prev -cnotcontains $i -and -not $keep.Contains($i)) { $keep.Add($i) }
+        }
+    }
+    while ($keep.Count -gt 32) { $keep.RemoveAt(0) }
+    if ($keep.Count -gt 0) { [void](Write-FileB $f (($keep -join ' ') + "`n")) } else { Remove-FileQ $f }
 }
 
 # $Sid.turn: line 1 who started this turn, line 2 the ids of the background
@@ -5431,6 +5471,7 @@ function Invoke-StopFlow {
     $cronFile = Join-Path $RunDir ($Script:Sid + '.crons')
     if ($Script:CronN -gt 0) { [void](Write-FileB $cronFile ($Script:CronSums + "`n")) }
     else { Remove-FileQ $cronFile }
+    Update-SchedTasks
     $Script:Tasks = 'false'
     if (Test-AskText $Script:Last) { $Script:Tasks = 'true' }
     if ($Script:BgN -eq 0 -and $Script:CronN -eq 0) { Invoke-StopDone ''; return }
@@ -5705,6 +5746,7 @@ function Invoke-Event {
     }
     if ($ev -ceq 'claude:SessionEnd' -or $ev -ceq 'grok:SessionEnd' -or $ev -ceq 'codex:SessionEnd') {
         $since = [DateTime]::UtcNow
+        Remove-FileQ (Join-Path $RunDir ($Script:Sid + '.schedtasks'))
         Remove-FileQ (Join-Path $RunDir ($Script:Sid + '.cronids'))
         # The record first: Codex gives this hook 3 seconds at most and then
         # ends it (0.165.0, measured).

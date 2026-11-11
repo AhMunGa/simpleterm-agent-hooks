@@ -391,9 +391,15 @@ there):
   `done` everywhere. Copilot CLI's `/every` (`/loop`) and `/after` follow the same rules: its
   scheduled prompt starts with `[Scheduled prompt #<id>]` (one you type that starts so is yours:
   its `user.message` in the session's `events.jsonl` has no `schedule-<id>` source), and the
-  schedules left come from that `events.jsonl`. Grok Build 1.0.77 runs each scheduled run as a background subagent: the
-  `subagent-completed-` turn its result opens is the schedule's when its prompt names
-  (`scheduler_delete("<id>")`) a schedule of that `Stop`'s or the previous `Stop`'s `sessionCrons`.
+  schedules left come from that `events.jsonl`. Grok Build 1.0.77 runs each scheduled run as a
+  background subagent: the `subagent-completed-` turn its result opens is the schedule's when its
+  prompt names (`scheduler_delete("<id>")`) a schedule of that `Stop`'s or the previous `Stop`'s
+  `sessionCrons`. The report of work that a scheduled turn started (a background agent or shell) is
+  the schedule's turn too, and so is the report of work that report started: Claude Code's
+  `<task-notification>` by its `<task-id>`, Grok's `task-completed-` or `subagent-completed-` by
+  the id after it, Copilot's `<system_notification>` by the shell it names in `events.jsonl`. The
+  hook keeps the ids of up to 32 such pieces of work until no schedule is left or the session ends.
+  The report of work a turn you typed started still ends with `done`.
 
 **A `done` waits 3 seconds on Claude Code and Grok Build** (`done_delay`). Another Stop hook (yours
 or a plugin's) may block the stop so that the agent works on; the agent then fires `Stop` again

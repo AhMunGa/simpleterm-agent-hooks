@@ -1290,6 +1290,50 @@ def t_schedules(s):
     grok_run(4, mcron, sched=None)
     s.check("schedule: Grok Build task report with a schedule set -> done", wait_for(lambda: ingests(s, "done"), 20))
 
+    # The report of work that a scheduled turn started is the schedule's too (SimpleTerm spec/turn-state#background,
+    # hist/turn-state#d14); the report of work a person's turn started still ends in done. Prompt shapes measured
+    # (hist/hook-events#e15).
+    def cc(sid, name, **kw):
+        return s.run("claude", cc_event(sid, name, **kw), st)[1]
+
+    agent = {"type": "subagent", "status": "running", "description": "run the checks"}
+    s.ctl("/_ctl/reset", {})
+    cc("sw1", "UserPromptSubmit", prompt="run the checks in a background agent", source="schedule_wakeup")
+    cc("sw1", "Stop", stop_hook_active=False, last_assistant_message="Started the checks.",
+       background_tasks=[dict(agent, id="a5c0ffee000000001")], session_crons=cron)
+    cc("sw1", "UserPromptSubmit", prompt="<task-notification>\n<task-id>a5c0ffee000000001</task-id>\n<status>completed</status>")
+    out = cc("sw1", "Stop", stop_hook_active=False, last_assistant_message="All checks passed.", background_tasks=[],
+             session_crons=cron)
+    time.sleep(4.5)  # past done_delay (3 s on Claude Code)
+    s.check("schedule: the report of a loop turn's background agent rests with the loop (no done)",
+            not ingests(s) and seqs(out).startswith("\x1b]9;simpleterm:state=background scheduled:"), repr(out) + str(ingests(s))[:200])
+    s.ctl("/_ctl/reset", {})
+    cc("sw2", "UserPromptSubmit", prompt="run the checks in a background agent", source="user")
+    cc("sw2", "Stop", stop_hook_active=False, last_assistant_message="Started the checks.",
+       background_tasks=[dict(agent, id="a5c0ffee000000002")], session_crons=cron)
+    cc("sw2", "UserPromptSubmit", prompt="<task-notification>\n<task-id>a5c0ffee000000002</task-id>\n<status>completed</status>")
+    cc("sw2", "Stop", stop_hook_active=False, last_assistant_message="All checks passed.", background_tasks=[], session_crons=cron)
+    s.check("schedule: the report of a person's background agent with the loop set -> done", wait_for(lambda: ingests(s, "done"), 20))
+    # Grok Build: a scheduled run's turn starts a background command; its task-completed- report rests too.
+    s.ctl("/_ctl/reset", {})
+    grok_run(5, mcron)
+    pid = "subagent-completed-01a1c998-e8a0-7f71-a9cd-1cb9175eda06"
+    inp, env = grok_input("UserPromptSubmit", promptId=pid, timestamp="2026-11-11T08:00:00.000Z",
+                          prompt="<system-reminder>\nscheduler_delete(\"%s\")\n</system-reminder>" % sid1)
+    s.run("claude", inp, dict(env, GROK_HOOK_EVENT="user_prompt_submit"))
+    inp, env = grok_input("Stop", reason="end_turn", promptId=pid, timestamp="2026-11-11T08:00:01.000Z", lastAssistantMessage="Running it.",
+                          backgroundTasks=[{"id": "gbash01", "type": "bash", "status": "running", "command": "npm test"}], sessionCrons=mcron)
+    s.run("claude", inp, env)
+    inp, env = grok_input("UserPromptSubmit", promptId="task-completed-gbash01", timestamp="2026-11-11T08:00:30.000Z", prompt="npm test finished")
+    s.run("claude", inp, dict(env, GROK_HOOK_EVENT="user_prompt_submit"))
+    inp, env = grok_input("Stop", reason="end_turn", promptId="task-completed-gbash01", timestamp="2026-11-11T08:00:31.000Z",
+                          lastAssistantMessage="Tests pass.", backgroundTasks=[], sessionCrons=mcron)
+    s.run("claude", inp, env)
+    time.sleep(4.5)
+    s.check("schedule: Grok Build report of a scheduled run's command -> nothing", not ingests(s),
+            str([(r.get("body") or {}).get("ev") for r in ingests(s)])[:200])
+
+
 def t_schedule_end(s):
     """The end of a turn a schedule started (SimpleTerm spec/turn-state#scheduled, AhMunGa/simple-term#469): with no
     schedule left it is a done to the tunnels only, at once, and Claude's screen says done_scheduled; one that ended
@@ -2656,6 +2700,35 @@ def t_copilot_schedules(s):
         r = wait_for(lambda: ingests(s, "done"), 20)
         s.check("copilot schedule: a typed prompt that starts like a scheduled one ends as yours (done, by user)",
                 len(r) == 1 and (r[0]["plain_json"].get("turn") or {}).get("by") == "user", str(ingests(s))[:300])
+
+        # The report of a shell a scheduled run started rests with the schedule (SimpleTerm spec/turn-state#background,
+        # hist/turn-state#d14); a typed prompt's shell still ends in done. Shapes measured (hist/hook-events#e15).
+        def shell_report(prompt, src, shell):
+            s.run("copilot", json.dumps(dict(base, prompt=prompt)), env, args=("userPromptSubmitted",))
+            ev("user.message", dict({"content": prompt}, **({"source": src} if src else {})))
+            ev("tool.execution_start", {"toolName": "bash", "mode": "async", "shellId": shell, "command": "npm test",
+                                        "description": "run the checks"})
+            ev("assistant.message", {"content": "Started the checks."})
+            s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
+                  env, args=("agentStop",))
+            note = "<system_notification>\nShell command \"run the checks\" (shellId: %s) has completed successfully.\n</system_notification>" % shell
+            ev("system.notification", {"content": note, "kind": {"type": "shell_completed", "shellId": shell, "exitCode": 0,
+                                                                "description": "run the checks"}})
+            s.run("copilot", json.dumps(dict(base, prompt=note)), env, args=("userPromptSubmitted",))
+            ev("user.message", {"content": note})
+            ev("assistant.message", {"content": "All checks passed."})
+            s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
+                  env, args=("agentStop",))
+
+        reset()
+        shell_report("[Scheduled prompt #3]\ncheck status", "schedule-3", "sbg1")
+        time.sleep(4.5)
+        s.check("copilot schedule: the report of a scheduled run's shell -> no done",
+                not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300] + str(ingests(s))[:200])
+        reset()
+        shell_report("run the checks", None, "ubg1")
+        s.check("copilot schedule: the report of a typed prompt's shell with the schedule set -> done",
+                wait_for(lambda: ingests(s, "done"), 20), str(ingests(s))[:300])
     finally:
         tun.terminate()
         tun.wait(5)

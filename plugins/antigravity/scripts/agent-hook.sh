@@ -4123,7 +4123,7 @@ PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS='' REQIDIN=''
 OCTITLE='' OCCOST='' OCTIN='' OCTOUT='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX=''
 BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_SEQ=''
 BG_SVC=0 BG_IDMAP='' BG_KEEP='' BG_SHELLS='' BG_IDS='' BG_NOID=0 BG_M=''
-CRON_N=0 CRON_SCHED='' CRON_SUMS='' CRON_IDS='' PROMPT_SCHED='' COPILOT_SRC=''
+CRON_N=0 CRON_SCHED='' CRON_SUMS='' CRON_IDS='' PROMPT_SCHED='' COPILOT_SRC='' COPILOT_REP='' REPORT_ID=''
 
 # --- what the hook reads from the text of a turn ------------------------------
 
@@ -5034,10 +5034,11 @@ turn_end() {
 # subagent-completed- turn names (scheduler_delete("<id>")), for its Stop.
 PROMPT_USER=1 PROMPT_BY=user
 prompt_origin() {
-  PROMPT_USER=1 PROMPT_BY=user PROMPT_SCHED=''
+  PROMPT_USER=1 PROMPT_BY=user PROMPT_SCHED='' REPORT_ID=''
   if [ "$AGENT" = grok ]; then
     case $PROMPTID in
-      task-completed-* | bash-completed-* | monitor-completed-* | subagent-completed-* | workflow-completed-*) PROMPT_BY=task ;;
+      task-completed-* | subagent-completed-*) PROMPT_BY=task REPORT_ID=${PROMPTID#*-completed-} ;;
+      bash-completed-* | monitor-completed-* | workflow-completed-*) PROMPT_BY=task ;;
       scheduler-fired-*) PROMPT_BY=schedule ;;
       parent-agent-message-* | parent-message-* | notifications-* | goal-summary-* | goal-classifier-nudge-* | plan-resume-*) PROMPT_BY=agent ;;
     esac
@@ -5085,8 +5086,60 @@ prompt_origin() {
         ;;
       *) PROMPT_BY=agent ;;
     esac
+    # The task a <task-notification> reports on (its <task-id>, the id of
+    # the background_tasks item), whatever the source says.
+    po_ta='<task-id>' po_tb='</task-id>'
+    case $PROMPT in
+      '<task-notification>'*"$po_ta"*)
+        REPORT_ID=${PROMPT#*"$po_ta"}
+        REPORT_ID=${REPORT_ID%%"$po_tb"*}
+        ;;
+    esac
   fi
+  # A report on work a scheduled turn started is the schedule's turn too
+  # (SimpleTerm spec/turn-state#background): $SID.schedtasks (sched_tasks).
+  case $REPORT_ID in '' | *[!A-Za-z0-9._:-]*) REPORT_ID='' ;; esac
+  [ "${#REPORT_ID}" -le 128 ] || REPORT_ID=''
+  case $PROMPT_BY in task | agent)
+    if [ -n "$REPORT_ID" ] && [ -f "$RUN_DIR/$SID.schedtasks" ]; then
+      case " $(cat "$RUN_DIR/$SID.schedtasks" 2>/dev/null) " in *" $REPORT_ID "*) PROMPT_BY=schedule ;; esac
+    fi
+    ;;
+  esac
   [ "$PROMPT_BY" = user ] || PROMPT_USER=0
+}
+
+# $SID.schedtasks: the ids of the background work (background_tasks,
+# backgroundTasks, Copilot's shells) that a scheduled turn
+# started, so that the turn its report starts is the schedule's too (SimpleTerm
+# spec/turn-state#background, hist/turn-state#d14), a chain included. Set at
+# each Stop, after the turn is judged: a scheduled turn adds the ids that were
+# not running when it began, and the newest SCHED_MAX are kept; a Stop with no
+# schedule left, and the session's end, remove the file.
+SCHED_MAX=32
+sched_tasks() {
+  st_f=$RUN_DIR/$SID.schedtasks st_keep=''
+  if [ "$CRON_N" -eq 0 ]; then
+    [ -f "$st_f" ] && rm -f "$st_f" 2>/dev/null
+    return 0
+  fi
+  for st_i in $(cat "$st_f" 2>/dev/null); do
+    case $st_i in *[!A-Za-z0-9._:-]*) continue ;; esac
+    st_keep="$st_keep $st_i"
+  done
+  if [ "$TURN_BY" = schedule ]; then
+    for st_i in $BG_IDS; do
+      case $st_i in *[!A-Za-z0-9._:-]*) continue ;; esac
+      case " $PREV_IDS $st_keep " in *" $st_i "*) ;; *) st_keep="$st_keep $st_i" ;; esac
+    done
+  fi
+  st_keep=$(for st_i in $st_keep; do printf '%s\n' "$st_i"; done | tail -n "$SCHED_MAX" | tr '\n' ' ')
+  st_keep=${st_keep% }
+  if [ -n "$st_keep" ]; then
+    printf '%s\n' "$st_keep" >"$st_f" 2>/dev/null
+  elif [ -f "$st_f" ]; then
+    rm -f "$st_f" 2>/dev/null
+  fi
 }
 
 # $SID.turn: line 1 `user` or `auto` (who started this turn), line 2 the ids
@@ -5208,6 +5261,11 @@ stop_flow() {
   if [ "$AGENT" = copilot ] && [ "$TURN_BY" = schedule ] && [ -n "$COPILOT_SRC" ]; then
     case ${COPILOT_SRC#:} in schedule-[0-9]*) ;; *) TURN_BY=user TURN_USER=1 ;; esac
   fi
+  #  - Copilot: a <system_notification> turn reports on the work events.jsonl
+  #    names; that work may be a scheduled turn's ($SID.schedtasks).
+  if [ "$AGENT" = copilot ] && [ "$TURN_BY" = task ] && [ -n "$COPILOT_REP" ] && [ -f "$RUN_DIR/$SID.schedtasks" ]; then
+    case " $(cat "$RUN_DIR/$SID.schedtasks" 2>/dev/null) " in *" $COPILOT_REP "*) TURN_BY=schedule ;; esac
+  fi
   bg_ids_finish
   printf '%s\n' "$BG_IDS" >"$RUN_DIR/$SID.stopids" 2>/dev/null
   if [ "$CRON_N" -gt 0 ]; then
@@ -5215,6 +5273,7 @@ stop_flow() {
   elif [ -f "$RUN_DIR/$SID.crons" ]; then
     rm -f "$RUN_DIR/$SID.crons" 2>/dev/null
   fi
+  sched_tasks
   TASKS=''
   if [ "$AGENT" != opencode ]; then
     TASKS=false
@@ -5335,9 +5394,17 @@ function sid(s,   t) {
 /"type":"user\.message"/ { s = str($0, "source"); if (s ~ /^schedule-[0-9]+$/ && ONE[substr(s, 10)]) delete CR[substr(s, 10)] }
 # The source of the last prompt: schedule-<id> for a scheduled run, none when
 # a person typed it (it is written before agentStop; measured on 1.0.109).
-/"type":"user\.message"/ { us = ":" str($0, "source") }
+# The shell a <system_notification> prompt reports on: that of the last
+# shell_completed.
+/"type":"system\.notification"/ && /"type":"shell_completed"/ { done1 = str($0, "shellId") }
+/"type":"system\.notification"/ && !/"type":"shell_completed"/ { done1 = "" }
+/"type":"user\.message"/ {
+  us = ":" str($0, "source")
+  rep = (index(str($0, "content"), "<system_notification>") == 1) ? done1 : ""
+}
 END {
   if (us != "") print "S\t" us
+  if (rep != "") print "R\t" rep
   m = 0
   for (k = 1; k <= NC; k++) if (CO[k] in CR) {
     i = CO[k]
@@ -5377,6 +5444,7 @@ copilot_tx() {
   TLAST=$(printf '%s\n' "$tx" | sed -n "s/^L$TAB//p")
   [ -n "$TLAST" ] && LAST=$TLAST
   COPILOT_SRC=$(printf '%s\n' "$tx" | sed -n "s/^S$TAB//p")
+  COPILOT_REP=$(printf '%s\n' "$tx" | sed -n "s/^R$TAB//p")
   v2_facts
   ft=$(printf '%s\n' "$tx" | sed -n "s/^F$TAB//p")
   [ -n "$ft" ] && FACTS="$FACTS$NL$ft"
@@ -5540,7 +5608,7 @@ case $AGENT:$EVENT in
       v2_prep "$TURN_AT"
       send_bg error
     fi
-    rm -f "$RUN_DIR/$SID.cerr" "$RUN_DIR/$SID.cronids" 2>/dev/null
+    rm -f "$RUN_DIR/$SID.cerr" "$RUN_DIR/$SID.schedtasks" "$RUN_DIR/$SID.cronids" 2>/dev/null
     printf '' 2>/dev/null >"$RUN_DIR/t0.$$"
     # The record first: Codex gives this hook 3 seconds at most and then
     # ends its process group (0.165.0, measured).
