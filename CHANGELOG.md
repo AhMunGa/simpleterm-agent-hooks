@@ -106,9 +106,11 @@ The end of a turn a schedule started (SimpleTerm `spec/turn-state#scheduled`,
   of the work it started (the newest 32, until no schedule is left or the session ends), and a
   report turn on one of them ends like a scheduled turn, a report on a report too: Claude Code's
   `<task-notification>` by its `<task-id>`, Grok Build's `task-completed-` and
-  `subagent-completed-` by the id after it, Copilot's `<system_notification>` by the work the last
-  notification in `events.jsonl` names: a shell (`shell_completed`, its `shellId`), a detached
-  shell (`shell_detached_completed`; the scheduled turn keeps the ids of the detached shells it
+  `subagent-completed-` by the id after it, Copilot's `<system_notification>` by the work the
+  notification that opened the turn names (in `events.jsonl` it follows the main agent's
+  `userPromptSubmitted` hook; a notification of work that ended inside a running turn comes with no
+  such hook and opens none, measured on 1.0.109): a shell (`shell_completed`, its `shellId`), a
+  detached shell (`shell_detached_completed`; the scheduled turn keeps the ids of the detached shells it
   started, which are no work to wait for), or a background subagent (`agent_idle`, its `agentId`,
   tied to the `toolCallId` of its `subagent.started`); no `user.message` is written for that turn
   (measured on 1.0.105 and 1.0.109). A report that comes while a turn runs does not start a turn:

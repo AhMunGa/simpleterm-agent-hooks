@@ -5422,20 +5422,28 @@ function sid(s,   t) {
 # a person typed it (it is written before agentStop; measured on 1.0.109). A
 # subagent writes its own prompt to the same file (source agent-<session id>),
 # at times before the main agentStop (1.0.105): only the main prompts count.
-/"type":"user\.message"/ && !/"source":"agent-/ { us = ":" str($0, "source"); rep = ""; ND = 0 }
+/"type":"user\.message"/ && !/"source":"agent-/ { us = ":" str($0, "source"); rep = ""; ND = 0; ups = 0 }
 # The work a <system_notification> turn reports on (SimpleTerm
 # if/hook-events-turn#background). No user.message is written for that turn
-# (measured on 1.0.105 and 1.0.109), so it is the last notification after the
-# last prompt: shell_completed and shell_detached_completed name the shell
-# (shellId), agent_idle the subagent by its agentId, which subagent.started
-# ties to its toolCallId. The notification also starts that turn.
+# (measured on 1.0.105 and 1.0.109): the notification that follows the turn
+# start hook (the main agent hook.end of userPromptSubmitted; a subagent one
+# carries its agentId) opens it. shell_completed and shell_detached_completed
+# name the shell (shellId), agent_idle the subagent by its agentId, which
+# subagent.started ties to its toolCallId. A notification without that hook
+# is handed to the running turn (work that ended inside it, measured on
+# 1.0.109): it opens no turn and changes neither.
+/"type":"hook\.end"/ && /"hookType":"userPromptSubmitted"/ && !/"agentId":/ { ups = 1 }
 /"type":"subagent\.started"/ { a = str($0, "agentId"); if (a != "") AG[a] = str($0, "toolCallId") }
 /"type":"system\.notification"/ {
-  rep = ""; ND = 0
-  if ($0 ~ /"type":"shell_(detached_)?completed"/) rep = str($0, "shellId")
-  else if ($0 ~ /"type":"agent_idle"/) { a = str($0, "agentId"); if (a in AG) rep = AG[a] }
+  if (ups) {
+    rep = ""; ND = 0
+    if ($0 ~ /"type":"shell_(detached_)?completed"/) rep = str($0, "shellId")
+    else if ($0 ~ /"type":"agent_idle"/) { a = str($0, "agentId"); if (a in AG) rep = AG[a] }
+  }
+  ups = 0
 }
-# Detached shells this turn started (after its prompt or notification): no
+# Detached shells this turn started (after the prompt or notification that
+# opened it): no
 # work to wait for, but their end wakes the agent too (measured on 1.0.109),
 # so a scheduled turn keeps their ids like those of its other work.
 /"type":"tool\.execution_start"/ && /"toolName":"bash"/ && /"mode":"async"/ && /"detach":true/ {

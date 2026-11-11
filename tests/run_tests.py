@@ -2754,7 +2754,12 @@ def t_copilot_schedules(s):
         # The report of a shell or subagent a scheduled run started rests with the schedule (SimpleTerm
         # spec/turn-state#background, hist/turn-state#d14); a typed prompt's work still ends in done. Shapes measured on
         # 1.0.105 and 1.0.109 (hist/hook-events#e15): the report turn's prompt is the notification's content, and no
-        # user.message is written for that turn; events.jsonl has the system.notification only.
+        # user.message is written for that turn; events.jsonl has the turn start hook's hook.end, then the
+        # system.notification.
+        def opens():
+            ev("hook.end", {"hookInvocationId": "6c1f74d3-8d68-4dd0-924f-901e1815a31f", "hookType": "userPromptSubmitted",
+                              "success": True})
+
         def shell_report(prompt, src, shell):
             s.run("copilot", json.dumps(dict(base, prompt=prompt)), env, args=("userPromptSubmitted",))
             ev("user.message", dict({"content": prompt}, **({"source": src} if src else {})))
@@ -2764,6 +2769,7 @@ def t_copilot_schedules(s):
             s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
                   env, args=("agentStop",))
             note = "<system_notification>\nShell command \"run the checks\" (shellId: %s) has completed successfully.\n</system_notification>" % shell
+            opens()
             ev("system.notification", {"content": note, "kind": {"type": "shell_completed", "shellId": shell, "exitCode": 0,
                                                                 "description": "run the checks"}})
             s.run("copilot", json.dumps(dict(base, prompt=note)), env, args=("userPromptSubmitted",))
@@ -2781,6 +2787,7 @@ def t_copilot_schedules(s):
             s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
                   env, args=("agentStop",))
             note = "<system_notification>\nDetached shell \"det sleep\" (shellId: %s) has completed.\n</system_notification>" % shell
+            opens()
             ev("system.notification", {"content": note, "kind": {"type": "shell_detached_completed", "shellId": shell}})
             s.run("copilot", json.dumps(dict(base, prompt=note)), env, args=("userPromptSubmitted",))
             ev("assistant.message", {"content": "It finished."})
@@ -2799,6 +2806,7 @@ def t_copilot_schedules(s):
                   env, args=("agentStop",))
             ev("subagent.completed", {"toolCallId": call, "agentName": "explore", "agentDisplayName": "sub1"}, agent)
             note = "<system_notification>\nAgent \"sub1\" (explore) has finished processing and is now idle.\n</system_notification>"
+            opens()
             ev("system.notification", {"content": note, "kind": {"type": "agent_idle", "agentId": agent, "agentType": "explore",
                                                                 "displayName": "sub1", "description": "review"}})
             s.run("copilot", json.dumps(dict(base, prompt=note)), env, args=("userPromptSubmitted",))
@@ -2835,6 +2843,33 @@ def t_copilot_schedules(s):
         r = wait_for(lambda: [x for x in ingests(s, "done") if (x["plain_json"].get("turn") or {}).get("by") == "task"], 20)
         s.check("copilot schedule: the report of a typed prompt's detached shell with the schedule set -> done", r,
                 str([(x["plain_json"].get("turn") or {}).get("by") for x in ingests(s, "done")]))
+        # Work that ends inside the scheduled run: its notification comes with no turn start hook (measured on 1.0.109)
+        # and opens no turn, so the detached shell that run started is still the schedule's.
+        reset()
+        p = "[Scheduled prompt #3]\ncheck status"
+        s.run("copilot", json.dumps(dict(base, prompt=p)), env, args=("userPromptSubmitted",))
+        opens()
+        ev("user.message", {"content": p, "source": "schedule-3"})
+        ev("tool.execution_start", {"toolCallId": "call_9_3", "toolName": "bash", "arguments": {
+            "command": "sleep 9; echo DET", "mode": "async", "detach": True, "shellId": "det9", "description": "det long"}})
+        ev("tool.execution_start", {"toolCallId": "call_9_4", "toolName": "bash", "arguments": {
+            "command": "sleep 2; echo BG", "mode": "async", "shellId": "sbg9", "description": "bg quick"}})
+        ev("system.notification", {"content": "<system_notification>\nShell command \"bg quick\" (shellId: sbg9) has completed "
+                                              "successfully.\n</system_notification>",
+                                   "kind": {"type": "shell_completed", "shellId": "sbg9", "exitCode": 0, "description": "bg quick"}})
+        ev("assistant.message", {"content": "Checked."})
+        s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
+              env, args=("agentStop",))
+        note = "<system_notification>\nDetached shell \"det long\" (shellId: det9) has completed.\n</system_notification>"
+        opens()
+        ev("system.notification", {"content": note, "kind": {"type": "shell_detached_completed", "shellId": "det9"}})
+        s.run("copilot", json.dumps(dict(base, prompt=note)), env, args=("userPromptSubmitted",))
+        ev("assistant.message", {"content": "It finished."})
+        s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
+              env, args=("agentStop",))
+        time.sleep(4.5)
+        s.check("copilot schedule: a notification inside the scheduled run opens no turn; its detached shell's report -> no done",
+                not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300] + str(ingests(s))[:200])
     finally:
         tun.terminate()
         tun.wait(5)
