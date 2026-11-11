@@ -1513,7 +1513,7 @@ END {
   }
 }'
 
-# AV and AVS: the agent's version and where it came from (SimpleTerm if/hook-events#identification).
+# AV and AVS: the agent's version and where it came from (SimpleTerm if/hook-events-identification#identification).
 v2_version() {
   AV='' AVS=''
   case $AGENT in
@@ -1562,7 +1562,7 @@ codex_pm() {
 }
 
 # The multiplexer the agent runs in and the id of its pane there (SimpleTerm
-# if/event-v2#common-fields, if/hook-events#identification): MUXV (tmux,
+# if/event-v2#common-fields, if/hook-events-identification#identification): MUXV (tmux,
 # screen, herdr, unknown or empty) and PANEV (empty when none may be sent).
 # tmux and screen come first: herdr (0.9.5, measured) drops TMUX, TMUX_PANE
 # and STY from its panes, so with both a tmux or screen was started inside a
@@ -1858,12 +1858,17 @@ sess_keep() {
 
 # USAGE_SEQ is the JSON-escaped usage OSC to append, if any (usage_report);
 # BG_SEQ the hook's OSC 7501 record for background work (bg_pause, note).
-print_state() { # running|waiting|done|background [message]
+# [first] is a value written just before the state, in the same output: an app
+# that does not know the state drops it and is left with that one
+# (SimpleTerm if/terminal-signals#structured).
+print_state() { # running|waiting|done|done_scheduled|background|idle|error [message [first]]
   [ "$AGENT" = claude ] || return 0
   [ "${SIMPLETERM:-}" = 1 ] || return 0
   m=''
   [ -n "${2:-}" ] && m=' '$(json_trim "$2" 80 320)
-  printf '{"terminalSequence":"\\u001b]9;simpleterm:state=%s%s\\u0007%s%s"}\n' "$1" "$m" "$BG_SEQ" "$USAGE_SEQ"
+  p=''
+  [ -n "${3:-}" ] && p='\u001b]9;simpleterm:state='$3'\u0007'
+  printf '{"terminalSequence":"%s\\u001b]9;simpleterm:state=%s%s\\u0007%s%s"}\n' "$p" "$1" "$m" "$BG_SEQ" "$USAGE_SEQ"
 }
 
 print_usage() {
@@ -2488,13 +2493,19 @@ rq_reject() { # i bad|changed
 # Whether the agent's own window for this request is still open, as far as
 # the hook can tell for sure (SimpleTerm if/ssh-tunnel-wait#open-window, the open-window check): 0 open, 1 not (closed, another one, or nothing to tell
 # by), 2 not known yet (the agent may record its window a moment after the
-# hook starts). Claude Code only: its session file (sessions/<agent pid>.json
-# under CLAUDE_CONFIG_DIR or ~/.claude, the first 8 KiB) says this session
-# (sessionId) waits on a permission prompt, the one first seen there
-# (statusUpdatedAt unchanged, RQ_WAT — the first one seen, written no later
-# than 2 s after the hook's start), and no other permission hook of this
-# session waits on that same window (rq_alone; without a mark of its own the
-# hook cannot be counted by the others: not confirmed).
+# hook starts), 3 this session waits with a waitingFor that is no value of
+# this tool (RQ_UNK holds it for the log; the caller stops). Claude Code only:
+# its session file (sessions/<agent pid>.json under CLAUDE_CONFIG_DIR or
+# ~/.claude, the first 8 KiB) says this session (sessionId) waits on the
+# window of the request's kind, the one first seen there (statusUpdatedAt
+# unchanged, RQ_WAT — the first one seen, written no later than 2 s after the
+# hook's start), and no other permission hook of this session waits on that
+# same window (rq_alone; without a mark of its own the hook cannot be counted
+# by the others: not confirmed). The value of the window kind is
+# `permission prompt` for every permission request, and for a question
+# (AskUserQuestion) also `input needed`: Claude Code 2.1.322 writes that for a
+# question, 2.1.316 and 2.1.317 wrote `permission prompt` [measured]. Only a
+# measured pair of tool and value counts; the version is not read.
 rq_window() {
   [ "$AGENT" = claude ] && [ -n "$AGENT_PID" ] && [ -n "$RQ_MARK" ] || return 1
   wv=$(head -c 8192 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/$AGENT_PID.json" 2>/dev/null |
@@ -2513,19 +2524,37 @@ EOF
   case $wat in '' | *[!0-9]*) wat='' ;; esac
   # Not read (no file yet, or caught while it was written): not known.
   [ -n "$wst" ] && [ -n "$wat" ] || return 2
-  wopen=0
-  [ -n "$RAWSID" ] && [ "$wsid" = "$RAWSID" ] && [ "$wst" = waiting ] && [ "$wfor" = 'permission prompt' ] || wopen=1
+  # wopen: 0 this session waits on a window of this tool, 1 it does not wait
+  # (or it is another session), 3 it waits with a value of no window of this tool.
+  wopen=1
+  if [ -n "$RAWSID" ] && [ "$wsid" = "$RAWSID" ] && [ "$wst" = waiting ]; then
+    case $wfor in
+      'permission prompt') wopen=0 ;;
+      'input needed') if [ "$TOOL" = AskUserQuestion ]; then wopen=0; else wopen=3; fi ;;
+      *) wopen=3 ;;
+    esac
+  fi
   if [ -z "$RQ_WAT" ]; then
-    [ "$wopen" = 0 ] || return 2
+    [ "$wopen" = 1 ] && return 2
     # The window shown when the hook started (it starts 5 to 45 ms after
-    # Claude records it, 3 ms before at the earliest [measured 2.1.316]): a
-    # later one may come after the user answered this request.
+    # Claude records it, 3 ms before at the earliest [measured 2.1.316]; 52 to
+    # 100 ms on 2.1.322): a later one may come after the user answered this
+    # request.
     [ "$wat" -le $(((start + 2) * 1000)) ] || return 1
+    [ "$wopen" = 3 ] && { rq_unknown "$wfor"; return 3; }
     RQ_WAT=$wat
     [ -n "$RQ_MARK" ] && printf '%s\n' "$wat" 2>/dev/null >"$RQ_MARK"
   fi
-  [ "$wopen" = 0 ] && [ "$wat" = "$RQ_WAT" ] || return 1
+  [ "$wat" = "$RQ_WAT" ] || return 1
+  [ "$wopen" = 3 ] && { rq_unknown "$wfor"; return 3; }
+  [ "$wopen" = 0 ] || return 1
   rq_alone
+}
+
+# The waitingFor value for the log (SimpleTerm if/ssh-tunnel-wait#open-window): only ASCII letters,
+# digits, spaces and . _ -, at most 40 characters.
+rq_unknown() {
+  RQ_UNK=$(printf '%s' "$1" | LC_ALL=C tr -cd 'A-Za-z0-9 ._-' | cut -c1-40)
 }
 
 # Whether no other permission hook of this session waits on the same window
@@ -2567,6 +2596,11 @@ rq_held() {
   fi
   rq_window
   hw=$?
+  if [ "$hw" = 3 ]; then
+    log "held: unknown waitingFor \"$RQ_UNK\" for $TOOL (stop)"
+    rm -f "$@"
+    return 1
+  fi
   if [ "$hw" = 2 ]; then
     # Not known: a few seconds for the agent to record its window, then a
     # few reads that fail in a row; nothing is sent meanwhile.
@@ -2615,6 +2649,11 @@ rq_held() {
   case $? in
     0) ;;
     2) return 0 ;;
+    3)
+      log "held: unknown waitingFor \"$RQ_UNK\" for $TOOL (stop)"
+      rm -f "$@"
+      return 1
+      ;;
     *)
       log "held: the window is not open (stop)"
       rm -f "$@"
@@ -2711,7 +2750,7 @@ request_flow() { # ev mode
   # nothing and leave the decision to the agent.
   rq_sig=gone
   [ "$AGENT" = opencode ] && rq_sig=terminal
-  RQ_AGAIN=$((start + 5)) RQ_WAT='' RQ_MISS=0 RQ_MARK='' RQ_FIRE=''
+  RQ_AGAIN=$((start + 5)) RQ_WAT='' RQ_MISS=0 RQ_MARK='' RQ_FIRE='' RQ_UNK=''
   # This session's waiting permission hooks, for rq_alone.
   if [ "$AGENT" = claude ]; then
     RQ_MARK=$RUN_DIR/perm.$SID.$$
@@ -3476,7 +3515,7 @@ ask_ver_ok() { # version
 
 # The version of agent executable $1, which the ask would run (SimpleTerm if/usage-ask#conditions condition 6, hist/usage-ask#d21, hist/usage-ask#d22): ASK_BV, and ASK_EXE the file that the ask then
 # runs. Its links are followed to the end: .../versions/<version> (a native
-# Claude Code install) gives the version. Otherwise run/ver.<agent> (SimpleTerm hist/event-v2#d13, if/hook-events#version-cache: that file's path, and its --version's first dotted number or
+# Claude Code install) gives the version. Otherwise run/ver.<agent> (SimpleTerm hist/event-v2#d13, if/hook-events-identification#version-cache: that file's path, and its --version's first dotted number or
 # an empty line if it gave none) is used for the same file while the file is
 # not newer: `unknown` if it holds no version. Else it is measured again in
 # the background (15 seconds at most) and ASK_BV stays empty: no ask this
@@ -4044,7 +4083,7 @@ case $AGENT in
     # there only when a subagent's own tool call fires the hook (foreground or
     # background; absent for the main thread).
     WANT='hook_event_name,notification_type,tool_name,tool_input.command,tool_input.file_path,tool_input.url,tool_input.description,tool_input.questions.0.question,session_id,cwd,message,last_assistant_message,error,transcript_path,context_tokens,model,to_model,prompt,source,stop_hook_active,is_interrupt,agent_id'
-    # v2 (SimpleTerm if/hook-events#identification): turn, permission mode, the
+    # v2 (SimpleTerm if/hook-events-identification#identification): turn, permission mode, the
     # subagent's type, a session's end; from the OpenCode bridge its request
     # id, version family, parent session, message id and session title.
     WANT=$WANT',prompt_id,permission_mode,agent_type,reason,request_id,oc,parent_session_id,message_id,title,cost,tokens_in,tokens_out'
@@ -4084,7 +4123,7 @@ PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS='' REQIDIN=''
 OCTITLE='' OCCOST='' OCTIN='' OCTOUT='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX=''
 BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_SEQ=''
 BG_SVC=0 BG_IDMAP='' BG_KEEP='' BG_SHELLS='' BG_IDS='' BG_NOID=0 BG_M=''
-CRON_N=0 CRON_SCHED='' CRON_SUMS=''
+CRON_N=0 CRON_SCHED='' CRON_SUMS='' CRON_IDS='' PROMPT_SCHED='' COPILOT_SRC='' COPILOT_REP='' COPILOT_DET='' REPORT_ID=''
 
 # --- what the hook reads from the text of a turn ------------------------------
 
@@ -4582,8 +4621,8 @@ bg_ids_finish() {
 }
 
 # One field of a scheduled wake-up (Stop `session_crons`, Grok
-# `sessionCrons`): how many, the first one's schedule, and a checksum of each
-# prompt (the prompt of the turn it starts is that text).
+# `sessionCrons`): how many, the first one's schedule, each id, and a checksum
+# of each prompt (the prompt of the turn it starts is that text).
 cron_field() { # path=value
   ck=${1#*.}
   ck=${ck%%.*}
@@ -4592,6 +4631,7 @@ cron_field() { # path=value
   cv=${1#*=}
   [ $((ck + 1)) -gt "$CRON_N" ] && CRON_N=$((ck + 1))
   case $cf in
+    id) [ -n "$cv" ] && CRON_IDS="$CRON_IDS $cv" ;;
     schedule) [ "$ck" = 0 ] && CRON_SCHED=$cv ;;
     prompt) [ -n "$cv" ] && CRON_SUMS="$CRON_SUMS $(prompt_sum "$cv")" ;;
   esac
@@ -4678,6 +4718,7 @@ if [ "$AGENT" = grok ]; then
     notification) EVENT=Notification ;;
     stop) EVENT=Stop ;;
     stop_failure) EVENT=StopFailure ;;
+    stop_cancelled) EVENT=StopCancelled ;;
     user_prompt_submit) EVENT=UserPromptSubmit ;;
   esac
 fi
@@ -4990,18 +5031,42 @@ turn_end() {
 # prompt of a wake-up listed at the last Stop (session_crons) says so. Grok
 # Build has no such field: the prompt id of a turn it starts itself begins
 # with a fixed word (task-completed-, scheduler-fired-, ...; static, from the
-# 1.0.70 binary), a person's is a UUID.
-PROMPT_USER=1 PROMPT_BY=user
+# 1.0.70 binary), a person's is a UUID. PROMPT_SCHED: the schedule a Grok
+# subagent-completed- turn names (scheduler_delete("<id>")), for its Stop.
+PROMPT_USER=1 PROMPT_BY=user PROMPT_REPORT=''
 prompt_origin() {
-  PROMPT_USER=1 PROMPT_BY=user
+  PROMPT_USER=1 PROMPT_BY=user PROMPT_SCHED='' REPORT_ID='' PROMPT_REPORT=''
   if [ "$AGENT" = grok ]; then
     case $PROMPTID in
-      task-completed-* | bash-completed-* | monitor-completed-* | subagent-completed-* | workflow-completed-*) PROMPT_BY=task ;;
+      task-completed-* | subagent-completed-*) PROMPT_BY=task REPORT_ID=${PROMPTID#*-completed-} PROMPT_REPORT=1 ;;
+      bash-completed-* | monitor-completed-* | workflow-completed-*) PROMPT_BY=task ;;
       scheduler-fired-*) PROMPT_BY=schedule ;;
       parent-agent-message-* | parent-message-* | notifications-* | goal-summary-* | goal-classifier-nudge-* | plan-resume-*) PROMPT_BY=agent ;;
     esac
+    # Grok 1.0.77 runs each scheduled run as a background subagent: the turn
+    # its result opens says how to drop the schedule (measured; SimpleTerm
+    # if/hook-events-turn#turn-end). Its Stop decides (sessionCrons).
+    # (The prompt's quotes may still be JSON-escaped: scheduler_delete(\"<id>\").)
+    po_pat='scheduler_delete(' po_q='"' po_bs='\'
+    case $PROMPTID:$PROMPT in
+      subagent-completed-*"$po_pat"*)
+        PROMPT_SCHED=${PROMPT#*"$po_pat"}
+        PROMPT_SCHED=${PROMPT_SCHED#"$po_bs"}
+        case $PROMPT_SCHED in "$po_q"*) PROMPT_SCHED=${PROMPT_SCHED#"$po_q"} ;; *) PROMPT_SCHED='' ;; esac
+        PROMPT_SCHED=${PROMPT_SCHED%%"$po_q"*}
+        PROMPT_SCHED=${PROMPT_SCHED%%"$po_bs"*}
+        case $PROMPT_SCHED in '' | *[!A-Za-z0-9._-]*) PROMPT_SCHED='' ;; esac
+        [ "${#PROMPT_SCHED}" -le 128 ] || PROMPT_SCHED=''
+        ;;
+    esac
   elif [ "$AGENT" = copilot ]; then
-    case $PROMPT in '<system_notification>'*) PROMPT_BY=task ;; esac
+    # A scheduled prompt (/every, /loop, /after) starts with the line
+    # `[Scheduled prompt #<id>]`; the hook input has no source (measured on
+    # 1.0.109, SimpleTerm if/hook-events-turn#turn-end).
+    case $PROMPT in
+      '<system_notification>'*) PROMPT_BY=task ;;
+      '[Scheduled prompt #'*) PROMPT_BY=schedule ;;
+    esac
   else
     case $SRC in
       user | sdk) ;;
@@ -5022,19 +5087,95 @@ prompt_origin() {
         ;;
       *) PROMPT_BY=agent ;;
     esac
+    # The task a <task-notification> reports on (its <task-id>, the id of
+    # the background_tasks item), whatever the source says.
+    po_ta='<task-id>' po_tb='</task-id>'
+    case $PROMPT in
+      '<task-notification>'*"$po_ta"*)
+        REPORT_ID=${PROMPT#*"$po_ta"}
+        REPORT_ID=${REPORT_ID%%"$po_tb"*}
+        ;;
+    esac
+    case $PROMPT in '<task-notification>'*) PROMPT_REPORT=1 ;; esac
   fi
+  # A report on work a scheduled turn started is the schedule's turn too
+  # (SimpleTerm spec/turn-state#background): $SID.schedtasks (sched_tasks).
+  case $REPORT_ID in '' | *[!A-Za-z0-9._:-]*) REPORT_ID='' ;; esac
+  [ "${#REPORT_ID}" -le 128 ] || REPORT_ID=''
+  case $PROMPT_BY in task | agent)
+    if [ -n "$REPORT_ID" ] && [ -f "$RUN_DIR/$SID.schedtasks" ]; then
+      case " $(cat "$RUN_DIR/$SID.schedtasks" 2>/dev/null) " in *" $REPORT_ID "*) PROMPT_BY=schedule ;; esac
+    fi
+    ;;
+  esac
   [ "$PROMPT_BY" = user ] || PROMPT_USER=0
+}
+
+# $SID.schedtasks: the ids of the background work (background_tasks,
+# backgroundTasks, Copilot's shells and subagents, and Copilot's detached
+# shells, COPILOT_DET) that a scheduled turn started, so that the turn its
+# report starts is the schedule's too (SimpleTerm spec/turn-state#background,
+# hist/turn-state#d14), a chain included. Set at each Stop, after the turn is
+# judged: a scheduled turn adds the ids that were not running when it began,
+# and the newest SCHED_MAX are kept; a Stop with no schedule left, and the
+# session's end, remove the file.
+SCHED_MAX=32
+sched_tasks() {
+  st_f=$RUN_DIR/$SID.schedtasks st_keep=''
+  if [ "$CRON_N" -eq 0 ]; then
+    [ -f "$st_f" ] && rm -f "$st_f" 2>/dev/null
+    return 0
+  fi
+  for st_i in $(cat "$st_f" 2>/dev/null); do
+    case $st_i in *[!A-Za-z0-9._:-]*) continue ;; esac
+    st_keep="$st_keep $st_i"
+  done
+  if [ "$TURN_BY" = schedule ]; then
+    for st_i in $BG_IDS $COPILOT_DET; do
+      case $st_i in *[!A-Za-z0-9._:-]*) continue ;; esac
+      case " $PREV_IDS $st_keep " in *" $st_i "*) ;; *) st_keep="$st_keep $st_i" ;; esac
+    done
+  fi
+  st_keep=$(for st_i in $st_keep; do printf '%s\n' "$st_i"; done | tail -n "$SCHED_MAX" | tr '\n' ' ')
+  st_keep=${st_keep% }
+  if [ -n "$st_keep" ]; then
+    printf '%s\n' "$st_keep" >"$st_f" 2>/dev/null
+  elif [ -f "$st_f" ]; then
+    rm -f "$st_f" 2>/dev/null
+  fi
 }
 
 # $SID.turn: line 1 `user` or `auto` (who started this turn), line 2 the ids
 # of the background tasks that already ran when it started ($SID.stopids, the
-# last Stop's list), for the Stop that ends it.
+# last Stop's list), line 3 the schedule the prompt names (PROMPT_SCHED), for
+# the Stop that ends it; line 4 `open` until the turn ends (turn_close).
+# A report prompt (PROMPT_REPORT: Claude Code's <task-notification>, Grok
+# Build's task-completed- and subagent-completed-) that comes while the turn
+# is open does not start a turn: Claude Code hands work that ended inside a
+# running turn to that turn this way, between its tool calls. The mark stays
+# (SimpleTerm hist/turn-state#d16, if/hook-events-turn#background).
 turn_mark() {
+  case $AGENT in
+    claude | grok)
+      if [ "$PROMPT_REPORT" = 1 ] && [ -f "$RUN_DIR/$SID.turn" ] &&
+        [ "$(sed -n 4p "$RUN_DIR/$SID.turn" 2>/dev/null)" = open ]; then
+        return 0
+      fi
+      ;;
+  esac
   tm_ids=''
   [ -f "$RUN_DIR/$SID.stopids" ] && IFS= read -r tm_ids <"$RUN_DIR/$SID.stopids"
   tm_who=$PROMPT_BY
   [ "$PROMPT_USER" = 1 ] && tm_who=user
-  printf '%s\n%s\n' "$tm_who" "$tm_ids" >"$RUN_DIR/$SID.turn" 2>/dev/null
+  printf '%s\n%s\n%s\nopen\n' "$tm_who" "$tm_ids" "$PROMPT_SCHED" >"$RUN_DIR/$SID.turn" 2>/dev/null
+}
+
+# The turn is over (Stop, StopFailure, Esc): the mark loses its `open` line.
+turn_close() {
+  [ -f "$RUN_DIR/$SID.turn" ] || return 0
+  tc1='' tc2='' tc3=''
+  { IFS= read -r tc1; IFS= read -r tc2; IFS= read -r tc3; } <"$RUN_DIR/$SID.turn"
+  printf '%s\n%s\n%s\n' "$tc1" "$tc2" "$tc3" >"$RUN_DIR/$SID.turn" 2>/dev/null
 }
 
 # True if every counted task was already running before the turn began.
@@ -5050,11 +5191,17 @@ bg_all_old() {
 # turn's mark (turn_mark); the background tasks and schedules come from the
 # event's facts.
 TASKS='' TLAST='' TGOAL=''
-turn_at() { # end [asks] [late]
-  TURN_AT="@.turn${TAB}s${TAB}1$NL@.end${TAB}s$TAB$1$NL"
+# Who started the turn that ends now (SimpleTerm if/event-v2-turn#fields `by`): the
+# turn's mark (turn_mark), unknown when its start was not seen.
+turn_by() {
   tb=${TURN_BY:-}
   [ -z "$tb" ] && [ -f "$RUN_DIR/$SID.turn" ] && tb=$(sed -n 1p "$RUN_DIR/$SID.turn" 2>/dev/null)
   case $tb in user | task | schedule | agent) ;; auto) tb=agent ;; *) tb=unknown ;; esac
+  printf '%s' "$tb"
+}
+turn_at() { # end [asks] [late]
+  TURN_AT="@.turn${TAB}s${TAB}1$NL@.end${TAB}s$TAB$1$NL"
+  tb=$(turn_by)
   TURN_AT="$TURN_AT@.by${TAB}s$TAB$tb$NL"
   [ -n "${2:-}" ] && TURN_AT="$TURN_AT@.asks${TAB}s$TAB$2$NL"
   # OpenCode's LAST is the session's title, not the last message.
@@ -5076,13 +5223,24 @@ stop_done() {
   [ "$STOPACT" = true ] && XFLAGS=',"stop_hook_active":true'
   turn_at done "$TASKS"
   v2_prep "$TURN_AT"
-  done_later
+  sd=done
+  if [ "$(turn_by)" = schedule ] && [ "$TASKS" != true ]; then
+    # The last turn a schedule started, not one that ended asking
+    # (SimpleTerm spec/turn-state#scheduled): no alert anywhere. The tunnels
+    # only (the app lists it), at once (no alert waits on it), and the screen
+    # says it was a scheduled turn so that the agent's own 7501 done stays
+    # quiet too.
+    sd=done_scheduled
+    send_bg done "" tunnel
+  else
+    done_later
+  fi
   # The turn's done is sent (or pending): Claude Code's idle_prompt, 60 s
   # later, repeats it (the next turn note takes the mark back).
   # (printf, not `:`: a failed redirection of a special builtin ends the shell.)
   printf '' 2>/dev/null >"$RUN_DIR/$SID.done"
   usage_report
-  print_state done
+  print_state "$sd"
   turn_end
 }
 
@@ -5094,17 +5252,46 @@ stop_done() {
 #  - only services are left (a dev server, a watcher: nothing the agent
 #    waits for), or
 #  - the last message asks the user something: then they are told (pause ask).
-# A turn the agent started itself while a schedule (/loop, cron) is set stays
+# A turn a schedule started while a schedule (/loop, cron) is still set stays
 # quiet: `background` with "scheduled: ..."; the Stop that finds the
-# schedule gone is the done. TURN_USER defaults to 1 (a person) when the
-# turn's start was not seen.
+# schedule gone is the done. Any other turn with no work left ends in done
+# though a schedule is set (SimpleTerm spec/turn-state#background).
+# TURN_USER defaults to 1 (a person) when the turn's start was not seen.
 stop_flow() {
-  TURN_USER=1 PREV_IDS='' t1='' t2='' TURN_BY=''
+  TURN_USER=1 PREV_IDS='' t1='' t2='' t3='' TURN_BY=''
   if [ -f "$RUN_DIR/$SID.turn" ]; then
-    { IFS= read -r t1; IFS= read -r t2; } <"$RUN_DIR/$SID.turn"
+    { IFS= read -r t1; IFS= read -r t2; IFS= read -r t3; } <"$RUN_DIR/$SID.turn"
     [ -n "$t1" ] && [ "$t1" != user ] && TURN_USER=0
     TURN_BY=$t1
     PREV_IDS=$t2
+    turn_close
+  fi
+  # Who started it, as only the turn's end can tell (SimpleTerm
+  # if/hook-events-turn#turn-end):
+  #  - Grok: a subagent-completed- turn whose prompt names one of the
+  #    session's sessionCrons (this Stop's, or the last Stop's when the turn
+  #    dropped it) is the result of a scheduled run;
+  #  - Copilot: a prompt that starts like a scheduled one is a person's when
+  #    the session's last user.message has no schedule-<id> source.
+  if [ "$TURN_BY" = task ] && [ -n "$t3" ]; then
+    so_ids=$CRON_IDS
+    [ -f "$RUN_DIR/$SID.cronids" ] && so_ids="$so_ids $(cat "$RUN_DIR/$SID.cronids" 2>/dev/null)"
+    case " $so_ids " in *" $t3 "*) TURN_BY=schedule ;; esac
+  fi
+  if [ -n "$CRON_IDS" ]; then
+    printf '%s\n' "$CRON_IDS" >"$RUN_DIR/$SID.cronids" 2>/dev/null
+  elif [ -f "$RUN_DIR/$SID.cronids" ]; then
+    rm -f "$RUN_DIR/$SID.cronids" 2>/dev/null
+  fi
+  if [ "$AGENT" = copilot ] && [ "$TURN_BY" = schedule ] && [ -n "$COPILOT_SRC" ]; then
+    case ${COPILOT_SRC#:} in schedule-[0-9]*) ;; *) TURN_BY=user TURN_USER=1 ;; esac
+  fi
+  #  - Copilot: a <system_notification> turn reports on the shell (detached
+  #    too) or subagent the last notification in events.jsonl names
+  #    (COPILOT_REP); that work
+  #    may be a scheduled turn's ($SID.schedtasks).
+  if [ "$AGENT" = copilot ] && [ "$TURN_BY" = task ] && [ -n "$COPILOT_REP" ] && [ -f "$RUN_DIR/$SID.schedtasks" ]; then
+    case " $(cat "$RUN_DIR/$SID.schedtasks" 2>/dev/null) " in *" $COPILOT_REP "*) TURN_BY=schedule ;; esac
   fi
   bg_ids_finish
   printf '%s\n' "$BG_IDS" >"$RUN_DIR/$SID.stopids" 2>/dev/null
@@ -5113,6 +5300,7 @@ stop_flow() {
   elif [ -f "$RUN_DIR/$SID.crons" ]; then
     rm -f "$RUN_DIR/$SID.crons" 2>/dev/null
   fi
+  sched_tasks
   TASKS=''
   if [ "$AGENT" != opencode ]; then
     TASKS=false
@@ -5127,7 +5315,13 @@ stop_flow() {
     if [ "$BG_N" -gt 0 ]; then stop_done "$BG_M"; else stop_done; fi
     return 0
   fi
-  if [ "$BG_N" -gt 0 ] && [ "$BG_SVC" -eq "$BG_N" ] && { [ "$CRON_N" -eq 0 ] || [ "$TURN_USER" = 1 ]; }; then
+  # Only a turn a schedule started waits for the schedule: one a task's
+  # report or the agent started ends here when no work of its own is left.
+  if [ "$BG_N" -eq 0 ] && [ "$TURN_BY" != schedule ]; then
+    stop_done
+    return 0
+  fi
+  if [ "$BG_N" -gt 0 ] && [ "$BG_SVC" -eq "$BG_N" ] && { [ "$CRON_N" -eq 0 ] || [ "$TURN_BY" != schedule ]; }; then
     bg_summary
     stop_done "$BG_M"
     return 0
@@ -5188,6 +5382,19 @@ function str(s, key,   p, r) {
   if (match(r, /^([^"\\]|\\.)*/)) return substr(r, 1, RLENGTH)
   return ""
 }
+function int0(s, key,   p, r) {
+  p = index(s, "\"" key "\":")
+  if (!p) return ""
+  r = substr(s, p + length(key) + 3)
+  if (match(r, /^[0-9]+/)) return substr(r, 1, RLENGTH)
+  return ""
+}
+# The schedule id of a session.schedule_* event (data.id, a number).
+function sid(s,   t) {
+  if (!match(s, /"data":\{[^}]*"id":[0-9]+/)) return ""
+  t = substr(s, RSTART, RLENGTH); sub(/.*"id":/, "", t)
+  return t
+}
 /"type":"assistant\.message"/ { c = str($0, "content"); if (c != "") last = c }
 /"type":"tool\.execution_start"/ && /"toolName":"bash"/ && /"mode":"async"/ && !/"detach":true/ {
   id = str($0, "shellId"); if (id == "") next
@@ -5202,7 +5409,62 @@ function str(s, key,   p, r) {
   SA[id] = 1; AT[id] = str($0, "agentType"); AN[id] = str($0, "agentDisplayName")
 }
 /"type":"subagent\.(completed|failed)"/ { delete SA[str($0, "toolCallId")] }
+# Schedules of /every, /after (SimpleTerm if/hook-events-turn#turn-end): created, less
+# cancelled, less a one-shot whose prompt came (user.message source schedule-<id>).
+/"type":"session\.schedule_created"/ {
+  id = sid($0); if (id == "") next
+  if (!(id in CR)) { NC++; CO[NC] = id }
+  CR[id] = 1; CP[id] = str($0, "prompt"); CC[id] = str($0, "cron"); CI[id] = int0($0, "intervalMs")
+  ONE[id] = ($0 ~ /"recurring":false/)
+}
+/"type":"session\.schedule_cancelled"/ { delete CR[sid($0)] }
+/"type":"user\.message"/ { s = str($0, "source"); if (s ~ /^schedule-[0-9]+$/ && ONE[substr(s, 10)]) delete CR[substr(s, 10)] }
+# The source of the last prompt: schedule-<id> for a scheduled run, none when
+# a person typed it (it is written before agentStop; measured on 1.0.109). A
+# subagent writes its own prompt to the same file (source agent-<session id>),
+# at times before the main agentStop (1.0.105): only the main prompts count.
+/"type":"user\.message"/ && !/"source":"agent-/ { us = ":" str($0, "source"); rep = ""; ND = 0; ups = 0 }
+# The work a <system_notification> turn reports on (SimpleTerm
+# if/hook-events-turn#background). No user.message is written for that turn
+# (measured on 1.0.105 and 1.0.109): the notification that follows the turn
+# start hook (the main agent hook.end of userPromptSubmitted; a subagent one
+# carries its agentId) opens it. shell_completed and shell_detached_completed
+# name the shell (shellId), agent_idle the subagent by its agentId, which
+# subagent.started ties to its toolCallId. A notification without that hook
+# is handed to the running turn (work that ended inside it, measured on
+# 1.0.109): it opens no turn and changes neither.
+/"type":"hook\.end"/ && /"hookType":"userPromptSubmitted"/ && !/"agentId":/ { ups = 1 }
+/"type":"subagent\.started"/ { a = str($0, "agentId"); if (a != "") AG[a] = str($0, "toolCallId") }
+/"type":"system\.notification"/ {
+  if (ups) {
+    rep = ""; ND = 0
+    if ($0 ~ /"type":"shell_(detached_)?completed"/) rep = str($0, "shellId")
+    else if ($0 ~ /"type":"agent_idle"/) { a = str($0, "agentId"); if (a in AG) rep = AG[a] }
+  }
+  ups = 0
+}
+# Detached shells this turn started (after the prompt or notification that
+# opened it): no
+# work to wait for, but their end wakes the agent too (measured on 1.0.109),
+# so a scheduled turn keeps their ids like those of its other work.
+/"type":"tool\.execution_start"/ && /"toolName":"bash"/ && /"mode":"async"/ && /"detach":true/ {
+  id = str($0, "shellId"); if (id != "") { ND++; DT[ND] = id }
+}
 END {
+  if (us != "") print "S\t" us
+  if (rep != "") print "R\t" rep
+  for (k = 1; k <= ND; k++) print "D\t" DT[k]
+  m = 0
+  for (k = 1; k <= NC; k++) if (CO[k] in CR) {
+    i = CO[k]
+    sc = CC[i]
+    if (sc == "" && CI[i] != "") sc = "every " int(CI[i] / 1000) "s"
+    if (sc == "") sc = "once"
+    printf "F\tsession_crons.%d.id\ts\t%s\n", m, i
+    printf "F\tsession_crons.%d.schedule\ts\t%s\n", m, sc
+    if (CP[i] != "") printf "F\tsession_crons.%d.prompt\ts\t%s\n", m, CP[i]
+    m++
+  }
   n = 0
   for (k = 1; k <= NS; k++) if (SO[k] in SH) {
     i = SO[k]
@@ -5230,11 +5492,18 @@ copilot_tx() {
   [ -n "$tx" ] || return 0
   TLAST=$(printf '%s\n' "$tx" | sed -n "s/^L$TAB//p")
   [ -n "$TLAST" ] && LAST=$TLAST
+  COPILOT_SRC=$(printf '%s\n' "$tx" | sed -n "s/^S$TAB//p")
+  COPILOT_REP=$(printf '%s\n' "$tx" | sed -n "s/^R$TAB//p")
+  COPILOT_DET=$(printf '%s\n' "$tx" | sed -n "s/^D$TAB//p" | tr '\n' ' ')
   v2_facts
   ft=$(printf '%s\n' "$tx" | sed -n "s/^F$TAB//p")
   [ -n "$ft" ] && FACTS="$FACTS$NL$ft"
   while IFS="$TAB" read -r k t v; do
-    [ -n "$k" ] && bg_field "$k=$v"
+    case $k in
+      '') ;;
+      session_crons.*) cron_field "$k=$v" ;;
+      *) bg_field "$k=$v" ;;
+    esac
   done <<EOF
 $ft
 EOF
@@ -5358,6 +5627,7 @@ case $AGENT:$EVENT in
       print_state idle
       turn_at interrupt
       send_state idle "$TURN_AT"
+      turn_close
       sess_turn idle
       finish
     fi
@@ -5389,7 +5659,7 @@ case $AGENT:$EVENT in
       v2_prep "$TURN_AT"
       send_bg error
     fi
-    rm -f "$RUN_DIR/$SID.cerr" 2>/dev/null
+    rm -f "$RUN_DIR/$SID.cerr" "$RUN_DIR/$SID.schedtasks" "$RUN_DIR/$SID.cronids" 2>/dev/null
     printf '' 2>/dev/null >"$RUN_DIR/t0.$$"
     # The record first: Codex gives this hook 3 seconds at most and then
     # ends its process group (0.165.0, measured).
@@ -5445,7 +5715,11 @@ case $AGENT:$EVENT in
     v2_prep "$TURN_AT"
     send_bg "$ev"
     usage_report
-    print_state done
+    # The turn failed (SimpleTerm spec/turn-state): the error badge and its
+    # alert, which the event above pairs with. `idle` first: an app older
+    # than `error` drops it and only clears the badge, no green done.
+    print_state error '' idle
+    turn_close
     sess_turn idle
     ;;
   codex:SessionStart | codex:PostCompact)
@@ -5631,7 +5905,22 @@ case $AGENT:$EVENT in
       v2_prep "$TURN_AT"
       send_bg "$ev"
       turn_end
+      turn_close
     fi
+    sess_turn idle
+    ;;
+  grok:StopCancelled)
+    # Grok 1.0.77 runs StopCancelled instead of Stop when a turn ends without
+    # completing (Ctrl+C: reason user_interrupt, cancelTrigger ctrl_c;
+    # measured): the turn is over, as at Claude Code's Esc (SimpleTerm
+    # hist/turn-state#d16). Claude Code ignores this event of the shared
+    # hooks file (measured on 2.1.322).
+    once "$(printf '%s|%s|%s|%s' "$EVENT" "$SID" "$GKEY" "$REASON" | cksum | awk '{ print $1 }')" || finish
+    note turn
+    print_state idle
+    turn_at interrupt
+    send_state idle "$TURN_AT"
+    turn_close
     sess_turn idle
     ;;
   opencode:Notification)

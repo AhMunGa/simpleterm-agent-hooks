@@ -1230,12 +1230,14 @@ def t_schedules(s):
     out = stop("sc3", cron[:1], "The deploy failed. Should I roll back?")
     rec = wait_for(lambda: ingests(s, "question"), 20)
     s.check("schedule: a question in a scheduled turn -> question", len(rec) == 1 and "state=waiting" in seqs(out), str(ingests(s))[:300])
-    # The Stop that finds the schedule gone is the done, once.
+    # The Stop that finds the schedule gone is the done, once: to the tunnels only, and the screen says it was a
+    # scheduled turn (SimpleTerm spec/turn-state#scheduled; the tunnel side is t_schedule_end).
     s.ctl("/_ctl/reset", {})
     s.run("claude", cc_event("sc3", "UserPromptSubmit", prompt="x", source="loop_wakeup"), st)
     out = stop("sc3", [], "The deploy finished; the loop ended.")
-    rec = wait_for(lambda: ingests(s, "done"), 20)
-    s.check("schedule: no schedule left -> done once", len(rec) == 1 and seqs(out) == "\x1b]9;simpleterm:state=done\x07", str(ingests(s))[:300])
+    time.sleep(1.5)
+    s.check("schedule: no schedule left -> done_scheduled on the screen, nothing to the relay",
+            not ingests(s) and seqs(out) == "\x1b]9;simpleterm:state=done_scheduled\x07", repr(out) + str(ingests(s))[:300])
     # Grok Build.
     s.ctl("/_ctl/reset", {})
     gcron = [{"id": "g1", "schedule": "every 5 minutes", "recurring": True, "prompt": "check it"}]
@@ -1252,6 +1254,218 @@ def t_schedules(s):
                           lastAssistantMessage="Hello.", backgroundTasks=[], sessionCrons=gcron)
     s.run("claude", inp, env)
     s.check("schedule: Grok Build typed turn -> done", wait_for(lambda: ingests(s, "done"), 20))
+    # Grok Build 1.0.77 (measured, SimpleTerm if/hook-events-turn#turn-end): each scheduled run is a background
+    # subagent; the turn its result opens has promptId subagent-completed-<task>, names the schedule in its prompt
+    # (scheduler_delete("<id>")) and its Stop still lists the schedule. Not a task's report: no done per run.
+    sid1 = "01a1c998-e899-7942-881d-11d6b12c1b49"
+    mcron = [{"id": sid1, "schedule": "every 1 minute", "recurring": True, "prompt": "say tick"}]
+
+    def grok_run(i, crons, sched=sid1):
+        pid = "subagent-completed-01a1c998-e8a0-7f71-a9cd-1cb9175eda%02d" % i
+        prompt = ("<system-reminder>\nWhile you were idle, 1 background subagent completed:\n- [general-purpose] \"loop: say tick "
+                  "(every 1 minute)\" — completed successfully (1.2s, 0 tool calls)\n=== Output ===\ntick\n\n")
+        if sched:
+            prompt += ("If this schedule is no longer relevant, run scheduler_delete(\"%s\"). If it is outdated, you can update "
+                       "it with scheduler_create(new_prompt, interval, \"%s\").\n" % (sched, sched))
+        prompt += "</system-reminder>"
+        inp, env = grok_input("UserPromptSubmit", promptId=pid, timestamp="2026-11-11T07:5%d:25.586Z" % i, prompt=prompt)
+        s.run("claude", inp, dict(env, GROK_HOOK_EVENT="user_prompt_submit"))
+        inp, env = grok_input("Stop", reason="end_turn", promptId=pid, timestamp="2026-11-11T07:5%d:25.982Z" % i,
+                              lastAssistantMessage="Tick result %d received." % i, backgroundTasks=[], sessionCrons=crons)
+        s.run("claude", inp, env)
+
+    s.ctl("/_ctl/reset", {})
+    grok_run(1, mcron)
+    grok_run(2, mcron)
+    time.sleep(4.5)  # past done_delay (3 s on Grok)
+    s.check("schedule: Grok Build scheduled runs (subagent-completed-, schedule named) -> nothing",
+            not ingests(s), str([(r.get("body") or {}).get("ev") for r in ingests(s)])[:200])
+    # The run whose turn dropped the schedule (its Stop lists none) is the last: no relay push either.
+    grok_run(3, [])
+    time.sleep(4.5)
+    s.check("schedule: Grok Build last scheduled run -> nothing to the relay", not ingests(s),
+            str([(r.get("body") or {}).get("ev") for r in ingests(s)])[:200])
+    # A background subagent the agent started itself (no schedule named) still reports as a task: done.
+    s.ctl("/_ctl/reset", {})
+    grok_run(4, mcron, sched=None)
+    s.check("schedule: Grok Build task report with a schedule set -> done", wait_for(lambda: ingests(s, "done"), 20))
+
+    # The report of work that a scheduled turn started is the schedule's too (SimpleTerm spec/turn-state#background,
+    # hist/turn-state#d14); the report of work a person's turn started still ends in done. Prompt shapes measured
+    # (hist/hook-events#e15).
+    def cc(sid, name, **kw):
+        return s.run("claude", cc_event(sid, name, **kw), st)[1]
+
+    agent = {"type": "subagent", "status": "running", "description": "run the checks"}
+    s.ctl("/_ctl/reset", {})
+    cc("sw1", "UserPromptSubmit", prompt="run the checks in a background agent", source="schedule_wakeup")
+    cc("sw1", "Stop", stop_hook_active=False, last_assistant_message="Started the checks.",
+       background_tasks=[dict(agent, id="a5c0ffee000000001")], session_crons=cron)
+    cc("sw1", "UserPromptSubmit", prompt="<task-notification>\n<task-id>a5c0ffee000000001</task-id>\n<status>completed</status>")
+    out = cc("sw1", "Stop", stop_hook_active=False, last_assistant_message="All checks passed.", background_tasks=[],
+             session_crons=cron)
+    time.sleep(4.5)  # past done_delay (3 s on Claude Code)
+    s.check("schedule: the report of a loop turn's background agent rests with the loop (no done)",
+            not ingests(s) and seqs(out).startswith("\x1b]9;simpleterm:state=background scheduled:"), repr(out) + str(ingests(s))[:200])
+    s.ctl("/_ctl/reset", {})
+    cc("sw2", "UserPromptSubmit", prompt="run the checks in a background agent", source="user")
+    cc("sw2", "Stop", stop_hook_active=False, last_assistant_message="Started the checks.",
+       background_tasks=[dict(agent, id="a5c0ffee000000002")], session_crons=cron)
+    cc("sw2", "UserPromptSubmit", prompt="<task-notification>\n<task-id>a5c0ffee000000002</task-id>\n<status>completed</status>")
+    cc("sw2", "Stop", stop_hook_active=False, last_assistant_message="All checks passed.", background_tasks=[], session_crons=cron)
+    s.check("schedule: the report of a person's background agent with the loop set -> done", wait_for(lambda: ingests(s, "done"), 20))
+    s.check("schedule: ... its report came after the person's turn ended: a turn of its own (task)",
+            (s.home / ".simpleterm" / "run" / "sw2.turn").read_text().split("\n")[0] == "task",
+            (s.home / ".simpleterm" / "run" / "sw2.turn").read_text())
+    # A chain: the loop turn starts agent A, A's report turn starts agent B; B's report rests with the loop too.
+    s.ctl("/_ctl/reset", {})
+    cc("sw3", "UserPromptSubmit", prompt="run the checks in a background agent", source="schedule_wakeup")
+    cc("sw3", "Stop", stop_hook_active=False, last_assistant_message="Started the checks.",
+       background_tasks=[dict(agent, id="a5c0ffee00000000a")], session_crons=cron)
+    cc("sw3", "UserPromptSubmit", prompt="<task-notification>\n<task-id>a5c0ffee00000000a</task-id>\n<status>completed</status>")
+    cc("sw3", "Stop", stop_hook_active=False, last_assistant_message="Checks failed; a fixer runs.",
+       background_tasks=[dict(agent, id="a5c0ffee00000000b", description="fix the checks")], session_crons=cron)
+    cc("sw3", "UserPromptSubmit", prompt="<task-notification>\n<task-id>a5c0ffee00000000b</task-id>\n<status>completed</status>")
+    out = cc("sw3", "Stop", stop_hook_active=False, last_assistant_message="Fixed.", background_tasks=[], session_crons=cron)
+    time.sleep(4.5)
+    s.check("schedule: a chain of reports from a loop turn (agent A starts agent B) rests with the loop (no done)",
+            not ingests(s) and seqs(out).startswith("\x1b]9;simpleterm:state=background scheduled:"), repr(out) + str(ingests(s))[:200])
+
+    # Work that ends inside the running turn: Claude Code hands its <task-notification> to that turn as a prompt,
+    # between its tool calls (shapes: the orca fixture claude-task-notification-hooks.jsonl, shell-ends-mid-turn
+    # and subagent-ends-mid-turn). It does not start a turn: the mark stays, the loop turn ends quiet.
+    def mark(sid):
+        return (s.home / ".simpleterm" / "run" / (sid + ".turn")).read_text().split("\n")
+
+    note = "<task-notification>\n<task-id>bwaw14qyq</task-id>\n<status>completed</status>\n</task-notification>"
+    s.ctl("/_ctl/reset", {})
+    cc("sw4", "UserPromptSubmit", prompt="run the checks", source="schedule_wakeup")
+    cc("sw4", "PostToolUse", tool_name="Bash", tool_input={"command": "sleep 2", "run_in_background": True})
+    cc("sw4", "UserPromptSubmit", prompt=note)
+    m = mark("sw4")
+    out = cc("sw4", "Stop", stop_hook_active=False, last_assistant_message="Checks passed.", background_tasks=[], session_crons=cron)
+    time.sleep(4.5)
+    s.check("schedule: a report inside a loop turn keeps the loop's mark -> quiet (no done)",
+            m[0] == "schedule" and not ingests(s) and seqs(out).startswith("\x1b]9;simpleterm:state=background scheduled:"),
+            repr(m) + repr(out) + str(ingests(s))[:200])
+    s.check("schedule: ... and the Stop closes the turn (no open line)", mark("sw4")[3:4] in ([], [""]), repr(mark("sw4")))
+    s.ctl("/_ctl/reset", {})
+    cc("sw5", "UserPromptSubmit", prompt="run the checks", source="user")
+    cc("sw5", "UserPromptSubmit", prompt=note)
+    s.check("schedule: a report inside a person's turn keeps the person's mark", mark("sw5")[0] == "user", repr(mark("sw5")))
+    # Once the turn is over (Esc during a tool call, or a failed turn), a report starts its own turn.
+    cc("sw6", "UserPromptSubmit", prompt="run the checks", source="schedule_wakeup")
+    cc("sw6", "PostToolUseFailure", tool_name="Bash", tool_input={"command": "ls"}, is_interrupt=True, error="interrupted")
+    cc("sw6", "UserPromptSubmit", prompt=note)
+    s.check("schedule: after Esc, a report starts a turn of its own (task)", mark("sw6")[0] == "task", repr(mark("sw6")))
+    cc("sw7", "UserPromptSubmit", prompt="run the checks", source="schedule_wakeup")
+    cc("sw7", "StopFailure", error="server_error", last_assistant_message="API Error: 500")
+    cc("sw7", "UserPromptSubmit", prompt=note)
+    s.check("schedule: after a failed turn, a report starts a turn of its own (task)", mark("sw7")[0] == "task", repr(mark("sw7")))
+    # Grok Build: a scheduled run's turn starts a background command; its task-completed- report rests too.
+    s.ctl("/_ctl/reset", {})
+    grok_run(5, mcron)
+    pid = "subagent-completed-01a1c998-e8a0-7f71-a9cd-1cb9175eda06"
+    inp, env = grok_input("UserPromptSubmit", promptId=pid, timestamp="2026-11-11T08:00:00.000Z",
+                          prompt="<system-reminder>\nscheduler_delete(\"%s\")\n</system-reminder>" % sid1)
+    s.run("claude", inp, dict(env, GROK_HOOK_EVENT="user_prompt_submit"))
+    inp, env = grok_input("Stop", reason="end_turn", promptId=pid, timestamp="2026-11-11T08:00:01.000Z", lastAssistantMessage="Running it.",
+                          backgroundTasks=[{"id": "gbash01", "type": "bash", "status": "running", "command": "npm test"}], sessionCrons=mcron)
+    s.run("claude", inp, env)
+    inp, env = grok_input("UserPromptSubmit", promptId="task-completed-gbash01", timestamp="2026-11-11T08:00:30.000Z", prompt="npm test finished")
+    s.run("claude", inp, dict(env, GROK_HOOK_EVENT="user_prompt_submit"))
+    inp, env = grok_input("Stop", reason="end_turn", promptId="task-completed-gbash01", timestamp="2026-11-11T08:00:31.000Z",
+                          lastAssistantMessage="Tests pass.", backgroundTasks=[], sessionCrons=mcron)
+    s.run("claude", inp, env)
+    time.sleep(4.5)
+    s.check("schedule: Grok Build report of a scheduled run's command -> nothing", not ingests(s),
+            str([(r.get("body") or {}).get("ev") for r in ingests(s)])[:200])
+
+
+def t_schedule_end(s):
+    """The end of a turn a schedule started (SimpleTerm spec/turn-state#scheduled, AhMunGa/simple-term#469): with no
+    schedule left it is a done to the tunnels only, at once, and Claude's screen says done_scheduled; one that ended
+    asking is a plain done on the screen, the tunnels and the relay. A turn a task's report started ends in done
+    while a schedule remains (SimpleTerm spec/turn-state#background). A StopFailure writes idle, then error, in one
+    output (SimpleTerm if/terminal-signals#structured): no green done, and an app older than error is left with idle;
+    a login error too, while its event says auth."""
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_A, {}), (LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})], conf={"done_delay": None})
+        st = {"SIMPLETERM": "1"}
+        cron = [{"id": "c1", "schedule": "*/5 * * * *", "recurring": True, "prompt": "check the deploy"}]
+
+        def reset():
+            s.ctl("/_ctl/reset", {})
+            tctl("/_ctl/reset", {})
+            tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T)}})
+
+        def stop(sid, crons, last):
+            return s.run("claude", cc_event(sid, "Stop", stop_hook_active=False, last_assistant_message=last,
+                                            background_tasks=[], session_crons=crons), st)[1]
+
+        def tunnel(ev):
+            return [r for r in ingests(s, ctl=tctl) if (r.get("body") or {}).get("ev") == ev]
+
+        def turn(rec):
+            return (rec[0].get("plain_json") or {}).get("turn", {}) if rec else {}
+
+        reset()
+        s.run("claude", cc_event("se1", "UserPromptSubmit", prompt="check the deploy", source="loop_wakeup"), st)
+        t0 = time.time()
+        out = stop("se1", [], "The deploy finished; the loop ended.")
+        s.check("schedule end: the screen says done_scheduled", seqs(out) == "\x1b]9;simpleterm:state=done_scheduled\x07", repr(out))
+        d = wait_for(lambda: tunnel("done"), 10)
+        s.check("schedule end: one done with by schedule to the tunnel, at once (no done_delay)",
+                len(d) == 1 and turn(d).get("by") == "schedule" and d[0]["received"] - t0 < 2.5,
+                str([(turn([r]), round(r["received"] - t0, 2)) for r in d])[:300])
+        time.sleep(max(0, t0 + 4.5 - time.time()))  # past the shipped done_delay (3 s)
+        s.check("schedule end: nothing to the relay", not ingests(s), str(ingests(s))[:300])
+
+        # Decision 9 (SimpleTerm hist/turn-state#d9): a scheduled turn that ended asking is a plain done everywhere.
+        reset()
+        s.run("claude", cc_event("se2", "UserPromptSubmit", prompt="check the deploy", source="loop_wakeup"), st)
+        out = stop("se2", [], "The deploy failed. Should I roll back?")
+        s.check("schedule end asking: done on the screen", seqs(out) == "\x1b]9;simpleterm:state=done\x07", repr(out))
+        r = wait_for(lambda: ingests(s, "done"), 20)
+        s.check("schedule end asking: done to the relay, by schedule, asks", len(r) == 1 and turn(r).get("by") == "schedule"
+                and turn(r).get("asks") is True, str(r)[:300])
+        s.check("schedule end asking: and to the tunnel", wait_for(lambda: tunnel("done"), 10), str(ingests(s, ctl=tctl))[:300])
+
+        # A task's report woke the agent while a schedule is still set: its end is a done (it is no scheduled turn).
+        reset()
+        s.run("claude", cc_event("se3", "UserPromptSubmit",
+                                 prompt="<task-notification>\n<task-id>b4y66jodr</task-id>\n<status>completed</status>"), st)
+        out = stop("se3", cron, "The tests passed.")
+        s.check("task turn with a schedule set: done on the screen", seqs(out) == "\x1b]9;simpleterm:state=done\x07", repr(out))
+        r = wait_for(lambda: ingests(s, "done"), 20)
+        s.check("task turn with a schedule set: done to the relay, by task", len(r) == 1 and turn(r).get("by") == "task", str(r)[:300])
+        # A turn the schedule started with the schedule still set stays a pause (the loop stays quiet).
+        reset()
+        s.run("claude", cc_event("se3", "UserPromptSubmit", prompt="check the deploy", source="loop_wakeup"), st)
+        out = stop("se3", cron, "Still deploying.")
+        s.check("scheduled turn with a schedule set: still background", seqs(out).startswith("\x1b]9;simpleterm:state=background scheduled:"), repr(out))
+        st_ev = wait_for(lambda: [x for x in tunnel("state") if (x.get("plain_json") or {}).get("st") == "scheduled"], 10)
+        time.sleep(1.5)
+        s.check("scheduled turn with a schedule set: state scheduled, no done anywhere",
+                st_ev and not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300])
+
+        # StopFailure: idle, then error, in one output; the event goes as before.
+        failed = "\x1b]9;simpleterm:state=idle\x07\x1b]9;simpleterm:state=error\x07"
+        reset()
+        out = s.run("claude", cc_event("se4", "StopFailure", error="server_error", error_details="overloaded",
+                                       last_assistant_message=""), st)[1]
+        s.check("StopFailure: the screen says idle, then error", seqs(out) == failed, repr(out))
+        s.check("StopFailure: the error goes", wait_for(lambda: ingests(s, "error"), 20), str(ingests(s))[:300])
+        # A login error is no other screen value (SimpleTerm hist/turn-state#d10): error there, auth as the event.
+        reset()
+        out = s.run("claude", cc_event("se5", "StopFailure", error="authentication_failed",
+                                       last_assistant_message=""), st)[1]
+        s.check("StopFailure login: the screen says idle, then error", seqs(out) == failed, repr(out))
+        s.check("StopFailure login: the event says auth", wait_for(lambda: ingests(s, "auth"), 20), str(ingests(s))[:300])
+    finally:
+        tun.terminate()
+        tun.wait(5)
 
 
 def t_done_delay(s):
@@ -1806,7 +2020,8 @@ def t_usage_claude(s):
     rc, out, err, el = s.run("claude", json.dumps({"session_id": "u-claude-rl", "transcript_path": str(tr), "hook_event_name": "StopFailure",
                                                    "error": "rate_limit", "last_assistant_message": "API Error"}), {"SIMPLETERM": "1"})
     s.check("usage claude: StopFailure rate_limit -> lim=reached",
-            seqs(out) == "\x1b]9;simpleterm:state=done\x07\x1b]9;simpleterm:usage v=1 agent=claude-code ctx=42000 win=1000000"
+            seqs(out) == "\x1b]9;simpleterm:state=idle\x07\x1b]9;simpleterm:state=error\x07"
+                          "\x1b]9;simpleterm:usage v=1 agent=claude-code ctx=42000 win=1000000"
                           " src=transcript est=1 lim=reached\x07", repr(out))
     # Earlier cases' background sends may still land here: pick the event by content.
     rec = wait_for(lambda: [r for r in ingests(s, "usage") if {"id": "reached"} in (r.get("plain_json") or {}).get("lims", [])], 20)
@@ -2451,6 +2666,215 @@ def t_copilot(s):
         tun.wait(5)
 
 
+def t_copilot_schedules(s):
+    """Copilot CLI /every, /loop and /after (experimental; measured on 1.0.109 with a local model stub,
+    SimpleTerm if/hook-events-turn#turn-end): a scheduled prompt starts with `[Scheduled prompt #<id>]`;
+    events.jsonl holds session.schedule_created and session.schedule_cancelled. A scheduled turn with a
+    schedule left is a pause (state scheduled); with none left its done goes to the tunnels only."""
+    if s.kind != "sh":
+        return
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2}), (LINK_A, {"fmt": 2})])
+        env = {"COPILOT_CLI": "1", "COPILOT_CLI_BINARY_VERSION": "1.0.109"}
+        base = {"sessionId": "cops-1", "timestamp": 1794366354204, "cwd": "/w/proj"}
+        tx = s.tmp / "cops" / "events.jsonl"
+        lines = []
+
+        def ev(t, data, agent=None):
+            # A subagent's own events carry its agentId after data (measured on 1.0.105 and 1.0.109).
+            rec = dict({"type": t, "data": data}, **({"agentId": agent} if agent else {}))
+            rec.update({"id": "7033787d-cd09-404e-b99d-a3725d448438", "timestamp": "2026-11-11T03:12:01.230Z"})
+            lines.append(json.dumps(rec, separators=(",", ":")))
+            write(tx, "\n".join(lines) + "\n")
+
+        def reset():
+            s.ctl("/_ctl/reset", {})
+            tctl("/_ctl/reset", {})
+            tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T)}})
+
+        def run_turn(sched_id, reply):
+            prompt = "[Scheduled prompt #%d]\ncheck status" % sched_id
+            s.run("copilot", json.dumps(dict(base, prompt=prompt)), env, args=("userPromptSubmitted",))
+            ev("user.message", {"content": prompt, "source": "schedule-%d" % sched_id})
+            ev("assistant.message", {"content": reply})
+            s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
+                  env, args=("agentStop",))
+
+        def tunnel(kind):
+            return [r for r in ingests(s, ctl=tctl) if (r.get("body") or {}).get("ev") == kind]
+
+        reset()
+        ev("session.schedule_created", {"id": 1, "intervalMs": 20000, "prompt": "check status", "recurring": True, "origin": "user"})
+        run_turn(1, "Still deploying.")
+        turn = (s.home / ".simpleterm" / "run" / "cops-1.turn").read_text().split("\n")[0]
+        s.check("copilot schedule: a scheduled prompt's turn is the schedule's", turn == "schedule", turn)
+        st = wait_for(lambda: [r for r in tunnel("state") if (r.get("plain_json") or {}).get("st") == "scheduled"], 10)
+        time.sleep(1.5)
+        s.check("copilot schedule: with the schedule left, state scheduled and no done",
+                st and not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300])
+        s.check("copilot schedule: the schedule is in turn.crons",
+                (st[0]["plain_json"].get("turn") or {}).get("crons") == [{"sched": "every 20s", "prompt": "check status"}] if st else False,
+                str(st[0]["plain_json"].get("turn") if st else None)[:300])
+        # Cancelled in the schedule manager: the next scheduled turn (one more fire raced it) is the last.
+        reset()
+        ev("session.schedule_cancelled", {"id": 1})
+        run_turn(1, "The deploy finished.")
+        d = wait_for(lambda: tunnel("done"), 10)
+        time.sleep(1.5)
+        s.check("copilot schedule: none left -> done by schedule to the tunnel only",
+                len(d) == 1 and (d[0]["plain_json"].get("turn") or {}).get("by") == "schedule" and not ingests(s, "done"),
+                str(d)[:300] + str(ingests(s))[:200])
+        # A one-shot /after is gone once its prompt came.
+        reset()
+        ev("session.schedule_created", {"id": 2, "at": 1794366400000, "prompt": "say hello", "recurring": False, "origin": "user"})
+        run_turn(2, "Hello.")
+        d = wait_for(lambda: tunnel("done"), 10)
+        s.check("copilot schedule: a one-shot that fired leaves no schedule -> done to the tunnel",
+                len(d) == 1 and (d[0]["plain_json"].get("turn") or {}).get("by") == "schedule", str(d)[:300])
+        # A prompt you typed in the same session is yours.
+        reset()
+        s.run("copilot", json.dumps(dict(base, prompt="[not a schedule] hi")), env, args=("userPromptSubmitted",))
+        turn = (s.home / ".simpleterm" / "run" / "cops-1.turn").read_text().split("\n")[0]
+        s.check("copilot schedule: a typed prompt is the user's", turn == "user", turn)
+        # A prompt you typed that starts like a scheduled one: the hook input is the same, but events.jsonl has no
+        # source for it (measured on 1.0.109), so its end is yours: a plain done, to the relay too.
+        reset()
+        ev("session.schedule_created", {"id": 3, "intervalMs": 60000, "prompt": "check status", "recurring": True, "origin": "user"})
+        typed = "[Scheduled prompt #1] hello there"
+        s.run("copilot", json.dumps(dict(base, prompt=typed)), env, args=("userPromptSubmitted",))
+        ev("user.message", {"content": typed})
+        ev("assistant.message", {"content": "Hi."})
+        s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
+              env, args=("agentStop",))
+        r = wait_for(lambda: ingests(s, "done"), 20)
+        s.check("copilot schedule: a typed prompt that starts like a scheduled one ends as yours (done, by user)",
+                len(r) == 1 and (r[0]["plain_json"].get("turn") or {}).get("by") == "user", str(ingests(s))[:300])
+
+        # The report of a shell or subagent a scheduled run started rests with the schedule (SimpleTerm
+        # spec/turn-state#background, hist/turn-state#d14); a typed prompt's work still ends in done. Shapes measured on
+        # 1.0.105 and 1.0.109 (hist/hook-events#e15): the report turn's prompt is the notification's content, and no
+        # user.message is written for that turn; events.jsonl has the turn start hook's hook.end, then the
+        # system.notification.
+        def opens():
+            ev("hook.end", {"hookInvocationId": "6c1f74d3-8d68-4dd0-924f-901e1815a31f", "hookType": "userPromptSubmitted",
+                              "success": True})
+
+        def shell_report(prompt, src, shell):
+            s.run("copilot", json.dumps(dict(base, prompt=prompt)), env, args=("userPromptSubmitted",))
+            ev("user.message", dict({"content": prompt}, **({"source": src} if src else {})))
+            ev("tool.execution_start", {"toolName": "bash", "mode": "async", "shellId": shell, "command": "npm test",
+                                        "description": "run the checks"})
+            ev("assistant.message", {"content": "Started the checks."})
+            s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
+                  env, args=("agentStop",))
+            note = "<system_notification>\nShell command \"run the checks\" (shellId: %s) has completed successfully.\n</system_notification>" % shell
+            opens()
+            ev("system.notification", {"content": note, "kind": {"type": "shell_completed", "shellId": shell, "exitCode": 0,
+                                                                "description": "run the checks"}})
+            s.run("copilot", json.dumps(dict(base, prompt=note)), env, args=("userPromptSubmitted",))
+            ev("assistant.message", {"content": "All checks passed."})
+            s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
+                  env, args=("agentStop",))
+
+        def det_report(prompt, src, shell):
+            # A detached shell (detach:true): no work to wait for, yet its end wakes the agent (measured on 1.0.109).
+            s.run("copilot", json.dumps(dict(base, prompt=prompt)), env, args=("userPromptSubmitted",))
+            ev("user.message", dict({"content": prompt}, **({"source": src} if src else {})))
+            ev("tool.execution_start", {"toolCallId": "call_9_2", "toolName": "bash", "arguments": {
+                "command": "sleep 4; echo DETDONE", "mode": "async", "detach": True, "shellId": shell, "description": "det sleep"}})
+            ev("assistant.message", {"content": "Started it."})
+            s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
+                  env, args=("agentStop",))
+            note = "<system_notification>\nDetached shell \"det sleep\" (shellId: %s) has completed.\n</system_notification>" % shell
+            opens()
+            ev("system.notification", {"content": note, "kind": {"type": "shell_detached_completed", "shellId": shell}})
+            s.run("copilot", json.dumps(dict(base, prompt=note)), env, args=("userPromptSubmitted",))
+            ev("assistant.message", {"content": "It finished."})
+            s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
+                  env, args=("agentStop",))
+
+        def agent_report(prompt, src, call, agent):
+            s.run("copilot", json.dumps(dict(base, prompt=prompt)), env, args=("userPromptSubmitted",))
+            ev("user.message", dict({"content": prompt}, **({"source": src} if src else {})))
+            ev("subagent.started", {"toolCallId": call, "agentName": "explore", "agentDisplayName": "sub1",
+                                    "agentDescription": "review", "agentType": "explore", "executionMode": "background"}, agent)
+            ev("assistant.message", {"content": "A reviewer runs."})
+            # The subagent's own prompt may be written before the main agentStop (1.0.105): it is not the main prompt.
+            ev("user.message", {"content": "review the diff", "source": "agent-cops-1"}, agent)
+            s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
+                  env, args=("agentStop",))
+            ev("subagent.completed", {"toolCallId": call, "agentName": "explore", "agentDisplayName": "sub1"}, agent)
+            note = "<system_notification>\nAgent \"sub1\" (explore) has finished processing and is now idle.\n</system_notification>"
+            opens()
+            ev("system.notification", {"content": note, "kind": {"type": "agent_idle", "agentId": agent, "agentType": "explore",
+                                                                "displayName": "sub1", "description": "review"}})
+            s.run("copilot", json.dumps(dict(base, prompt=note)), env, args=("userPromptSubmitted",))
+            ev("assistant.message", {"content": "The review is in."})
+            s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
+                  env, args=("agentStop",))
+
+        reset()
+        shell_report("[Scheduled prompt #3]\ncheck status", "schedule-3", "sbg1")
+        time.sleep(4.5)
+        s.check("copilot schedule: the report of a scheduled run's shell -> no done",
+                not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300] + str(ingests(s))[:200])
+        reset()
+        shell_report("run the checks", None, "ubg1")
+        s.check("copilot schedule: the report of a typed prompt's shell with the schedule set -> done",
+                wait_for(lambda: ingests(s, "done"), 20), str(ingests(s))[:300])
+        reset()
+        agent_report("[Scheduled prompt #3]\ncheck status", "schedule-3", "call_7_1", "5b0c2a1e-0000-4000-8000-00000000a001")
+        time.sleep(4.5)
+        s.check("copilot schedule: the report of a scheduled run's background subagent -> no done",
+                not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300] + str(ingests(s))[:200])
+        reset()
+        agent_report("review the diff in the background", None, "call_8_1", "5b0c2a1e-0000-4000-8000-00000000a002")
+        s.check("copilot schedule: the report of a typed prompt's background subagent with the schedule set -> done",
+                wait_for(lambda: ingests(s, "done"), 20), str(ingests(s))[:300])
+        reset()
+        det_report("[Scheduled prompt #3]\ncheck status", "schedule-3", "det7")
+        time.sleep(4.5)
+        s.check("copilot schedule: the report of a scheduled run's detached shell -> no done",
+                not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300] + str(ingests(s))[:200])
+        reset()
+        det_report("start the detached job", None, "det8")
+        # The typed turn ends in done at once (a detached shell is no work left); its report is a task's done.
+        r = wait_for(lambda: [x for x in ingests(s, "done") if (x["plain_json"].get("turn") or {}).get("by") == "task"], 20)
+        s.check("copilot schedule: the report of a typed prompt's detached shell with the schedule set -> done", r,
+                str([(x["plain_json"].get("turn") or {}).get("by") for x in ingests(s, "done")]))
+        # Work that ends inside the scheduled run: its notification comes with no turn start hook (measured on 1.0.109)
+        # and opens no turn, so the detached shell that run started is still the schedule's.
+        reset()
+        p = "[Scheduled prompt #3]\ncheck status"
+        s.run("copilot", json.dumps(dict(base, prompt=p)), env, args=("userPromptSubmitted",))
+        opens()
+        ev("user.message", {"content": p, "source": "schedule-3"})
+        ev("tool.execution_start", {"toolCallId": "call_9_3", "toolName": "bash", "arguments": {
+            "command": "sleep 9; echo DET", "mode": "async", "detach": True, "shellId": "det9", "description": "det long"}})
+        ev("tool.execution_start", {"toolCallId": "call_9_4", "toolName": "bash", "arguments": {
+            "command": "sleep 2; echo BG", "mode": "async", "shellId": "sbg9", "description": "bg quick"}})
+        ev("system.notification", {"content": "<system_notification>\nShell command \"bg quick\" (shellId: sbg9) has completed "
+                                              "successfully.\n</system_notification>",
+                                   "kind": {"type": "shell_completed", "shellId": "sbg9", "exitCode": 0, "description": "bg quick"}})
+        ev("assistant.message", {"content": "Checked."})
+        s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
+              env, args=("agentStop",))
+        note = "<system_notification>\nDetached shell \"det long\" (shellId: det9) has completed.\n</system_notification>"
+        opens()
+        ev("system.notification", {"content": note, "kind": {"type": "shell_detached_completed", "shellId": "det9"}})
+        s.run("copilot", json.dumps(dict(base, prompt=note)), env, args=("userPromptSubmitted",))
+        ev("assistant.message", {"content": "It finished."})
+        s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
+              env, args=("agentStop",))
+        time.sleep(4.5)
+        s.check("copilot schedule: a notification inside the scheduled run opens no turn; its detached shell's report -> no done",
+                not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300] + str(ingests(s))[:200])
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+
 def t_agy(s):
     """Antigravity: PreToolUse always answers with a decision (what agy does with `{}` or no
     answer is not documented); device waits are opt-in."""
@@ -2587,7 +3011,7 @@ def t_agy_paths(s):
 
 
 def grok_input(event, **kw):
-    snake = {"Notification": "notification", "Stop": "stop", "StopFailure": "stop_failure",
+    snake = {"Notification": "notification", "Stop": "stop", "StopFailure": "stop_failure", "StopCancelled": "stop_cancelled",
              "UserPromptSubmit": "user_prompt_submit"}[event]
     j = {"hookEventName": snake, "sessionId": "gk-1", "cwd": "/w/grokproj", "workspaceRoot": "/w/grokproj",
          "timestamp": kw.pop("timestamp", "2026-10-29T10:00:00.000Z"), "hook_event_name": event, "session_id": "gk-1"}
@@ -2636,6 +3060,26 @@ def t_grok(s):
     rec = wait_for(lambda: ingests(s), 20)
     s.check("grok: StopFailure -> error", rec and rec[0]["body"]["ev"] == "error"
             and rec[0]["plain_json"].get("msg") == "rate_limit: Rate limited", str(rec)[:200])
+    # Ctrl+C or a rejected permission ends a Grok turn with StopCancelled instead of Stop (measured on 1.0.77, reason
+    # user_interrupt or permission_rejected): the turn is over, as at Claude Code's Esc (SimpleTerm
+    # hist/turn-state#d16), so the report that comes next starts a turn of its own.
+    def gmark():
+        return (s.home / ".simpleterm" / "run" / "gk-1.turn").read_text().split("\n")
+
+    for i, (reason, extra) in enumerate((("user_interrupt", {"cancelTrigger": "ctrl_c"}), ("permission_rejected", {}))):
+        ups, uenv = grok_input("UserPromptSubmit", promptId="p9%d" % i, prompt="Run the long check",
+                               timestamp="2026-10-29T10:12:0%d.000Z" % i)
+        s.run("claude", ups, uenv)
+        m1 = gmark()
+        cancel, cenv = grok_input("StopCancelled", promptId="p9%d" % i, reason=reason, cancelledBy="user",
+                                  timestamp="2026-10-29T10:12:1%d.000Z" % i, **extra)
+        s.run("claude", cancel, cenv)
+        m2 = gmark()
+        rep, renv = grok_input("UserPromptSubmit", promptId="task-completed-gbash9%d" % i, prompt="npm test finished",
+                               timestamp="2026-10-29T10:12:2%d.000Z" % i)
+        s.run("claude", rep, renv)
+        s.check("grok: StopCancelled (%s) closes the turn; the next report is a turn of its own" % reason,
+                m1[3:4] == ["open"] and m2[3:4] in ([], [""]) and gmark()[0] == "task", repr((m1, m2, gmark())))
     s.ctl("/_ctl/reset", {})
     only_camel = json.dumps({"hookEventName": "stop", "sessionId": "gk-2", "cwd": "/w/g", "timestamp": "t9", "reason": "end_turn",
                              "lastAssistantMessage": "camel only"})
@@ -3807,20 +4251,22 @@ def t_v2_held(s):
             return [((r.get("plain_json") or {}).get("res") or {}) for r in tctl("/_ctl/records")["records"]
                     if r["path"] == "/v1/ingest" and r["body"]["ev"] == "resolved"]
 
-        def state(pid, session="held-1", status="waiting", waiting_for="permission prompt", at=1793232000123):
+        def state(pid, session="held-1", status="waiting", waiting_for="permission prompt", at=1793232000123, raw=False):
+            # raw: non-ASCII text as UTF-8, the way Claude Code (JSON.stringify) writes it
             f = sessions / ("%d.json" % pid)
             tmp = sessions / ("%d.json.tmp" % pid)
             tmp.write_text(json.dumps({"pid": pid, "sessionId": session, "cwd": "/home/u/api", "status": status,
-                                       "waitingFor": waiting_for, "statusUpdatedAt": at, "updatedAt": at}))
+                                       "waitingFor": waiting_for, "statusUpdatedAt": at, "updatedAt": at},
+                                      ensure_ascii=not raw), encoding="utf-8")
             os.replace(tmp, f)
 
-        def start(session="held-1", env=None, proc=None, file_session=None, **st):
+        def start(session="held-1", env=None, proc=None, file_session=None, perm=None, **st):
             """The stand-in agent (its pid names the session file) and the hook under it. Claude Code
             records the prompt in that file 5 to 45 ms before the hook starts (3 ms after it at the
             latest; SimpleTerm hist/event-v2-request#m31), and the hook gives a file it cannot read 5 seconds.
             The agent starts the hook only once the file is there, so a loaded test machine cannot
             turn those milliseconds into seconds."""
-            cmd = [sys.executable, "-I", "-c", AGENT_GATED_PY, v2_perm(session=session)] + list(s.argv) + ["claude"]
+            cmd = [sys.executable, "-I", "-c", AGENT_GATED_PY, v2_perm(session=session, **(perm or {}))] + list(s.argv) + ["claude"]
             agent = s.popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=s.env(env), cwd=str(s.tmp))
             if proc:  # a /proc of the agent for a hook without ps
                 (proc / str(agent.pid)).mkdir(parents=True, exist_ok=True)
@@ -3926,6 +4372,35 @@ def t_v2_held(s):
         done, out = finished(agent, 20)
         s.check("held: a window recorded after the hook's start + 2 s is not its own: not told again",
                 done and len(perms()) == 1, "%d %s" % (len(perms()), s.log_text()[-200:]))
+        # The value of the window kind (SimpleTerm if/ssh-tunnel-wait#open-window, hist/request-wait-link#d7, issue
+        # AhMunGa/simple-term#446): Claude Code 2.1.322 writes `input needed` for a question window, 2.1.316 and 2.1.317
+        # wrote `permission prompt`; every other permission request takes only `permission prompt`. A value that is
+        # not one of the tool's is not the open window: nothing again, and one line in the hook's log.
+        def asks():  # a question goes as ev=question, an approval as ev=permission
+            return [r for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and r["body"]["ev"] in ("permission", "question")]
+
+        ask = {"tool": "AskUserQuestion", "suggestions": (), "tool_input": {"questions": [
+            {"question": "Which color?", "header": "Color", "multiSelect": False,
+             "options": [{"label": "Red", "description": "Warm"}, {"label": "Green", "description": "Calm"}]}]}}
+        for name, perm, wf in (("question, input needed (Claude Code 2.1.322)", ask, "input needed"),
+                               ("question, permission prompt (2.1.316, 2.1.317)", ask, "permission prompt")):
+            setup(["held"])
+            agent, hook = start(perm=perm, waiting_for=wf)
+            s.check("held: %s: told again" % name, wait_for(lambda: len(asks()) >= 2, 30),
+                    "%d %s" % (len(asks()), s.log_text()[-300:]))
+            state(agent.pid, status="busy", waiting_for=None, at=1793232009000)
+            finished(agent, 15)
+        odd = "waiting on: the user's answer \u2014 \uc9c8\ubb38, please wait a while longer than forty"
+        for name, perm, wf, shown in (("approval, input needed", None, "input needed", "input needed"),
+                                      ("question, a value not known", ask, odd, re.sub(r"[^A-Za-z0-9 ._-]", "", odd)[:40])):
+            setup(["held"])
+            line = 'held: unknown waitingFor "%s" for %s (stop)' % (shown, (perm or {}).get("tool", "Bash"))
+            n0 = s.log_text().count(line)
+            agent, hook = start(perm=perm, waiting_for=wf, raw=True)
+            done, out = finished(agent, 20)
+            s.check("held: %s: not told again, one log line with the value" % name,
+                    done and out.strip() == "" and len(asks()) == 1 and s.log_text().count(line) - n0 == 1,
+                    "%d %r %s" % (len(asks()), line, s.log_text()[-400:]))
         # Two tunnels hold it: one round is one rid for both, sent at once (the slower tunnel's answer
         # does not hold back the other's copy; its link file sorts first).
         tun2, tctl2 = s.spawn_mock()
@@ -4199,7 +4674,7 @@ def t_v2_sessions(s):
 
 
 def t_v2_mux(s):
-    """SimpleTerm if/event-v2#common-fields, if/hook-events#identification: `mux` and `pane` from the hook
+    """SimpleTerm if/event-v2#common-fields, if/hook-events-identification#identification: `mux` and `pane` from the hook
     environment (herdr: HERDR_ENV=1 with HERDR_PANE_ID; tmux and screen first, as the nearer multiplexer),
     `pane` right after `mux`, the same on the relay and the tunnel and in the tunnel's states; the session
     record names the multiplexer but never the pane (SimpleTerm if/session-record#fields, hist/session-record#d25)."""
@@ -4306,7 +4781,7 @@ def t_v2_mux(s):
 
 
 def t_v2_versions(s):
-    """SimpleTerm if/hook-events#version-cache: the agent's version where the agent gives none: `--version`, run in the background
+    """SimpleTerm if/hook-events-identification#version-cache: the agent's version where the agent gives none: `--version`, run in the background
     when the executable is new or newer than the cache (SimpleTerm hist/event-v2#d13); the first dotted number is taken."""
     if s.kind != "sh":
         return
@@ -4735,16 +5210,16 @@ def copies_check():
 
 
 TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t_timeout, t_multi_link,
-         t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_work_7501, t_question_while_background, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_done_delay, t_background_events_and_badges, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
+         t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_work_7501, t_question_while_background, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_schedule_end, t_done_delay, t_background_events_and_badges, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js,
          t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_usage_ask_gate, t_conf_vectors, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_held, t_v2_not_sent,
-         t_v2_state, t_v2_sessions, t_v2_mux, t_v2_opencode_js, t_copilot_hooks, t_copilot,
+         t_v2_state, t_v2_sessions, t_v2_mux, t_v2_opencode_js, t_copilot_hooks, t_copilot, t_copilot_schedules,
          t_v2_versions, t_v2_claude_question_once]
 
 # Tests of the sh hook only (scripts and behaviour the PowerShell hook does not have).
-SH_ONLY = {"t_v2_versions", "t_v2_n10", "t_v2_opencode_js", "t_copilot_hooks", "t_copilot", "t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_delivery", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_notify_no_tty", "t_cli_wrapper",
+SH_ONLY = {"t_v2_versions", "t_v2_n10", "t_v2_opencode_js", "t_copilot_hooks", "t_copilot", "t_copilot_schedules", "t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_delivery", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_notify_no_tty", "t_cli_wrapper",
            "t_agy", "t_agy_paths", "t_opencode_sh", "t_opencode_js"}
 
 

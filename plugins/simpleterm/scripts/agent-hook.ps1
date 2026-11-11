@@ -2037,7 +2037,7 @@ function Get-TopVersion([string]$s) {
     return ''
 }
 
-# AV and AVS: the agent's version and where it came from (SimpleTerm if/hook-events#identification).
+# AV and AVS: the agent's version and where it came from (SimpleTerm if/hook-events-identification#identification).
 function Get-AgentVersion {
     $Script:AV = ''
     $Script:AVS = ''
@@ -2129,7 +2129,7 @@ function Initialize-Common {
 }
 
 # The multiplexer the agent runs in and the id of its pane there (SimpleTerm
-# if/event-v2#common-fields, if/hook-events#identification), as mux_detect in
+# if/event-v2#common-fields, if/hook-events-identification#identification), as mux_detect in
 # agent-hook.sh: $Script:MuxV (tmux, screen, herdr or empty) and $Script:PaneV
 # (empty when none may be sent). tmux and screen come first: herdr drops TMUX,
 # TMUX_PANE and STY from its panes, so with both the other one is nearer.
@@ -2459,11 +2459,16 @@ function Write-SessTurn([string]$state, [string]$prompt) {
 
 # $Script:UsageSeq is the JSON-escaped usage OSC to append, if any;
 # $Script:BgSeq the hook's OSC 7501 record for background work.
-function Write-State([string]$state, [string]$message) {
+# $first is a value written just before the state, in the same output: an app
+# that does not know the state drops it and is left with that one
+# (SimpleTerm if/terminal-signals#structured).
+function Write-State([string]$state, [string]$message, [string]$first = '') {
     if ($Script:Agent -cne 'claude' -or $env:SIMPLETERM -ne '1') { return }
     $m = ''
     if ($message) { $m = ' ' + (Limit-Json $message 80 320) }
-    Write-Out ('{"terminalSequence":"\u001b]9;simpleterm:state=' + $state + $m + '\u0007' + $Script:BgSeq + $Script:UsageSeq + '"}')
+    $p = ''
+    if ($first) { $p = '\u001b]9;simpleterm:state=' + $first + '\u0007' }
+    Write-Out ('{"terminalSequence":"' + $p + '\u001b]9;simpleterm:state=' + $state + $m + '\u0007' + $Script:BgSeq + $Script:UsageSeq + '"}')
 }
 
 function Write-UsageOnly {
@@ -3244,7 +3249,7 @@ function New-AskPsi([string]$exe, [string]$argLine) {
 # The version of agent executable $exe, which the ask would run (SimpleTerm if/usage-ask#conditions condition 6, hist/usage-ask#d21, hist/usage-ask#d22; ask_bin_version): @{ bv; exe }, exe the file that the
 # ask then runs. Its links are followed to the end: .../versions/<version> (a
 # native Claude Code install) gives the version. Otherwise run/ver.<agent>
-# (SimpleTerm hist/event-v2#d13, if/hook-events#version-cache: that file's path, and its --version's first dotted
+# (SimpleTerm hist/event-v2#d13, if/hook-events-identification#version-cache: that file's path, and its --version's first dotted
 # number or an empty line if it gave none) is used for the same file while the
 # file is not newer: `unknown` if it holds no version. Else a child measures it
 # again (15 seconds at most) and bv stays '': no ask this turn.
@@ -4152,18 +4157,39 @@ function Get-RqWindow([int]$agentPid) {
     if ($wat -cnotmatch '\A[0-9]+\z') { $wat = '' }
     # Not read (no file yet, or caught while it was written): not known.
     if (-not $wst -or -not $wat) { return 2 }
-    $open = ($Script:RawSid -and $wsid -ceq $Script:RawSid -and $wst -ceq 'waiting' -and $wfor -ceq 'permission prompt')
+    # The value of the window kind (SimpleTerm if/ssh-tunnel-wait#open-window): `permission prompt` for every
+    # permission request, and for a question (AskUserQuestion) also `input needed` (Claude Code 2.1.322;
+    # 2.1.316 and 2.1.317 wrote `permission prompt`). 0 a window of this tool, 1 no wait of this session,
+    # 3 a wait with a value of no window of this tool (Set-RqUnknown; the caller logs it and stops).
+    $kind = 1
+    if ($Script:RawSid -and $wsid -ceq $Script:RawSid -and $wst -ceq 'waiting') {
+        if ($wfor -ceq 'permission prompt') { $kind = 0 }
+        elseif ($wfor -ceq 'input needed' -and $Script:Tool -ceq 'AskUserQuestion') { $kind = 0 }
+        else { $kind = 3 }
+    }
     if (-not $Script:RqWat) {
-        if (-not $open) { return 2 }
+        if ($kind -eq 1) { return 2 }
         # The window shown when the hook started (it starts 5 to 45 ms after
-        # Claude records it, 3 ms before at the earliest [measured 2.1.316]): a
-        # later one may come after the user answered this request.
+        # Claude records it, 3 ms before at the earliest [measured 2.1.316]; 52
+        # to 100 ms on 2.1.322): a later one may come after the user answered
+        # this request.
         if ([int64]$wat -gt ($Script:RqStart + 2) * 1000) { return 1 }
+        if ($kind -eq 3) { Set-RqUnknown $wfor; return 3 }
         $Script:RqWat = $wat
         if ($Script:RqMark) { [void](Write-FileB $Script:RqMark ($wat + "`n")) }
     }
-    if (-not ($open -and $wat -ceq $Script:RqWat)) { return 1 }
+    if ($wat -cne $Script:RqWat) { return 1 }
+    if ($kind -eq 3) { Set-RqUnknown $wfor; return 3 }
+    if ($kind -ne 0) { return 1 }
     return (Get-RqAlone)
+}
+
+# The waitingFor value for the log (SimpleTerm if/ssh-tunnel-wait#open-window): only ASCII letters, digits,
+# spaces and . _ -, at most 40 characters (rq_unknown).
+function Set-RqUnknown([string]$v) {
+    $v = [regex]::Replace($v, '[^A-Za-z0-9 ._-]', '')
+    if ($v.Length -gt 40) { $v = $v.Substring(0, 40) }
+    $Script:RqUnk = $v
 }
 
 # Whether no other permission hook of this session waits on the same window
@@ -4208,6 +4234,11 @@ function Test-RqHeld($links, [int64]$start, [int]$agentPid) {
     if ([DateTime]::UtcNow -lt $Script:RqHeldNext) { return $true }
     $Script:RqHeldNext = [DateTime]::UtcNow.AddSeconds(1)
     $hw = Get-RqWindow $agentPid
+    if ($hw -eq 3) {
+        Write-Log ('held: unknown waitingFor "' + $Script:RqUnk + '" for ' + $Script:Tool + ' (stop)')
+        foreach ($L in $held) { $L.held = $false }
+        return $false
+    }
     if ($hw -eq 2) {
         # Not known: a few seconds for the agent to record its window, then a
         # few reads that fail in a row; nothing is sent meanwhile.
@@ -4251,6 +4282,11 @@ function Test-RqHeld($links, [int64]$start, [int]$agentPid) {
     if ($agentPid -gt 0 -and $null -eq (Get-Process -Id $agentPid -ErrorAction SilentlyContinue)) { return $true }
     $hw = Get-RqWindow $agentPid
     if ($hw -eq 2) { return $true }
+    if ($hw -eq 3) {
+        Write-Log ('held: unknown waitingFor "' + $Script:RqUnk + '" for ' + $Script:Tool + ' (stop)')
+        foreach ($L in $held) { $L.held = $false }
+        return $false
+    }
     if ($hw -ne 0) {
         Write-Log 'held: the window is not open (stop)'
         foreach ($L in $held) { $L.held = $false }
@@ -4349,6 +4385,7 @@ function Invoke-RequestFlow([string]$ev, [string]$mode) {
     $Script:RqAgain = $start + 5
     $Script:RqStart = $start
     $Script:RqWat = ''
+    $Script:RqUnk = ''
     $Script:RqMiss = 0
     $Script:RqHeldNext = [DateTime]::MinValue
     # This session's waiting permission hooks, for Get-RqAlone.
@@ -5038,9 +5075,13 @@ function Get-PromptSum([string]$text) {
 # sentinel, or the prompt of a wake-up listed at the last Stop (session_crons)
 # says so. Grok Build has no such field: the prompt id of a turn it starts
 # itself begins with a fixed word (static, from the 1.0.70 binary), a
-# person's is a UUID.
+# person's is a UUID. PromptSched: the schedule a Grok subagent-completed-
+# turn names (scheduler_delete("<id>")), for its Stop.
 function Set-PromptOrigin {
     $by = 'user'
+    $rid = ''
+    $report = $false
+    $Script:PromptSched = ''
     if ($Script:Agent -ceq 'grok') {
         $p = $Script:PromptId
         foreach ($x in @('task-completed-', 'bash-completed-', 'monitor-completed-', 'subagent-completed-', 'workflow-completed-')) {
@@ -5050,6 +5091,26 @@ function Set-PromptOrigin {
         foreach ($x in @('parent-agent-message-', 'parent-message-', 'notifications-', 'goal-summary-', 'goal-classifier-nudge-', 'plan-resume-')) {
             if ($p.StartsWith($x, $Ord)) { $by = 'agent' }
         }
+        # Grok 1.0.77 runs each scheduled run as a background subagent: the
+        # turn its result opens says how to drop the schedule (measured;
+        # SimpleTerm if/hook-events-turn#turn-end). Its Stop decides.
+        # (The prompt's quotes may still be JSON-escaped: scheduler_delete(\"<id>\").)
+        $pat = 'scheduler_delete('
+        $at = $Script:Prompt.IndexOf($pat, $Ord)
+        if ($p.StartsWith('subagent-completed-', $Ord) -and $at -ge 0) {
+            $rest = $Script:Prompt.Substring($at + $pat.Length)
+            if ($rest.StartsWith('\', $Ord)) { $rest = $rest.Substring(1) }
+            if ($rest.StartsWith('"', $Ord)) {
+                $rest = $rest.Substring(1)
+                $end = $rest.IndexOfAny([char[]]@('"', '\'))
+                if ($end -gt 0 -and $end -le 128) {
+                    $id = $rest.Substring(0, $end)
+                    if ($id -cmatch '\A[A-Za-z0-9._-]+\z') { $Script:PromptSched = $id }
+                }
+            }
+        }
+        if ($p.StartsWith('task-completed-', $Ord)) { $rid = $p.Substring(15); $report = $true }
+        elseif ($p.StartsWith('subagent-completed-', $Ord)) { $rid = $p.Substring(19); $report = $true }
     } else {
         $src = $Script:Src
         $pr = $Script:Prompt
@@ -5066,30 +5127,95 @@ function Set-PromptOrigin {
                 if ($null -ne $t -and (Split-Words $t) -ccontains (Get-PromptSum $pr)) { $by = 'schedule' }
             }
         } else { $by = 'agent' }
+        # The task a <task-notification> reports on (its <task-id>, the id of
+        # the background_tasks item), whatever the source says.
+        $a = $pr.IndexOf('<task-id>', $Ord)
+        if ($pr.StartsWith('<task-notification>', $Ord) -and $a -ge 0) {
+            $r = $pr.Substring($a + 9)
+            $b = $r.IndexOf('</task-id>', $Ord)
+            if ($b -gt 0) { $rid = $r.Substring(0, $b) }
+        }
+        if ($pr.StartsWith('<task-notification>', $Ord)) { $report = $true }
+    }
+    # A report prompt (Write-TurnMark: one that comes while a turn is open does
+    # not start a turn; SimpleTerm hist/turn-state#d16).
+    $Script:PromptReport = $report
+    $ridOk = ($rid -and $rid.Length -le 128 -and $rid -cmatch '\A[A-Za-z0-9._:-]+\z')
+    # A report on work a scheduled turn started is the schedule's turn too
+    # (SimpleTerm spec/turn-state#background, hist/turn-state#d14).
+    if ($ridOk -and ($by -ceq 'task' -or $by -ceq 'agent')) {
+        $t = Read-FileB (Join-Path $RunDir ($Script:Sid + '.schedtasks'))
+        if ($null -ne $t -and (Split-Words $t) -ccontains $rid) { $by = 'schedule' }
     }
     $Script:PromptBy = $by
     $Script:PromptUser = ($by -ceq 'user')
 }
 
+# $Sid.schedtasks: the ids of the background work a scheduled turn started, so
+# that the turn its report starts is the schedule's too (SimpleTerm
+# spec/turn-state#background, hist/turn-state#d14), a chain included. Set at
+# each Stop, after the turn is judged: a scheduled turn adds the ids that were
+# not running when it began, and the newest 32 are kept; a Stop with no
+# schedule left, and the session's end, remove the file. The same as
+# sched_tasks in agent-hook.sh.
+function Update-SchedTasks {
+    $f = Join-Path $RunDir ($Script:Sid + '.schedtasks')
+    if ($Script:CronN -eq 0) { Remove-FileQ $f; return }
+    $keep = New-Object 'System.Collections.Generic.List[string]'
+    $t = Read-FileB $f
+    if ($null -ne $t) { foreach ($i in (Split-Words $t)) { if ($i -cmatch '\A[A-Za-z0-9._:-]+\z') { $keep.Add($i) } } }
+    if ($Script:TurnBy -ceq 'schedule') {
+        $prev = Split-Words $Script:PrevIds
+        foreach ($i in (Split-Words $Script:BgIds)) {
+            if ($i -cmatch '\A[A-Za-z0-9._:-]+\z' -and $prev -cnotcontains $i -and -not $keep.Contains($i)) { $keep.Add($i) }
+        }
+    }
+    while ($keep.Count -gt 32) { $keep.RemoveAt(0) }
+    if ($keep.Count -gt 0) { [void](Write-FileB $f (($keep -join ' ') + "`n")) } else { Remove-FileQ $f }
+}
+
 # $Sid.turn: line 1 who started this turn, line 2 the ids of the background
 # tasks that already ran when it started ($Sid.stopids, the last Stop's list),
-# for the Stop that ends it.
+# line 3 the schedule the prompt names (PromptSched), for the Stop that ends it;
+# line 4 `open` until the turn ends (Close-TurnMark). A report prompt (Claude
+# Code's <task-notification>, Grok Build's task-completed- and
+# subagent-completed-) that comes while the turn is open does not start a turn:
+# the mark stays (SimpleTerm hist/turn-state#d16). The same as turn_mark in
+# agent-hook.sh.
 function Write-TurnMark {
+    $turnFile = Join-Path $RunDir ($Script:Sid + '.turn')
+    if ($Script:PromptReport -and ($Script:Agent -ceq 'claude' -or $Script:Agent -ceq 'grok') -and
+        (Read-LineB $turnFile 3) -ceq 'open') { return }
     $ids = Read-LineB (Join-Path $RunDir ($Script:Sid + '.stopids')) 0
     $who = $Script:PromptBy
     if ($Script:PromptUser) { $who = 'user' }
-    [void](Write-FileB (Join-Path $RunDir ($Script:Sid + '.turn')) ($who + "`n" + $ids + "`n"))
+    [void](Write-FileB $turnFile ($who + "`n" + $ids + "`n" + $Script:PromptSched + "`nopen`n"))
+}
+
+# The turn is over (Stop, StopFailure, Esc): the mark loses its `open` line.
+function Close-TurnMark {
+    $turnFile = Join-Path $RunDir ($Script:Sid + '.turn')
+    if (-not [IO.File]::Exists($turnFile)) { return }
+    $l = @((Read-LineB $turnFile 0), (Read-LineB $turnFile 1), (Read-LineB $turnFile 2))
+    [void](Write-FileB $turnFile (($l -join "`n") + "`n"))
 }
 
 # TurnAt: @-parameters of the end of a turn (SimpleTerm if/event-v2-turn#turn):
 # end, asks (true|false), late. Who started the turn is the turn's mark; the
 # background tasks and schedules come from the event's facts.
-function Set-TurnAt([string]$end, [string]$asks, [string]$late) {
-    $t = '@.turn' + $Tab + 's' + $Tab + '1' + $Nl + '@.end' + $Tab + 's' + $Tab + $end + $Nl
+function Get-TurnBy {
+    # Who started the turn that ends now (SimpleTerm if/event-v2-turn#fields
+    # `by`): the turn's mark, unknown when its start was not seen.
     $tb = $Script:TurnBy
     if (-not $tb) { $tb = Read-LineB (Join-Path $RunDir ($Script:Sid + '.turn')) 0 }
     if ($tb -ceq 'auto') { $tb = 'agent' }
     elseif (@('user', 'task', 'schedule', 'agent') -cnotcontains $tb) { $tb = 'unknown' }
+    return $tb
+}
+
+function Set-TurnAt([string]$end, [string]$asks, [string]$late) {
+    $t = '@.turn' + $Tab + 's' + $Tab + '1' + $Nl + '@.end' + $Tab + 's' + $Tab + $end + $Nl
+    $tb = Get-TurnBy
     $t += '@.by' + $Tab + 's' + $Tab + $tb + $Nl
     if ($asks) { $t += '@.asks' + $Tab + 's' + $Tab + $asks + $Nl }
     if ($Script:Last) { $t += '@.last' + $Tab + 's' + $Tab + $Script:Last + $Nl }
@@ -5149,13 +5275,14 @@ function Complete-BgIds {
 }
 
 # One field of a scheduled wake-up (Stop `session_crons`, Grok `sessionCrons`):
-# how many, the first one's schedule, and a checksum of each prompt.
+# how many, the first one's schedule, each id, and a checksum of each prompt.
 function Add-CronField([string]$p, [string]$v) {
     $d1 = $p.IndexOf('.')
     $d2 = $p.IndexOf('.', $d1 + 1)
     $ck = [int]$p.Substring($d1 + 1, $d2 - $d1 - 1)
     $cf = $p.Substring($d2 + 1)
     if ($ck + 1 -gt $Script:CronN) { $Script:CronN = $ck + 1 }
+    if ($cf -ceq 'id' -and $v) { $Script:CronIds += ' ' + $v }
     if ($cf -ceq 'schedule' -and $ck -eq 0) { $Script:CronSched = $v }
     if ($cf -ceq 'prompt' -and $v) { $Script:CronSums += ' ' + (Get-PromptSum $v) }
 }
@@ -5309,38 +5436,65 @@ function Invoke-StopDone([string]$what) {
     if ($Script:StopAct -ceq 'true') { $Script:XFlags = ',"stop_hook_active":true' }
     Set-TurnAt 'done' $Script:Tasks ''
     Initialize-V2 $Script:TurnAt
-    Send-DoneLater
+    $sd = 'done'
+    if ((Get-TurnBy) -ceq 'schedule' -and $Script:Tasks -cne 'true') {
+        # The last turn a schedule started, not one that ended asking
+        # (SimpleTerm spec/turn-state#scheduled): no alert anywhere. The
+        # tunnels only (the app lists it), at once (no alert waits on it), and
+        # the screen says it was a scheduled turn so that the agent's own 7501
+        # done stays quiet too.
+        $sd = 'done_scheduled'
+        Send-Background 'done' '' 'tunnel'
+    } else {
+        Send-DoneLater
+    }
     # The turn's done is sent (or pending): Claude Code's idle_prompt, 60 s
     # later, repeats it (the next turn note takes the mark back).
     [void](Write-FileB (Join-Path $RunDir ($Script:Sid + '.done')) '')
     Invoke-UsageReport
-    Write-State 'done' ''
+    Write-State $sd ''
     Invoke-TurnEnd
 }
 
 # A Stop (Claude Code, Codex, Grok): done, or not yet. Not done while the agent
 # waits for work it started or for a schedule, unless a person typed this turn
 # and only work that ran before it is left, only services are left, or the
-# last message asks the user something (then they are told). A turn the agent
-# started itself while a schedule (/loop, cron) is set stays quiet:
-# background with "scheduled: ...". The same as stop_flow in agent-hook.sh.
+# last message asks the user something (then they are told). A turn a schedule
+# started while a schedule (/loop, cron) is still set stays quiet: background
+# with "scheduled: ..."; any other turn with no work left ends in done though a
+# schedule is set. The same as stop_flow in agent-hook.sh.
 function Invoke-StopFlow {
     $Script:TurnUser = $true
     $Script:PrevIds = ''
     $Script:TurnBy = ''
     $turnFile = Join-Path $RunDir ($Script:Sid + '.turn')
+    $t3 = ''
     if ([IO.File]::Exists($turnFile)) {
         $t1 = Read-LineB $turnFile 0
         $t2 = Read-LineB $turnFile 1
+        $t3 = Read-LineB $turnFile 2
         if ($t1 -and $t1 -cne 'user') { $Script:TurnUser = $false }
         $Script:TurnBy = $t1
         $Script:PrevIds = $t2
+        Close-TurnMark
     }
+    # Grok: a subagent-completed- turn whose prompt names one of the session's
+    # sessionCrons (this Stop's, or the last Stop's when the turn dropped it)
+    # is the result of a scheduled run (SimpleTerm if/hook-events-turn#turn-end;
+    # the same as stop_flow in agent-hook.sh).
+    $idFile = Join-Path $RunDir ($Script:Sid + '.cronids')
+    if ($Script:TurnBy -ceq 'task' -and $t3) {
+        $ids = $Script:CronIds + ' ' + (Read-LineB $idFile 0)
+        if ((Split-Words $ids) -ccontains $t3) { $Script:TurnBy = 'schedule' }
+    }
+    if ($Script:CronIds) { [void](Write-FileB $idFile ($Script:CronIds + "`n")) }
+    else { Remove-FileQ $idFile }
     Complete-BgIds
     [void](Write-FileB (Join-Path $RunDir ($Script:Sid + '.stopids')) ($Script:BgIds + "`n"))
     $cronFile = Join-Path $RunDir ($Script:Sid + '.crons')
     if ($Script:CronN -gt 0) { [void](Write-FileB $cronFile ($Script:CronSums + "`n")) }
     else { Remove-FileQ $cronFile }
+    Update-SchedTasks
     $Script:Tasks = 'false'
     if (Test-AskText $Script:Last) { $Script:Tasks = 'true' }
     if ($Script:BgN -eq 0 -and $Script:CronN -eq 0) { Invoke-StopDone ''; return }
@@ -5349,7 +5503,10 @@ function Invoke-StopFlow {
         if ($Script:BgN -gt 0) { Invoke-StopDone $Script:BgM } else { Invoke-StopDone '' }
         return
     }
-    if ($Script:BgN -gt 0 -and $Script:BgSvc -eq $Script:BgN -and ($Script:CronN -eq 0 -or $Script:TurnUser)) {
+    # Only a turn a schedule started waits for the schedule: one a task's
+    # report or the agent started ends here when no work of its own is left.
+    if ($Script:BgN -eq 0 -and $Script:TurnBy -cne 'schedule') { Invoke-StopDone ''; return }
+    if ($Script:BgN -gt 0 -and $Script:BgSvc -eq $Script:BgN -and ($Script:CronN -eq 0 -or $Script:TurnBy -cne 'schedule')) {
         Get-BgSummary
         Invoke-StopDone $Script:BgM
         return
@@ -5585,6 +5742,7 @@ function Invoke-Event {
             Write-State 'idle' ''
             Set-TurnAt 'interrupt' '' ''
             Send-State 'idle' $Script:TurnAt
+            Close-TurnMark
             Write-SessTurn 'idle' ''
             return
         }
@@ -5612,6 +5770,8 @@ function Invoke-Event {
     }
     if ($ev -ceq 'claude:SessionEnd' -or $ev -ceq 'grok:SessionEnd' -or $ev -ceq 'codex:SessionEnd') {
         $since = [DateTime]::UtcNow
+        Remove-FileQ (Join-Path $RunDir ($Script:Sid + '.schedtasks'))
+        Remove-FileQ (Join-Path $RunDir ($Script:Sid + '.cronids'))
         # The record first: Codex gives this hook 3 seconds at most and then
         # ends it (0.165.0, measured).
         Stop-Sess $since
@@ -5676,7 +5836,11 @@ function Invoke-Event {
         Initialize-V2 $Script:TurnAt
         Send-Background $e
         Invoke-UsageReport
-        Write-State 'done' ''
+        # The turn failed (SimpleTerm spec/turn-state): the error badge and its
+        # alert, which the event above pairs with. 'idle' first: an app older
+        # than 'error' drops it and only clears the badge, no green done.
+        Write-State 'error' '' 'idle'
+        Close-TurnMark
         Write-SessTurn 'idle' ''
         return
     }
@@ -5768,7 +5932,23 @@ function Invoke-Event {
             Initialize-V2 $Script:TurnAt
             Send-Background $e
             Invoke-TurnEnd
+            Close-TurnMark
         }
+        Write-SessTurn 'idle' ''
+        return
+    }
+    if ($ev -ceq 'grok:StopCancelled') {
+        # Grok 1.0.77 runs StopCancelled instead of Stop when a turn ends
+        # without completing (Ctrl+C: reason user_interrupt; measured): the turn
+        # is over, as at Claude Code's Esc (SimpleTerm hist/turn-state#d16).
+        # The same as agent-hook.sh.
+        $key = (Get-Sha256Hex ($Script:HookEvent + '|' + $Script:Sid + '|' + $Script:GKey + '|' + $Script:Reason)).Substring(0, 16)
+        if (-not (Test-Once $key)) { return }
+        Add-Note 'turn' ''
+        Write-State 'idle' ''
+        Set-TurnAt 'interrupt' '' ''
+        Send-State 'idle' $Script:TurnAt
+        Close-TurnMark
         Write-SessTurn 'idle' ''
         return
     }
@@ -5951,7 +6131,7 @@ try {
     }
     foreach ($v in @('HookEvent', 'NType', 'Tool', 'Detail', 'Desc', 'Sid', 'Cwd', 'Last', 'Err', 'QText', 'FirstIn', 'NType2', 'TPath',
             'CtxTok', 'Model', 'GKey', 'Reason', 'Prompt', 'Src', 'StopAct', 'IsInt', 'AgentId', 'PromptId', 'ToolUseId', 'SubType', 'SubPar',
-            'Tid', 'PMode', 'BgPick', 'BgType', 'BgDesc', 'BgCmd', 'BgShells', 'BgSvcIdx', 'BgIds', 'CronSched', 'CronSums', 'BgM')) {
+            'Tid', 'PMode', 'BgPick', 'BgType', 'BgDesc', 'BgCmd', 'BgShells', 'BgSvcIdx', 'BgIds', 'CronSched', 'CronSums', 'CronIds', 'PromptSched', 'PromptReport', 'BgM')) {
         Set-Variable -Name $v -Value '' -Scope Script
     }
     $Script:BgN = 0
@@ -5971,6 +6151,7 @@ try {
         if ($Script:HookEvent -ceq 'notification') { $Script:HookEvent = 'Notification' }
         elseif ($Script:HookEvent -ceq 'stop') { $Script:HookEvent = 'Stop' }
         elseif ($Script:HookEvent -ceq 'stop_failure') { $Script:HookEvent = 'StopFailure' }
+        elseif ($Script:HookEvent -ceq 'stop_cancelled') { $Script:HookEvent = 'StopCancelled' }
         elseif ($Script:HookEvent -ceq 'user_prompt_submit') { $Script:HookEvent = 'UserPromptSubmit' }
     }
     $Script:RawSid = $Script:Sid

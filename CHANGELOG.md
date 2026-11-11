@@ -2,8 +2,26 @@
 
 ## Unreleased
 
+A held Claude Code question is told again on Claude Code 2.1.322 too (SimpleTerm
+`if/ssh-tunnel-wait#open-window`, `hist/request-wait-link#d7`, issue AhMunGa/simple-term#446).
+
+- **The window value per kind**: Claude Code 2.1.322 writes `waitingFor: "input needed"` in its session
+  file for a question window (`AskUserQuestion`); 2.1.316 and 2.1.317 wrote `permission prompt`
+  (`hist/event-v2-request#e32`). The open-window check before telling a held request again took only
+  `permission prompt`, so on 2.1.322 a held question was not told again (the hook ended with
+  `held: the window is not open`). Now a question takes `permission prompt` or `input needed`, and every
+  other permission request (approval, plan, `Workflow`) still only `permission prompt`. The version is not
+  read; the other conditions stay (same `sessionId`, `waiting`, the first value at most 2 s after the hook
+  started, `statusUpdatedAt` unchanged, the parallel-call marks).
+- **An unknown value is logged once**: when the session waits with a `waitingFor` that is no value of the
+  request's tool, the hook tells nothing again and writes one line to its log on the server:
+  `held: unknown waitingFor "<value>" for <tool> (stop)` (the value keeps only ASCII letters, digits,
+  spaces and `.`, `_`, `-`, cut at 40 characters). A new Claude Code version that writes another value
+  shows up there.
+- The same in `agent-hook.ps1` and in every plugin's copy of `agent-hook.sh`. Nothing on the wire changes.
+
 Agents inside herdr, and the pane an agent runs in (SimpleTerm `if/event-v2#common-fields`,
-`if/hook-events#identification`, issue AhMunGa/simple-term#612): the app's agent session list can
+`if/hook-events-identification#identification`, issue AhMunGa/simple-term#612): the app's agent session list can
 tie an alert or a request to a herdr or tmux session row whose session id it does not know yet
 (before an agent's first prompt, or Copilot CLI after `/clear`).
 
@@ -28,6 +46,95 @@ tie an alert or a request to a herdr or tmux session row whose session id it doe
   With an older plugin a newer app ties rows by session id only.
 - Outside herdr, tmux and screen the events and records are byte for byte those of 0.5.1 (the shared
   fixtures); inside tmux the events gain `pane`.
+
+The install commands here and in the SimpleTerm app are the same, or the README says why not
+(SimpleTerm `if/cmd-plugin-installer#commands`, `hist/cmd-plugin-installer#d6`, issue
+AhMunGa/simple-term#470). No hook changed.
+
+- **Copilot CLI from a marketplace**: a catalog of its own, `.github/plugin/marketplace.json`
+  (marketplace `simpleterm-agent-hooks`, only `simpleterm-copilot`), so
+  `copilot plugin install simpleterm-copilot@simpleterm-agent-hooks` works after
+  `copilot plugin marketplace add AhMunGa/simpleterm-agent-hooks`. Copilot reads that file before
+  `.claude-plugin/marketplace.json`; Claude Code and Codex do not read it and list no Copilot plugin
+  (measured: Copilot CLI 1.0.108, Claude Code 2.1.322, Codex 0.167.0; SimpleTerm
+  `if/plugin-locations#distribution`, `hist/plugin-locations#d2`). The direct install still works,
+  but Copilot 1.0.108 says direct installs are deprecated.
+- **README**: Grok Build's and OpenCode 2.x's arguments are in double quotes (unquoted, zsh with
+  `extendedglob` stops at the `#` and csh drops everything after it, `--trust` too); Gemini CLI
+  makes `~/.simpleterm` owner-only (`mkdir -p -m 700`) and passes `--skip-settings`, as the app
+  does; the Antigravity copy install makes the same folder first; OpenCode 1.x first removes the
+  links an earlier SimpleTerm app made into `~/.simpleterm/src` (`curl -o` would write through
+  them). Running an install again changes nothing, but Gemini CLI and Grok Build exit 1 then.
+
+The end of a turn a schedule started (SimpleTerm `spec/turn-state#scheduled`,
+`if/hook-events-turn#background`, issue AhMunGa/simple-term#469):
+
+- **The last scheduled turn is quiet**: the `Stop` that finds no schedule left after a turn a
+  schedule started (`/loop`, `ScheduleWakeup`, CronCreate; Grok Build `scheduler-fired-`) sends its
+  `done` (`turn.by: schedule`) to the tunnels only and at once (no `done_delay`: no alert waits on
+  it), nothing to the relay, and Claude Code's screen gets the new state value
+  `simpleterm:state=done_scheduled` (`if/terminal-signals#structured`), so the app lists the result
+  without an alert and keeps Claude's own OSC 7501 `done` quiet too. A turn that ended asking
+  (`turn.asks`) is still a plain `done` on the screen, the tunnels and the relay. An older app drops
+  the new value and alerts on the agent's own `done` as before.
+- **A task's turn ends while a schedule is set**: only a turn a schedule started waits for the
+  schedule; a turn a task's report (or the agent) started ends in `done` when none of its work is
+  left (`spec/turn-state#background`). Before, a set schedule kept it quiet.
+- **Grok Build's scheduled runs** (`if/hook-events-turn#turn-end`, measured on 1.0.77): each run is
+  a background subagent, and the turn its result opens starts with `subagent-completed-` like any
+  subagent's report. That turn is the schedule's when its prompt names (`scheduler_delete("<id>")`)
+  a schedule of the `Stop`'s `sessionCrons` or of the previous `Stop`'s (a run whose turn drops the
+  schedule ends with none): no `done` per run, and the last one goes to the tunnels only. With the
+  rule above alone each run sent a `done`. Grok has no one-shot schedule.
+- **Copilot CLI's scheduled turns** (`/every`, alias `/loop`, and `/after`, an experimental
+  feature; `if/hook-events-turn#turn-end`): a prompt that starts with `[Scheduled prompt #<id>]` is
+  a turn a schedule started (the hook input has no `source`, measured on 1.0.109), and the schedules
+  left at `agentStop` are counted from `events.jsonl` (`session.schedule_created` less
+  `session.schedule_cancelled` and a one-shot whose prompt came). The rules above apply: no `done`
+  while a schedule is set after a scheduled turn, and the last one goes to the tunnels only. A
+  prompt you type that starts with that mark is yours again at `agentStop`: the session's last
+  `user.message` in `events.jsonl` has a `schedule-<id>` source for a run and none when you typed
+  it, written before `agentStop` (`hist/turn-state#d11`). A subagent's own prompt in that file
+  (source `agent-<session id>`, which can come before the main `agentStop`) is not the session's
+  prompt: before, a scheduled run that started a background subagent could read as yours. A
+  one-shot `/after` run (measured on 1.0.109) leaves no schedule at its `agentStop`
+  (`hist/hook-events#e12`). `agent-hook.sh` only: Copilot runs no `agent-hook.ps1`.
+- **The report of work a scheduled turn started is the schedule's** (`spec/turn-state#background`,
+  `if/hook-events-turn#background`, `hist/turn-state#d14`): a `/loop` turn that ran a background
+  agent sent a `done` with each report (the rule above; before #469 it sent nothing), and a Copilot
+  scheduled run's background shell did the same before. A scheduled turn's `Stop` now keeps the ids
+  of the work it started (the newest 32, until no schedule is left or the session ends), and a
+  report turn on one of them ends like a scheduled turn, a report on a report too: Claude Code's
+  `<task-notification>` by its `<task-id>`, Grok Build's `task-completed-` and
+  `subagent-completed-` by the id after it, Copilot's `<system_notification>` by the work the
+  notification that opened the turn names (in `events.jsonl` it follows the main agent's
+  `userPromptSubmitted` hook; a notification of work that ended inside a running turn comes with no
+  such hook and opens none, measured on 1.0.109): a shell (`shell_completed`, its `shellId`), a
+  detached shell (`shell_detached_completed`; the scheduled turn keeps the ids of the detached shells it
+  started, which are no work to wait for), or a background subagent (`agent_idle`, its `agentId`,
+  tied to the `toolCallId` of its `subagent.started`); no `user.message` is written for that turn
+  (measured on 1.0.105 and 1.0.109). A report that comes while a turn runs does not start a turn:
+  Claude Code hands work that ended inside the turn to it as a `<task-notification>` prompt between
+  its tool calls, and the turn keeps who started it (the turn mark `<sid>.turn` has a 4th line
+  `open` until the turn's `Stop`, `StopFailure` or Esc; Claude Code and Grok Build). Before, a
+  `/loop` turn whose background work ended inside it sent a `done`. The report of work
+  your own turn started still ends in `done` (`hist/hook-events#e15`). Codex has no schedules;
+  OpenCode 2.x and Antigravity follow.
+- **Grok Build's cancelled turn ends the turn** (`hist/turn-state#d16`): Grok 1.0.77 runs
+  `StopCancelled` instead of `Stop` when a turn ends without completing (Ctrl+C: `reason`
+  `user_interrupt`, `cancelTrigger` `ctrl_c`; a rejected permission: `permission_rejected`;
+  measured). The hooks file now names it, and the hook ends the turn as at Claude Code's Esc: `state`
+  `idle` with `turn.end: interrupt`, and the turn mark closes, so a report that comes next starts a
+  turn of its own. Before, the plugin did not hear it and the turn stayed open. Claude Code ignores
+  the entry (2.1.322 runs the other hooks of the file; `claude plugin validate` warns "unknown hook
+  event; entry ignored at runtime").
+- **A failed turn shows an error**: Claude Code's `StopFailure` writes `simpleterm:state=idle` and
+  then the new state value `simpleterm:state=error` in the same output, instead of `done` (a failed
+  turn showed a green done badge where Claude does not speak OSC 7501). The app shows the error badge
+  and one error alert, which the `error` event pairs with; a login error is `error` on the screen
+  too while its event stays `auth`. An older app drops `error` and is left with `idle`: the badge is
+  cleared. The `error` or `auth` event is unchanged.
+- The same in `agent-hook.ps1` and in every plugin's copy of `agent-hook.sh`.
 
 ## 0.5.1 - 2026-11-04
 
