@@ -3378,13 +3378,15 @@ function Get-AskSignInSkip([string]$ind) {
     # The file is JSON only if all of it is read and it is one whole object:
     # the facts parser reads a document cut short as far as it goes. (A file
     # over 64 KiB gives no values.) The scan also notes the top-level tokens
-    # value: - none, n null, v another.
+    # value: - none, n null, v another. $stk holds the open brackets: } closes
+    # only {, ] only [. Anything but white space after the root object closed,
+    # or a bracket closing the other kind, is not one whole object.
     $len = -1
     try { if ([IO.File]::Exists($ind)) { $len = (New-Object IO.FileInfo($ind)).Length } } catch { $len = -1 }
     if ($len -lt 0 -or $len -gt 65536) { return $unknown }
     $t = Read-HeadB $ind 65536
     if (-not $t) { return $unknown }
-    $d = 0; $q = $false; $z = $false; $ek = $false; $kq = $false; $vs = $false; $k = ''; $kb = ''; $tv = '-'
+    $d = 0; $stk = ''; $q = $false; $z = $false; $ek = $false; $kq = $false; $vs = $false; $k = ''; $kb = ''; $tv = '-'
     for ($i = 0; $i -lt $t.Length; $i++) {
         $c = $t[$i]
         if ($q) {
@@ -3410,8 +3412,15 @@ function Get-AskSignInSkip([string]$ind) {
             $q = $true
             if ($d -eq 1 -and $ek) { $kq = $true; $kb = ''; $ek = $false }
         }
-        elseif ($c -eq [char]123 -or $c -eq [char]91) { $d++; if ($d -eq 1) { $ek = $true } }
-        elseif ($c -eq [char]125 -or $c -eq [char]93) { $d--; if ($d -eq 0) { $z = $true } }
+        elseif ($c -eq [char]123 -or $c -eq [char]91) { $stk += [string]$c; $d++; if ($d -eq 1) { $ek = $true } }
+        elseif ($c -eq [char]125 -or $c -eq [char]93) {
+            $o = [char]91
+            if ($c -eq [char]125) { $o = [char]123 }
+            if ($stk[$d - 1] -ne $o) { return $unknown }
+            $stk = $stk.Substring(0, $d - 1)
+            $d--
+            if ($d -eq 0) { $z = $true }
+        }
         elseif ($d -eq 1 -and $c -eq [char]44) { $ek = $true }
         elseif ($d -eq 1 -and $c -eq [char]58) { $vs = $true }
     }

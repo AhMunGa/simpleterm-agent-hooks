@@ -4237,6 +4237,17 @@ def t_usage_ask_refresh_vectors(s):
         ("65536 bytes, a past expiresAt", "claude", pad(claude(1800000599000), 65536), "skip"),
         ("cut after an inner }", "claude", raw_claude("1800000599000")[:-1], "ask"),
         ("text after the object", "claude", raw_claude("1800000599000") + " x", "ask"),
+        # Not one whole object: text after it, a second object, a bracket closing the other kind (the values would
+        # skip Claude Code and ask Codex if the file were taken whole).
+        ("text right after the object", "claude", raw_claude("1800000599000") + "x", "ask"),
+        ("text right after the object", "codex", '{"OPENAI_API_KEY":"sk-test","tokens":null}x', "skip"),
+        ("two objects", "claude", raw_claude("1800000599000") + '{"a":1}', "ask"),
+        ("two objects", "codex", '{"OPENAI_API_KEY":"sk-test","tokens":null}{"a":1}', "skip"),
+        ("[ closed by }", "claude", '{"claudeAiOauth":{"expiresAt":1800000599000},"a":[1}]', "ask"),
+        ("[ closed by }", "codex", '{"OPENAI_API_KEY":"sk-test","tokens":null,"a":[1}]', "skip"),
+        ("{ closed by ]", "claude", raw_claude("1800000599000")[:-1] + "]", "ask"),
+        ("{ closed by ]", "codex", v2[:-1] + "]", "skip"),
+        ("nested brackets", "codex", '{"a":[{"b":[1,2]},{"c":{}}],"OPENAI_API_KEY":"sk-test","tokens":null}', "ask"),
         ("braces in a string", "claude", '{"a":"}{\\"","claudeAiOauth":{"expiresAt":1800000599000}}\n', "skip"),
         ("within 64 KiB", "codex", json.dumps({"pad": "x" * 60000, "tokens": {"access_token": ok}}), "ask"),
         # The API key login: tokens missing or null at the top level, the key a non-empty string; last_refresh is not read.

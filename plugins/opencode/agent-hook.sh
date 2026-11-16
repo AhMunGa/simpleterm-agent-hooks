@@ -3949,8 +3949,11 @@ ask_signin_skip() { # credentials-file
   rft= rfs=
   [ -f "$1" ] && rfs=$({ wc -c <"$1"; } 2>/dev/null | tr -d ' ')
   if is_uint "$rfs" && [ "$rfs" -le 65536 ]; then
+    # B holds the open brackets: } closes only {, ] only [. Anything but
+    # white space after the root object closed, or a bracket closing the
+    # other kind, is not one whole object.
     rft=$(awk '{ s = s $0 "\n" } END {
-      n = length(s); d = 0; q = 0; z = 0; ek = 0; kq = 0; vs = 0; k = ""; tv = "-"
+      n = length(s); d = 0; q = 0; z = 0; bad = 0; ek = 0; kq = 0; vs = 0; k = ""; tv = "-"
       for (i = 1; i <= n; i++) {
         c = substr(s, i, 1)
         if (q) {
@@ -3960,18 +3963,21 @@ ask_signin_skip() { # credentials-file
           continue
         }
         if (c == " " || c == "\t" || c == "\r" || c == "\n") continue
-        if (z || (d == 0 && c != "{")) exit 1
+        if (z || (d == 0 && c != "{")) { bad = 1; break }
         if (vs) {
           vs = 0
           if (k == "tokens" && tv == "-") tv = (substr(s, i, 4) == "null" && index(" \t\r\n,}", substr(s, i + 4, 1))) ? "n" : "v"
         }
         if (c == "\"") { q = 1; if (d == 1 && ek) { kq = 1; kb = ""; ek = 0 } }
-        else if (c == "{" || c == "[") { if (++d == 1) ek = 1 }
-        else if (c == "}" || c == "]") { if (--d == 0) z = 1 }
+        else if (c == "{" || c == "[") { B[++d] = c; if (d == 1) ek = 1 }
+        else if (c == "}" || c == "]") {
+          if (B[d] != (c == "}" ? "{" : "[")) { bad = 1; break }
+          if (--d == 0) z = 1
+        }
         else if (d == 1 && c == ",") ek = 1
         else if (d == 1 && c == ":") vs = 1
       }
-      if (z) print "whole " tv }' "$1" 2>/dev/null)
+      if (z && !bad) print "whole " tv }' "$1" 2>/dev/null)
   fi
   case $rft in
     'whole '?) ;;
