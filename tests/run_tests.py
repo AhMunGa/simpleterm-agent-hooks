@@ -6432,30 +6432,39 @@ def ps51_static_check():
     return problems
 
 
+PWSH_TIMEOUT = 60
+
+
 def pwsh_out(pwsh, script):
-    """What `pwsh -Command script` prints, run in a HOME of its own (pwsh writes caches there); '' when it
-    does not run."""
+    """What `pwsh -Command script` prints, run in a HOME of its own (pwsh writes caches there); None when
+    it does not run to the end: it cannot start, takes over PWSH_TIMEOUT s, or exits with an error."""
     home = tempfile.mkdtemp(prefix="st-pwsh-")
     env = {"HOME": home, "PATH": "/usr/bin:/bin", "POWERSHELL_TELEMETRY_OPTOUT": "1", "POWERSHELL_UPDATECHECK": "Off"}
     try:
-        return subprocess.run([pwsh, "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True,
-                              timeout=60, env=env).stdout
+        p = subprocess.run([pwsh, "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True,
+                           timeout=PWSH_TIMEOUT, env=env)
+        return p.stdout if p.returncode == 0 else None
     except (OSError, subprocess.SubprocessError):
-        return ""
+        return None
     finally:
         shutil.rmtree(home, ignore_errors=True)
 
 
 def ps_parse_check(pwsh):
+    """The parse errors in agent-hook.ps1, one line each. A parse that does not run to the end is one too:
+    no output is not a pass."""
     script = ("$e=$null;$t=$null;[void][System.Management.Automation.Language.Parser]::ParseFile('%s',[ref]$t,[ref]$e);"
               "$e | ForEach-Object { $_.Extent.StartLineNumber.ToString() + ': ' + $_.Message }") % HOOK_PS1
-    return [l for l in pwsh_out(pwsh, script).splitlines() if l.strip()]
+    out = pwsh_out(pwsh, script)
+    if out is None:
+        return ["the parse did not run to the end (could not start, over %d s, or exited with an error)" % PWSH_TIMEOUT]
+    return [l for l in out.splitlines() if l.strip()]
 
 
 def pwsh_major(pwsh):
-    """PowerShell's major version, 0 when `pwsh` is not PowerShell (a parse check alone passes anything that
-    prints nothing)."""
-    out = pwsh_out(pwsh, "'PS ' + $PSVersionTable.PSVersion.Major").strip()
+    """PowerShell's major version, 0 when `pwsh` is not PowerShell or does not answer (a parse check alone
+    passes anything that prints nothing)."""
+    out = (pwsh_out(pwsh, "'PS ' + $PSVersionTable.PSVersion.Major") or "").strip()
     return int(out[3:]) if re.fullmatch(r"PS \d+", out) else 0
 
 
@@ -6618,7 +6627,7 @@ def select_environments(args):
         if args.shell:
             # Another shell: every case, or the compat set when only that was asked; OpenSSL 3 (LibreSSL when
             # there is none and none was named).
-            cases = "compat" if sets == ["compat"] else "full"
+            cases = "compat" if set(sets) == {"compat"} else "full"
             kind = "openssl3" if args.openssl or openssl("openssl3") else "libressl"
             envs = [(cases, sh, kind, cases) for sh in args.shell]
         else:
