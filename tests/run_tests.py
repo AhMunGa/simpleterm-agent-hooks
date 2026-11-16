@@ -6646,6 +6646,12 @@ def run_in_own_group(run):
     except OSError:
         pass
     code = 1
+
+    def term(signum, frame):
+        raise KeyboardInterrupt
+    # `timeout` (or any TERM) ends this process: the child's group goes with it (finally below), or it would run on
+    # with nothing reading its output.
+    signal.signal(signal.SIGTERM, term)
     try:
         _, status = os.waitpid(pid, 0)
         code = os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else (status >> 8)
