@@ -6,7 +6,8 @@
 
 The install, update and move commands of the README take the branch `release` (SimpleTerm
 `spec/plugin-update#release`, `if/cmd-plugin-installer#commands`, `if/cmd-plugin-update#commands`,
-`if/ext-plugin-repo#readme-differences`). No hook changed in this step.
+`if/ext-plugin-repo#readme-differences`). Moving to `release` changes no hook; the hook changes since 0.5.1
+are the items below, and they are what 0.6.0 brings.
 
 - **`release` branch**: `release` moves only to a commit that raises the plugin version (Claude Code does not
   receive a new commit that keeps the version). `main` is where work lands and may carry a commit that is not

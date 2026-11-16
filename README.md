@@ -804,7 +804,7 @@ nothing it needs is lost. Run only the agents you use.
 | Codex | `codex plugin marketplace remove simpleterm-agent-hooks`, `codex plugin marketplace add https://github.com/AhMunGa/simpleterm-agent-hooks --ref release`, `codex plugin marketplace upgrade simpleterm-agent-hooks`, then trust the changed hooks again in `codex` |
 | GitHub Copilot CLI | `copilot plugin uninstall simpleterm-copilot@simpleterm-agent-hooks` (a direct install: `copilot plugin uninstall simpleterm-copilot`), `copilot plugin marketplace remove simpleterm-agent-hooks` (after a direct install it may fail, as no marketplace exists yet: go on), `copilot plugin marketplace add "https://github.com/AhMunGa/simpleterm-agent-hooks.git#release"`, `copilot plugin install simpleterm-copilot@simpleterm-agent-hooks` |
 | Gemini CLI | `gemini extensions uninstall simpleterm`, then `cd ~/.simpleterm && gemini extensions install https://github.com/AhMunGa/simpleterm-agent-hooks --ref release --consent --skip-settings` |
-| Antigravity | `git -C ~/.simpleterm/src fetch --depth 1 origin release`, `git -C ~/.simpleterm/src checkout -B release FETCH_HEAD`, `agy plugin install ~/.simpleterm/src/plugins/antigravity` |
+| Antigravity | `git -C ~/.simpleterm/src fetch --depth 1 origin release`, `git -C ~/.simpleterm/src checkout -B release FETCH_HEAD`, `agy plugin install ~/.simpleterm/src/plugins/antigravity` (with no copy, the install commands) |
 | Grok Build | `grok plugin uninstall simpleterm --confirm`, then `grok plugin install "AhMunGa/simpleterm-agent-hooks@release#plugins/simpleterm" --trust` (nothing to do when it uses the Claude Code plugin: move that) |
 | OpenCode 2.x | `opencode plugin remove "github:AhMunGa/simpleterm-agent-hooks#main::path:plugins/opencode"`, then `opencode plugin add "github:AhMunGa/simpleterm-agent-hooks#release::path:plugins/opencode"` |
 | OpenCode 1.x | the install commands (they download from `release`; the app copies the same two files from its `~/.simpleterm/src`, which it moves to `release` first) |
@@ -828,7 +828,7 @@ codex plugin remove simpleterm@simpleterm-agent-hooks
 codex plugin marketplace remove simpleterm-agent-hooks
 gemini extensions uninstall simpleterm
 agy plugin uninstall simpleterm-antigravity
-copilot plugin uninstall simpleterm-copilot
+copilot plugin uninstall simpleterm-copilot@simpleterm-agent-hooks
 copilot plugin marketplace remove simpleterm-agent-hooks
 grok plugin uninstall simpleterm --confirm
 opencode plugin remove "github:AhMunGa/simpleterm-agent-hooks#release::path:plugins/opencode"
@@ -837,7 +837,9 @@ rm -f ~/.config/opencode/plugins/simpleterm.js ~/.config/opencode/plugins/simple
 ```
 
 Run the lines for the agents you installed. The two `opencode plugin remove` lines name the two
-specs: the second is for an install made from `main`; with none it exits 0. To remove the link files, the `simpleterm` command
+specs: the second is for an install made from `main`; with none it exits 0. A Copilot CLI plugin
+installed directly by an earlier README (no marketplace) goes with `copilot plugin uninstall
+simpleterm-copilot` instead of the two Copilot lines. To remove the link files, the `simpleterm` command
 and state too: `rm -rf ~/.simpleterm`, and revoke the link in the app.
 
 **Hooks installed by an earlier SimpleTerm app.** Earlier test builds of the app added the same
