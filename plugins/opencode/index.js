@@ -58,19 +58,38 @@ const shells = (globalThis.__simpletermShells ??= new Map());
 // (payload.metadata.shellID). inbox: inbox id -> {kind, shell}.
 const inbox = (globalThis.__simpletermInbox ??= new Map());
 // The execution of each session that runs or ran last (session id ->
-// {sched, human, shells}): what was delivered to it.
+// {sched, human, shells, ids}): what was delivered to it.
 const execs = (globalThis.__simpletermExecs ??= new Map());
 // The execution that started each background shell (shell id -> execution):
 // the turn its report wakes belongs to whoever started that one.
 const shellExec = (globalThis.__simpletermShellExec ??= new Map());
+// Items enqueued while their session was idle (session id -> inbox ids). An
+// idle session starts an execution for them (enqueued, then
+// execution.started 0-10 ms later [measured 2.2.7]), so they are that
+// execution's even when their session.inbox.delivered does not come.
+const idleQueue = (globalThis.__simpletermIdleQueue ??= new Map());
 const SCHED_ID = /^msg_sch_[A-Za-z0-9]+_\d+$/;
 
 function newExec(sessionID) {
-  const e = { sched: 0, human: 0, shells: [] };
+  const e = { sched: 0, human: 0, shells: [], ids: new Set() };
   execs.delete(sessionID);
   execs.set(sessionID, e);
   if (execs.size > 500) execs.delete(execs.keys().next().value);
   return e;
+}
+
+// Counts one inbox item in an execution, once (an item taken at
+// execution.started is not counted again by its delivered event).
+function take(e, inboxID) {
+  const iid = String(inboxID || "");
+  if (!iid || e.ids.has(iid)) return;
+  const it = inbox.get(iid) || (SCHED_ID.test(iid) ? { kind: "schedule", shell: "" } : null);
+  inbox.delete(iid);
+  if (!it) return;
+  if (e.ids.size < 100) e.ids.add(iid);
+  if (it.kind === "schedule") e.sched++;
+  else if (it.kind === "human") e.human++;
+  else if (it.shell && e.shells.length < 20) e.shells.push(it.shell);
 }
 
 // "schedule" when only schedules' prompts started the execution, or the
@@ -239,27 +258,35 @@ function track(event) {
       if (d.inboxID && kind) {
         inbox.set(d.inboxID, { kind, shell });
         if (inbox.size > 500) inbox.delete(inbox.keys().next().value);
+        if (!sessions.running.has(id)) {
+          const q = idleQueue.get(id) || [];
+          if (q.length < 20) q.push(String(d.inboxID));
+          idleQueue.delete(id);
+          idleQueue.set(id, q);
+          if (idleQueue.size > 500) idleQueue.delete(idleQueue.keys().next().value);
+        }
       }
       return;
     }
     case "session.inbox.delivered": {
-      const e = execs.get(id) || newExec(id);
-      const it = inbox.get(d.inboxID) || (SCHED_ID.test(String(d.inboxID || "")) ? { kind: "schedule", shell: "" } : null);
-      inbox.delete(d.inboxID);
-      if (!it) return;
-      if (it.kind === "schedule") e.sched++;
-      else if (it.kind === "human") e.human++;
-      else if (it.shell && e.shells.length < 20) e.shells.push(it.shell);
+      const q = idleQueue.get(id);
+      const i = q ? q.indexOf(String(d.inboxID || "")) : -1;
+      if (i >= 0) q.splice(i, 1);
+      if (q && !q.length) idleQueue.delete(id);
+      take(execs.get(id) || newExec(id), d.inboxID);
       return;
     }
     case "session.created":
       sessions.parent.set(id, d.parentID || "");
       if (sessions.parent.size > 2000) sessions.parent.delete(sessions.parent.keys().next().value);
       return;
-    case "session.execution.started":
+    case "session.execution.started": {
       remember(sessions.running, id, 500);
-      newExec(id);
+      const e = newExec(id);
+      for (const iid of idleQueue.get(id) || []) take(e, iid);
+      idleQueue.delete(id);
       return;
+    }
     case "session.execution.succeeded":
     case "session.execution.failed":
     case "session.execution.interrupted":

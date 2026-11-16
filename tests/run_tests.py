@@ -5424,6 +5424,18 @@ def t_opencode_schedule(s):
         time.sleep(1.5)
         s.check("opencode schedule: a delivered msg_sch_ id alone -> the schedule's turn",
                 by(dn) == ["schedule"] and not ingests(s, "done"), str(dn)[:300] + str(ingests(s))[:300])
+        # No session.inbox.delivered (every 2.2.7 run had one, nothing promises it): an item enqueued while the session
+        # was idle is the execution's that starts next, so the last run stays quiet (AhMunGa/simple-term#469) ...
+        run(scheduled(2)[:2] + [ev("session.execution.succeeded", sessionID=sid)], info("done", 0))
+        dn = wait_for(lambda: tunnel("done"), 10)
+        time.sleep(1.5)
+        s.check("opencode schedule: the last run without its delivered event -> done by schedule to the tunnel only",
+                by(dn) == ["schedule"] and not ingests(s, "done"), str(dn)[:300] + str(ingests(s))[:300])
+        # ... and a person's prompt the same way is the person's turn.
+        run(human("msg_1e29c1412001bbbbbbbbbbbbbbbb") + [ev("session.execution.started", sessionID=sid), succeeded],
+            info("active", 1))
+        s.check("opencode schedule: a person's turn without its delivered event -> done (by user)",
+                by(wait_for(lambda: ingests(s, "done"), 20)) == ["user"], str(ingests(s))[:300])
         # A schedule's prompt that comes during a person's turn joins it: the person's done.
         steps = turn(human("msg_1e29c1412001aaaaaaaaaaaaaaaa"))
         steps += [ev("session.inbox.enqueued", sessionID=sid, inboxID="msg_%s_1" % sch,

@@ -15,7 +15,9 @@ AhMunGa/simple-term#469, AhMunGa/simple-term#685).
 - **OpenCode 2.x** (2.2.3+ with the `schedules` flag, measured on 2.2.7): the plugin follows the session's inbox
   (`session.inbox.enqueued`, `session.inbox.delivered`): an execution that only a schedule's prompt started, or the
   report of a shell such an execution started, is a scheduled turn, and its `Stop` carries `turn_by` and the active
-  schedules from OpenCode's `schedule_list` tool (`session_crons`). Before, every scheduled run ended in `done`.
+  schedules from OpenCode's `schedule_list` tool (`session_crons`). An item enqueued while the session was idle counts
+  for the execution that starts next even if its `delivered` event does not come. Before, every scheduled run ended
+  in `done`.
 - **Claude Code Esc** (2.1.319, 2.1.325 run no hook when Esc stops a turn): the turn mark keeps the `prompt_id` of
   the prompt that opened the turn, and a task report with another id starts a turn of its own. Before, a report
   after an Esc took over the stopped turn, and when that was a `/loop` turn with a schedule left, the report's
