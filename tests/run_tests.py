@@ -4235,6 +4235,11 @@ def t_usage_ask_deadline(s):
                 len(u) == 1 and u[0].get("uq", {}).get("err") == "timeout", str([x.get("uq") for x in u]))
         s.settle("the ask")
     finally:
+        # The stand-in never answers: left on the suite's PATH, every later Claude Code Stop with a tunnel would ask
+        # it and wait out the 60 seconds (the usage cases come after this one).
+        for f in (s.bin / "claude", s.home / ".simpleterm" / "run" / "ver.claude"):
+            if f.is_symlink() or f.exists():
+                f.unlink()
         tun.terminate()
         tun.wait(5)
 
