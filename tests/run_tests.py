@@ -1614,11 +1614,14 @@ def t_schedule_end(s):
         s.run("claude", cc_event("se1", "UserPromptSubmit", prompt="check the deploy", source="loop_wakeup"), st)
         t0 = time.time()
         out = stop("se1", [], "The deploy finished; the loop ended.")
+        # No done_delay: the hook left no se1.pend, the file a done that waits keeps until it goes (both hooks).
+        # (Not a time bound: on a loaded machine a PowerShell send alone takes seconds to start.)
+        waited = (s.home / ".simpleterm" / "run" / "se1.pend").exists()
         s.check("schedule end: the screen says done_scheduled", seqs(out) == "\x1b]9;simpleterm:state=done_scheduled\x07", repr(out))
         d = wait_for(lambda: tunnel("done"), 10)
         s.check("schedule end: one done with by schedule to the tunnel, at once (no done_delay)",
-                len(d) == 1 and turn(d).get("by") == "schedule" and d[0]["received"] - t0 < 2.5,
-                str([(turn([r]), round(r["received"] - t0, 2)) for r in d])[:300])
+                len(d) == 1 and turn(d).get("by") == "schedule" and not waited,
+                "waited %s %s" % (waited, str([(turn([r]), round(r["received"] - t0, 2)) for r in d])[:300]))
         s.settle("the Stop hook's background work (the shipped done_delay, 3 s, if a done waits)")
         s.check("schedule end: nothing to the relay", not ingests(s), str(ingests(s))[:300])
 
@@ -5388,8 +5391,9 @@ def t_v2_held_bg(s):
             (run / ("held.other.k%d" % i)).write_text("%d\n" % os.getpid())
         n0 = s.log_text().count("held: too many senders (stop)")
         a = gen("conv-h5")
+        # (The ninth logs, then takes its mark away: wait for both.)
         s.check("held bg: eight senders alive: a ninth stops",
-                wait_for(lambda: s.log_text().count("held: too many senders (stop)") > n0, 15) and len(marks()) == 8,
+                wait_for(lambda: s.log_text().count("held: too many senders (stop)") > n0 and len(marks()) == 8, 15),
                 "%s %s" % (marks(), s.log_text()[-300:]))
         for p in run.glob("held.other.*"):
             p.unlink()
