@@ -5474,7 +5474,7 @@ function Set-PromptOrigin {
         }
         # Grok 1.0.77 runs each scheduled run as a background subagent: the
         # turn its result opens says how to drop the schedule (measured;
-        # SimpleTerm if/hook-events-turn#turn-end). Its Stop decides.
+        # SimpleTerm if/hook-events-scheduled#by-schedule). Its Stop decides.
         # (The prompt's quotes may still be JSON-escaped: scheduler_delete(\"<id>\").)
         $pat = 'scheduler_delete('
         $at = $Script:Prompt.IndexOf($pat, $Ord)
@@ -5558,27 +5558,49 @@ function Update-SchedTasks {
 # $Sid.turn: line 1 who started this turn, line 2 the ids of the background
 # tasks that already ran when it started ($Sid.stopids, the last Stop's list),
 # line 3 the schedule the prompt names (PromptSched), for the Stop that ends it;
-# line 4 `open` until the turn ends (Close-TurnMark). A report prompt (Claude
-# Code's <task-notification>, Grok Build's task-completed- and
-# subagent-completed-) that comes while the turn is open does not start a turn:
-# the mark stays (SimpleTerm hist/turn-state#d16). The same as turn_mark in
-# agent-hook.sh.
+# line 4 `open` until the turn ends (Close-TurnMark); line 5 the id of the
+# prompt that started it (Tid: Claude Code's prompt_id, Grok Build's promptId).
+# A report prompt (Claude Code's <task-notification>, Grok Build's
+# task-completed- and subagent-completed-) that comes while the turn is open
+# does not start a turn: the mark stays (SimpleTerm hist/turn-state#d16).
+# Claude Code only: one with another id (neither side empty) starts a turn,
+# because the open turn ended without a hook (#d18). Grok's reports keep the
+# open mark; its promptId only tells a late StopCancelled (Test-TurnOther).
+# The same as turn_mark in agent-hook.sh.
 function Write-TurnMark {
     $turnFile = Join-Path $RunDir ($Script:Sid + '.turn')
+    $id = ''
+    if (Test-Id $Script:Tid) { $id = $Script:Tid }
     if ($Script:PromptReport -and ($Script:Agent -ceq 'claude' -or $Script:Agent -ceq 'grok') -and
-        (Read-LineB $turnFile 3) -ceq 'open') { return }
+        (Read-LineB $turnFile 3) -ceq 'open') {
+        if ($Script:Agent -cne 'claude') { return }
+        $open = Read-LineB $turnFile 4
+        if ($id -ceq '' -or $open -ceq '' -or $id -ceq $open) { return }
+    }
     $ids = Read-LineB (Join-Path $RunDir ($Script:Sid + '.stopids')) 0
     $who = $Script:PromptBy
     if ($Script:PromptUser) { $who = 'user' }
-    [void](Write-FileB $turnFile ($who + "`n" + $ids + "`n" + $Script:PromptSched + "`nopen`n"))
+    [void](Write-FileB $turnFile ($who + "`n" + $ids + "`n" + $Script:PromptSched + "`nopen`n" + $id + "`n"))
 }
 
-# The turn is over (Stop, StopFailure, Esc): the mark loses its `open` line.
+# The turn is over (Stop, StopFailure, Esc): the mark loses its `open` line and
+# keeps the turn's id.
 function Close-TurnMark {
     $turnFile = Join-Path $RunDir ($Script:Sid + '.turn')
     if (-not [IO.File]::Exists($turnFile)) { return }
-    $l = @((Read-LineB $turnFile 0), (Read-LineB $turnFile 1), (Read-LineB $turnFile 2))
+    $l = @((Read-LineB $turnFile 0), (Read-LineB $turnFile 1), (Read-LineB $turnFile 2), '', (Read-LineB $turnFile 4))
     [void](Write-FileB $turnFile (($l -join "`n") + "`n"))
+}
+
+# True when the event names a turn (Tid) other than the one the mark has: the
+# report of a cancelled turn that came after the next turn had started (Grok
+# Build 1.0.77 documents that it can). The same as turn_other in agent-hook.sh.
+function Test-TurnOther {
+    if (-not (Test-Id $Script:Tid)) { return $false }
+    $turnFile = Join-Path $RunDir ($Script:Sid + '.turn')
+    if (-not [IO.File]::Exists($turnFile)) { return $false }
+    $id = Read-LineB $turnFile 4
+    return ($id -cne '' -and $id -cne $Script:Tid)
 }
 
 # TurnAt: @-parameters of the end of a turn (SimpleTerm if/event-v2-turn#turn):
@@ -5861,7 +5883,7 @@ function Invoke-StopFlow {
     }
     # Grok: a subagent-completed- turn whose prompt names one of the session's
     # sessionCrons (this Stop's, or the last Stop's when the turn dropped it)
-    # is the result of a scheduled run (SimpleTerm if/hook-events-turn#turn-end;
+    # is the result of a scheduled run (SimpleTerm if/hook-events-scheduled#by-schedule;
     # the same as stop_flow in agent-hook.sh).
     $idFile = Join-Path $RunDir ($Script:Sid + '.cronids')
     if ($Script:TurnBy -ceq 'task' -and $t3) {
@@ -6330,6 +6352,9 @@ function Invoke-Event {
         # The same as agent-hook.sh.
         $key = (Get-Sha256Hex ($Script:HookEvent + '|' + $Script:Sid + '|' + $Script:GKey + '|' + $Script:Reason)).Substring(0, 16)
         if (-not (Test-Once $key)) { return }
+        # It can come after the next turn's UserPromptSubmit (docs of 1.0.77):
+        # a late one leaves the running turn alone.
+        if (Test-TurnOther) { return }
         Add-Note 'turn' ''
         Write-State 'idle' ''
         Set-TurnAt 'interrupt' '' ''

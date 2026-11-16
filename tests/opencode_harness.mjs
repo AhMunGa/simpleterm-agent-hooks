@@ -1,6 +1,8 @@
 // Drives the OpenCode plugins with fake OpenCode objects (tests only).
 //   node tests/opencode_harness.mjs v1|v2 <plugin file> '<scenario JSON>'
-// scenario: {directory, env?, getDelay?, instances?: [dir], sessions: {id: info}, steps: [{event, gap?} | {sleep: ms}], wait: ms}
+// scenario: {directory, env?, getDelay?, instances?: [dir], sessions: {id: info}, schedules?: {id: [Schedule.Info]},
+//            steps: [{event, gap?} | {sleep: ms} | {schedules: {id: [Schedule.Info]}}], wait: ms}
+// schedules: OpenCode's schedule_list tool (ctx.tool.list) answers with that session's list; a step replaces it.
 // Prints the plugin's calls (permission replies) as JSON on the last line.
 import { pathToFileURL } from "node:url";
 
@@ -21,6 +23,7 @@ async function settle(ms) {
 Object.assign(process.env, scenario.env || {});
 // scenario.getDelay: {sessionID: {ms, times}}: the first `times` session lookups of a session take `ms` (2.x only).
 const delays = JSON.parse(JSON.stringify(scenario.getDelay || {}));
+const schedules = { ...(scenario.schedules || {}) };
 const mod = await import(pathToFileURL(file).href);
 
 if (kind === "v1") {
@@ -78,6 +81,21 @@ if (kind === "v1") {
         },
       },
       permission: { reply: async (args) => { calls.push({ reply: args, directory }); } },
+      ...(scenario.schedules
+        ? {
+            tool: {
+              list: async () => [
+                {
+                  name: "schedule_list",
+                  execute: async (_args, c) => {
+                    calls.push({ schedule_list: c && c.sessionID });
+                    return { output: { now: Date.now(), schedules: schedules[c && c.sessionID] || [] } };
+                  },
+                },
+              ],
+            },
+          }
+        : {}),
       session: {
         get: async ({ sessionID }) => {
           const dl = delays[sessionID];
@@ -101,6 +119,7 @@ if (kind === "v1") {
   };
   for (const step of scenario.steps) {
     if (step.sleep) await sleep(step.sleep);
+    else if (step.schedules) Object.assign(schedules, step.schedules);
     else {
       for (const inst of instances) inst.queue.push(step.event);
       wakeAll();

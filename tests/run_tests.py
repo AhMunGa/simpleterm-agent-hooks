@@ -1362,6 +1362,39 @@ def t_schedules(s):
     cc("sw7", "StopFailure", error="server_error", last_assistant_message="API Error: 500")
     cc("sw7", "UserPromptSubmit", prompt=note)
     s.check("schedule: after a failed turn, a report starts a turn of its own (task)", mark("sw7")[0] == "task", repr(mark("sw7")))
+    # Esc while Claude Code writes (or runs a tool) runs no hook at all (measured on 2.1.319 and 2.1.325,
+    # SimpleTerm hist/hook-events#e23, AhMunGa/simple-term#685). Every hook of a turn carries its prompt_id, a report
+    # inside the running turn included; a report after the stopped turn has a prompt_id of its own: a turn of its own
+    # (hist/turn-state#d18). Here a person's turn starts an agent, a loop turn is stopped with Esc, and the agent's
+    # report comes: its done is told although the loop remains.
+    pa, pb, pc = ("7381fea8-eab8-4422-8076-855ff02b371a", "0f9589d0-a898-4288-a7f1-59dcea053a80",
+                  "d6f4c338-0510-43e5-b216-d47ba50d4979")
+    s.ctl("/_ctl/reset", {})
+    cc("sw8", "UserPromptSubmit", prompt="run the checks in a background agent", source="user", prompt_id=pc)
+    cc("sw8", "Stop", stop_hook_active=False, last_assistant_message="Started the checks.", prompt_id=pc,
+       background_tasks=[dict(agent, id="a5c0ffee000000008")], session_crons=cron)
+    cc("sw8", "UserPromptSubmit", prompt="check the deploy", source="loop_wakeup", prompt_id=pa)
+    cc("sw8", "UserPromptSubmit", prompt="<task-notification>\n<task-id>a5c0ffee000000008</task-id>\n<status>completed</status>",
+       prompt_id=pb)
+    m = mark("sw8")
+    out = cc("sw8", "Stop", stop_hook_active=False, last_assistant_message="All checks passed.", background_tasks=[],
+             session_crons=cron, prompt_id=pb)
+    s.check("schedule: after an Esc that ran no hook, a report with its own prompt_id starts a turn (task, id kept)",
+            m[0] == "task" and m[3:5] == ["open", pb], repr(m))
+    s.check("schedule: ... and its end is a done though the loop remains", wait_for(lambda: ingests(s, "done"), 20),
+            repr(out) + str(ingests(s))[:200])
+    s.check("schedule: ... the Stop closes the turn and keeps its id", mark("sw8")[3:5] == ["", pb], repr(mark("sw8")))
+    # The same prompt_id: work that ended inside the running loop turn, whose mark stays (quiet).
+    s.ctl("/_ctl/reset", {})
+    cc("sw9", "UserPromptSubmit", prompt="check the deploy", source="loop_wakeup", prompt_id=pa)
+    cc("sw9", "UserPromptSubmit", prompt=note, prompt_id=pa)
+    m = mark("sw9")
+    out = cc("sw9", "Stop", stop_hook_active=False, last_assistant_message="Checks passed.", background_tasks=[],
+             session_crons=cron, prompt_id=pa)
+    time.sleep(4.5)
+    s.check("schedule: a report with the running turn's prompt_id keeps the loop's mark -> quiet",
+            m[0] == "schedule" and m[3:5] == ["open", pa] and not ingests(s)
+            and seqs(out).startswith("\x1b]9;simpleterm:state=background scheduled:"), repr(m) + repr(out) + str(ingests(s))[:200])
     # Grok Build: a scheduled run's turn starts a background command; its task-completed- report rests too.
     s.ctl("/_ctl/reset", {})
     grok_run(5, mcron)
@@ -2918,6 +2951,111 @@ def t_agy(s):
     s.check("agy: garbage input still answers allow", out.strip() == '{"decision":"allow"}', out)
 
 
+AGY_FIX = HERE / "fixtures" / "agy-schedule"
+
+
+def t_agy_schedule(s):
+    """Antigravity CLI /schedule (SimpleTerm spec/turn-state#scheduled, if/hook-events-turn#turn-end,
+    hist/turn-state#d19): no hook says who opened a turn, so the plugin reads it from the record at Stop. The records are
+    the transcript_full.jsonl of each Stop as agy 1.5.5 wrote it (measured with a model stub, 2026-11-16): a person's turn
+    is done though a schedule is set, a turn a schedule woke rests while a schedule is left and its last one is a done
+    with by schedule to the tunnels only, a command's report is done (by task) unless a scheduled turn started the
+    command."""
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_A, {}), (LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})])
+
+        def reset():
+            s.ctl("/_ctl/reset", {})
+            tctl("/_ctl/reset", {})
+            tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T)}})
+
+        def stop(case, k, idle):
+            return s.run("agy", agy_stop(conversationId="agy-sched-%d" % case, fullyIdle=idle, executionNum=0,
+                                         transcriptPath=str(AGY_FIX / ("case%d-stop%d.jsonl" % (case, k))), error=""),
+                         args=("Stop",))
+
+        def tunnel(ev):
+            return [r for r in ingests(s, ctl=tctl) if (r.get("body") or {}).get("ev") == ev]
+
+        def by(recs):
+            return [((r.get("plain_json") or {}).get("turn") or {}).get("by") for r in recs]
+
+        def state(st):
+            return [r for r in tunnel("state") if (r.get("plain_json") or {}).get("st") == st]
+
+        # cron `* * * * *`, MaxIterations 2: the person's turn, run 1 (fullyIdle false), run 2 (the last, true).
+        reset()
+        stop(1, 1, False)
+        s.check("agy schedule: the person's turn that set a cron -> done (by user)",
+                by(wait_for(lambda: ingests(s, "done"), 20)) == ["user"], str(ingests(s))[:300])
+        reset()
+        stop(1, 2, False)
+        st = wait_for(lambda: state("scheduled"), 10)
+        time.sleep(1.5)
+        s.check("agy schedule: a cron run with a run left -> state scheduled, no done",
+                st and by(st) == ["schedule"] and not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300])
+        reset()
+        stop(1, 3, True)
+        d = wait_for(lambda: tunnel("done"), 10)
+        time.sleep(1.5)
+        s.check("agy schedule: the last cron run -> done by schedule to the tunnel only",
+                by(d) == ["schedule"] and not ingests(s, "done"), str(d)[:300] + str(ingests(s))[:300])
+        # A one-shot timer: the person's turn, the timer's turn.
+        reset()
+        stop(2, 1, False)
+        s.check("agy schedule: the person's turn that set a timer -> done", wait_for(lambda: ingests(s, "done"), 20))
+        reset()
+        stop(2, 2, True)
+        d = wait_for(lambda: tunnel("done"), 10)
+        time.sleep(1.5)
+        s.check("agy schedule: the timer's turn -> done by schedule to the tunnel only",
+                by(d) == ["schedule"] and not ingests(s, "done"), str(d)[:300] + str(ingests(s))[:300])
+        # A background command of a person's turn: a pause, then its report turn is done (by task).
+        reset()
+        stop(3, 1, False)
+        time.sleep(1.5)
+        s.check("agy schedule: a person's turn leaving a command -> no done yet", not ingests(s, "done") and not tunnel("done"),
+                str(ingests(s))[:300])
+        reset()
+        stop(3, 2, True)
+        s.check("agy schedule: the command's report turn -> done (by task)",
+                by(wait_for(lambda: ingests(s, "done"), 20)) == ["task"], str(ingests(s))[:300])
+        # The timer's turn starts a command: its report is the schedule's, the last turn (quiet).
+        reset()
+        stop(4, 1, False)
+        wait_for(lambda: ingests(s, "done"), 20)
+        reset()
+        stop(4, 2, False)
+        time.sleep(1.5)
+        s.check("agy schedule: the timer's turn leaving a command -> no done", not ingests(s, "done") and not tunnel("done"),
+                str(ingests(s))[:300])
+        reset()
+        stop(4, 3, True)
+        d = wait_for(lambda: tunnel("done"), 10)
+        time.sleep(1.5)
+        s.check("agy schedule: the report of a command a scheduled turn started -> done by schedule to the tunnel only",
+                by(d) == ["schedule"] and not ingests(s, "done"), str(d)[:300] + str(ingests(s))[:300])
+        # A timer that fires inside the person's turn stays in that turn: done (by user).
+        reset()
+        stop(5, 1, True)
+        s.check("agy schedule: a timer message inside a person's turn -> done (by user)",
+                by(wait_for(lambda: ingests(s, "done"), 20)) == ["user"], str(ingests(s))[:300])
+        # A cron killed in its first run's turn (manage_task kill): that run is the last.
+        reset()
+        stop(6, 1, False)
+        wait_for(lambda: ingests(s, "done"), 20)
+        reset()
+        stop(6, 2, True)
+        d = wait_for(lambda: tunnel("done"), 10)
+        time.sleep(1.5)
+        s.check("agy schedule: the run that killed its cron -> done by schedule to the tunnel only",
+                by(d) == ["schedule"] and not ingests(s, "done"), str(d)[:300] + str(ingests(s))[:300])
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+
 AGY_HOOKS = ROOT / "plugins" / "antigravity" / "hooks.json"
 STUB = "#!/bin/sh\nprintf '%s %%s %%s\\n' \"$1\" \"$2\"\n"
 
@@ -3080,6 +3218,38 @@ def t_grok(s):
         s.run("claude", rep, renv)
         s.check("grok: StopCancelled (%s) closes the turn; the next report is a turn of its own" % reason,
                 m1[3:4] == ["open"] and m2[3:4] in ([], [""]) and gmark()[0] == "task", repr((m1, m2, gmark())))
+    # A report while a Grok turn is open joins that turn (SimpleTerm hist/turn-state#d16): Grok's report ids
+    # (task-completed-, subagent-completed-) are never the running turn's id, so they are not compared with it
+    # (hist/turn-state#d18) ...
+    ups, uenv = grok_input("UserPromptSubmit", promptId="p95", prompt="Run the long check", timestamp="2026-10-29T10:13:00.000Z")
+    s.run("claude", ups, uenv)
+    rep, renv = grok_input("UserPromptSubmit", promptId="task-completed-gbash95", prompt="npm test finished",
+                           timestamp="2026-10-29T10:13:20.000Z")
+    s.run("claude", rep, renv)
+    s.check("grok: a report while a turn is open joins it (the mark keeps who started it and its promptId)",
+            gmark()[0] == "user" and gmark()[3:5] == ["open", "p95"], repr(gmark()))
+    # ... and a scheduled run keeps its schedule (line 3) when a command it started reports inside it.
+    stop, stenv = grok_input("Stop", reason="end_turn", promptId="p95", lastAssistantMessage="Checked.",
+                             backgroundTasks=[], sessionCrons=[], timestamp="2026-10-29T10:13:25.000Z")
+    s.run("claude", stop, stenv)
+    srun, senv = grok_input("UserPromptSubmit", promptId="subagent-completed-gsch96",
+                            prompt="<system-reminder>\nscheduler_delete(\"cron96\")\n</system-reminder>",
+                            timestamp="2026-10-29T10:13:30.000Z")
+    s.run("claude", srun, senv)
+    rep, renv = grok_input("UserPromptSubmit", promptId="task-completed-gbash96", prompt="npm test finished",
+                           timestamp="2026-10-29T10:13:40.000Z")
+    s.run("claude", rep, renv)
+    s.check("grok: a report inside a scheduled run keeps that run's mark and schedule",
+            gmark()[0] == "task" and gmark()[2:5] == ["cron96", "open", "subagent-completed-gsch96"], repr(gmark()))
+    # The promptId still tells a cancelled turn's StopCancelled that comes after the next turn started (docs of
+    # 1.0.77, hist/hook-events#e24): it leaves the running turn open (turn_other, AhMunGa/simple-term#685).
+    ups, uenv = grok_input("UserPromptSubmit", promptId="p97", prompt="Run it again", timestamp="2026-10-29T10:14:00.000Z")
+    s.run("claude", ups, uenv)
+    cancel, cenv = grok_input("StopCancelled", promptId="p95", reason="user_interrupt", cancelledBy="user",
+                              cancelTrigger="ctrl_c", timestamp="2026-10-29T10:14:01.000Z")
+    s.run("claude", cancel, cenv)
+    s.check("grok: a late StopCancelled of the turn before leaves the running turn open",
+            gmark()[3:5] == ["open", "p97"], repr(gmark()))
     s.ctl("/_ctl/reset", {})
     only_camel = json.dumps({"hookEventName": "stop", "sessionId": "gk-2", "cwd": "/w/g", "timestamp": "t9", "reason": "end_turn",
                              "lastAssistantMessage": "camel only"})
@@ -5472,6 +5642,158 @@ def t_v2_opencode_js(s):
             any(r and r.get("id") == "per_10" and r.get("others") == ["per_9"] for r in reqs), str(reqs)[:400])
 
 
+def t_opencode_schedule(s):
+    """OpenCode 2.2.3+ schedules (flag `schedules`; SimpleTerm spec/turn-state#scheduled, if/hook-events-turn#turn-end,
+    hist/turn-state#d20). The events are those 2.2.7 sent with a model stub (2026-11-16): a schedule's prompt is a user
+    inbox item with payload.metadata.schedule, a person's one without it, a background shell's report a synthetic item
+    naming the shell. A scheduled turn rests while schedule_list has an active schedule, its last one is a done with by
+    schedule to the tunnels only; a schedule's prompt inside a person's turn leaves it the person's; the report of a shell
+    a scheduled turn started is the schedule's."""
+    if not NODE or s.kind != "sh":
+        return
+    d = str(s.tmp)
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_A, {}), (LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})])
+        n = [100]
+
+        def ev(typ, **data):
+            n[0] += 1
+            return {"event": {"id": "evt_%d" % n[0], "type": typ, "location": {"directory": d}, "data": data}}
+
+        sid = "ses_s"
+        sch = "sch_1e29c1c1c001LYyOwyXTrzGqiq"
+
+        def human(inbox):
+            return [ev("session.inbox.enqueued", sessionID=sid, inboxID=inbox,
+                       item={"type": "user", "payload": {"text": "every 15s say tick, twice"}, "delivery": "steer"})]
+
+        def scheduled(run):
+            inbox = "msg_%s_%d" % (sch, run)
+            return [ev("session.inbox.enqueued", sessionID=sid, inboxID=inbox,
+                       item={"type": "user", "payload": {"text": "say tick", "metadata": {"schedule": {
+                           "id": sch, "name": "twice", "run": run, "dueAt": 1794803274060, "late": False, "check": {}}}},
+                           "delivery": "steer"}),
+                    ev("session.execution.started", sessionID=sid),
+                    ev("session.inbox.delivered", sessionID=sid, inboxID=inbox)]
+
+        def turn(start):
+            return start[:1] + [ev("session.execution.started", sessionID=sid),
+                                ev("session.inbox.delivered", sessionID=sid, inboxID=start[0]["event"]["data"]["inboxID"])]
+
+        def info(status, left):
+            return [{"id": sch, "sessionID": sid, "name": "twice", "when": {"type": "every", "every": "15 seconds"},
+                     "action": {"type": "prompt", "prompt": "say tick"}, "status": status, "remainingRuns": left}]
+
+        def run(steps, sched, instances=None):
+            s.ctl("/_ctl/reset", {})
+            tctl("/_ctl/reset", {})
+            tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T)}})
+            sc = {"directory": d, "sessions": {sid: {"title": "Ticks"}}, "schedules": {sid: sched}, "steps": steps, "wait": 3000}
+            if instances:
+                sc["instances"] = instances
+            return node_plugin(s, "v2", sc)
+
+        def tunnel(ev_):
+            return [r for r in ingests(s, ctl=tctl) if (r.get("body") or {}).get("ev") == ev_]
+
+        def by(recs):
+            return [((r.get("plain_json") or {}).get("turn") or {}).get("by") for r in recs]
+
+        def scheduled_state():
+            return [r for r in tunnel("state") if (r.get("plain_json") or {}).get("st") == "scheduled"]
+
+        succeeded = ev("session.execution.succeeded", sessionID=sid)
+        # The person's turn that sets the schedule: done (by user), though the schedule is active.
+        calls = run(turn(human("msg_1e29c1412001eEc8auhRq89EUd")) + [succeeded], info("active", 2))
+        s.check("opencode schedule: the person's turn -> done (by user)",
+                by(wait_for(lambda: ingests(s, "done"), 20)) == ["user"], str(ingests(s))[:300])
+        s.check("opencode schedule: a person's turn does not ask schedule_list", not [c for c in calls if "schedule_list" in c],
+                str(calls)[:300])
+        # Run 1 of 2: a schedule is left -> state scheduled, no done.
+        run(scheduled(1) + [ev("session.execution.succeeded", sessionID=sid)], info("active", 1))
+        st = wait_for(scheduled_state, 10)
+        time.sleep(1.5)
+        s.check("opencode schedule: a run with a run left -> state scheduled (by schedule), no done",
+                st and by(st) == ["schedule"] and (st[0].get("plain_json") or {}).get("turn", {}).get("crons")
+                and not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:400] + str(ingests(s))[:200])
+        # Run 2, the last (the schedule is done when its prompt is sent): a done by schedule to the tunnel only.
+        run(scheduled(2) + [ev("session.execution.succeeded", sessionID=sid)], info("done", 0))
+        dn = wait_for(lambda: tunnel("done"), 10)
+        time.sleep(1.5)
+        s.check("opencode schedule: the last run -> done by schedule to the tunnel only",
+                by(dn) == ["schedule"] and not ingests(s, "done"), str(dn)[:300] + str(ingests(s))[:300])
+        # Without the enqueued item (a plugin that came up late), the inbox id of a schedule's prompt still tells it.
+        run([ev("session.execution.started", sessionID=sid),
+             ev("session.inbox.delivered", sessionID=sid, inboxID="msg_%s_3" % sch),
+             ev("session.execution.succeeded", sessionID=sid)], [])
+        dn = wait_for(lambda: tunnel("done"), 10)
+        time.sleep(1.5)
+        s.check("opencode schedule: a delivered msg_sch_ id alone -> the schedule's turn",
+                by(dn) == ["schedule"] and not ingests(s, "done"), str(dn)[:300] + str(ingests(s))[:300])
+        # No session.inbox.delivered (every 2.2.7 run had one, nothing promises it): an item enqueued while the session
+        # was idle is the execution's that starts next, so the last run stays quiet (AhMunGa/simple-term#469) ...
+        run(scheduled(2)[:2] + [ev("session.execution.succeeded", sessionID=sid)], info("done", 0))
+        dn = wait_for(lambda: tunnel("done"), 10)
+        time.sleep(1.5)
+        s.check("opencode schedule: the last run without its delivered event -> done by schedule to the tunnel only",
+                by(dn) == ["schedule"] and not ingests(s, "done"), str(dn)[:300] + str(ingests(s))[:300])
+        # ... and a person's prompt the same way is the person's turn.
+        run(human("msg_1e29c1412001bbbbbbbbbbbbbbbb") + [ev("session.execution.started", sessionID=sid), succeeded],
+            info("active", 1))
+        s.check("opencode schedule: a person's turn without its delivered event -> done (by user)",
+                by(wait_for(lambda: ingests(s, "done"), 20)) == ["user"], str(ingests(s))[:300])
+        # Two project directories, two plugin instances, each sees every event (the other one first): the execution
+        # and inbox bookkeeping runs once per event, so the judgement is the same as with one instance.
+        two = [str(s.tmp / "other-project"), d]
+        run(scheduled(2)[:2] + [ev("session.execution.succeeded", sessionID=sid)], info("done", 0), two)
+        dn = wait_for(lambda: tunnel("done"), 10)
+        time.sleep(1.5)
+        s.check("opencode schedule, two instances: the last run without its delivered event -> done by schedule, tunnel only",
+                by(dn) == ["schedule"] and not ingests(s, "done"), str(dn)[:300] + str(ingests(s))[:300])
+        steps = turn(human("msg_1e29c1412001cccccccccccccccc"))
+        steps += [ev("session.inbox.enqueued", sessionID=sid, inboxID="msg_%s_1" % sch,
+                     item={"type": "user", "payload": {"text": "say tick", "metadata": {"schedule": {"id": sch, "run": 1}}},
+                           "delivery": "steer"}),
+                  ev("session.inbox.delivered", sessionID=sid, inboxID="msg_%s_1" % sch), succeeded]
+        run(steps, info("active", 1), two)
+        s.check("opencode schedule, two instances: a schedule's prompt inside a person's turn -> the person's done",
+                by(wait_for(lambda: ingests(s, "done"), 20)) == ["user"], str(ingests(s))[:300] + str(tunnel("state"))[:200])
+        # A schedule's prompt that comes during a person's turn joins it: the person's done.
+        steps = turn(human("msg_1e29c1412001aaaaaaaaaaaaaaaa"))
+        steps += [ev("session.inbox.enqueued", sessionID=sid, inboxID="msg_%s_1" % sch,
+                     item={"type": "user", "payload": {"text": "say tick", "metadata": {"schedule": {"id": sch, "run": 1}}},
+                           "delivery": "steer"}),
+                  ev("session.inbox.delivered", sessionID=sid, inboxID="msg_%s_1" % sch), succeeded]
+        run(steps, info("done", 0))
+        s.check("opencode schedule: a schedule's prompt inside a person's turn -> the person's done",
+                by(wait_for(lambda: ingests(s, "done"), 20)) == ["user"], str(ingests(s))[:300])
+        # A scheduled turn starts a background shell; the shell's report turn is the schedule's.
+        shell = "sh_1e2ae2c770019UON02jWlTl6VR"
+        steps = scheduled(1) + [
+            ev("shell.created", info={"id": shell, "status": "running", "command": "sleep 4; echo BG_K",
+                                      "metadata": {"sessionID": sid}}),
+            ev("session.execution.succeeded", sessionID=sid), {"sleep": 1500},
+            ev("shell.exited", id=shell, exit=0, status="exited"),
+            ev("session.inbox.enqueued", sessionID=sid, inboxID="msg_1e2ae2cb4001FT4ZLXHf2PQjVB",
+               item={"type": "synthetic", "payload": {
+                   "text": "<shell id=\"%s\" state=\"completed\" command=\"sleep 4; echo BG_K\">\nBG_K\n\n</shell>" % shell,
+                   "description": "sleep 4; echo BG_K",
+                   "metadata": {"source": "shell", "shellID": shell, "jobID": shell, "state": "completed", "exit": 0}},
+                   "delivery": "steer"}),
+            ev("session.execution.started", sessionID=sid),
+            ev("session.inbox.delivered", sessionID=sid, inboxID="msg_1e2ae2cb4001FT4ZLXHf2PQjVB"),
+            ev("session.execution.succeeded", sessionID=sid)]
+        run(steps, [])
+        dn = wait_for(lambda: tunnel("done"), 10)
+        time.sleep(1.5)
+        s.check("opencode schedule: the report of a shell a scheduled turn started -> one done by schedule, tunnel only",
+                by(dn) == ["schedule"] and not ingests(s, "done"), str(dn)[:300] + str(ingests(s))[:300])
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+
 def t_opencode_js(s):
     """The OpenCode plugins themselves (node with fake OpenCode objects; skipped without node)."""
     if not NODE or s.kind != "sh":
@@ -5864,14 +6186,14 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_work_7501, t_question_while_background, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_schedule_end, t_done_delay, t_background_events_and_badges, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
-         t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js,
+         t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_schedule, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js, t_opencode_schedule,
          t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_usage_ask_gate, t_v2_usage_ask_refresh, t_usage_ask_refresh_vectors, t_conf_vectors, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_held, t_v2_held_bg, t_v2_not_sent,
          t_v2_state, t_v2_sessions, t_v2_mux, t_v2_opencode_js, t_copilot_hooks, t_copilot, t_copilot_schedules,
          t_v2_versions, t_v2_claude_question_once, t_hooks_removed_plugin]
 
 # Tests of the sh hook only (scripts and behaviour the PowerShell hook does not have).
 SH_ONLY = {"t_v2_versions", "t_v2_n10", "t_v2_opencode_js", "t_copilot_hooks", "t_copilot", "t_copilot_schedules", "t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_delivery", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_notify_no_tty", "t_cli_wrapper",
-           "t_agy", "t_agy_paths", "t_opencode_sh", "t_opencode_js"}
+           "t_agy", "t_agy_schedule", "t_agy_paths", "t_opencode_sh", "t_opencode_js", "t_opencode_schedule"}
 
 
 # PowerShell 7-only syntax and APIs that Windows PowerShell 5.1 (.NET Framework 4.5+) lacks.
