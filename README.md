@@ -809,8 +809,9 @@ nothing it needs is lost. Run only the agents you use.
 | OpenCode 2.x | `opencode plugin remove "github:AhMunGa/simpleterm-agent-hooks#main::path:plugins/opencode"`, then `opencode plugin add "github:AhMunGa/simpleterm-agent-hooks#release::path:plugins/opencode"` |
 | OpenCode 1.x | the install commands (they download from `release`; the app copies the same two files from its `~/.simpleterm/src`, which it moves to `release` first) |
 
-- **A plugin you turned off turns on again** for Gemini CLI, Grok Build and a Copilot CLI direct
-  install (they install it anew); turn it off again afterwards, or do not move it. Codex,
+- **A plugin you turned off turns on again** for Copilot CLI (marketplace or direct install),
+  Gemini CLI and Grok Build (they install it anew); turn it off again afterwards, or do not move
+  it. The update of a direct Copilot CLI install turns it on too. Codex,
   Antigravity and OpenCode 1.x keep it off. Claude Code counts a turned-off plugin as not installed,
   and OpenCode 2.x has no off switch.
 - A version above the one the app recommends is not moved by the app; moving it yourself could
