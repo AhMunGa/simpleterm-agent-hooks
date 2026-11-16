@@ -3923,10 +3923,65 @@ ask_stop() {
   ask_stopped "$ASK_BV" || printf '%s\n' "$ASK_BV" >>"$RUN_DIR/ask.$AGENT.off" 2>/dev/null
 }
 
+# True if a refresh of the agent's sign-in token is due (SimpleTerm
+# if/usage-ask-refresh#skip, hist/usage-ask#d23): an ask now would make the
+# asking process refresh it, and one ended after the server rotated the token
+# signs every process of that agent out. Read from the first 64 KiB of
+# credentials file $1 (if/usage-ask-refresh#fields, #bytes): Claude Code's
+# claudeAiOauth.expiresAt (an integer, milliseconds), Codex's exp of the JWT
+# tokens.access_token (an integer, seconds) and last_refresh (RFC 3339). Due
+# when the token expires in less than 10 minutes or has expired, or (Codex)
+# the last refresh is more than 7 days old. A file that is not there or
+# cannot be read, or a value that is not there or not of its form, does not
+# make it due: the ask runs, and its answer wait outlasts the agent's own
+# refresh (if/usage-ask-refresh#no-cut). The values are not logged.
+ask_refresh_due() { # credentials-file
+  [ -f "$1" ] || return 1
+  # The file is JSON only if all of it is read and it is one whole object:
+  # the facts parser reads a document cut short as far as it goes. (A file
+  # over 64 KiB is not known to be JSON.)
+  rfs=$(wc -c <"$1" 2>/dev/null | tr -d ' ')
+  is_uint "$rfs" && [ "$rfs" -le 65536 ] || return 1
+  awk '{ s = s $0 "\n" } END {
+    n = length(s); d = 0; q = 0; z = 0
+    for (i = 1; i <= n; i++) {
+      c = substr(s, i, 1)
+      if (q) { if (c == "\\") i++; else if (c == "\"") q = 0; continue }
+      if (c == " " || c == "\t" || c == "\r" || c == "\n") continue
+      if (z || (d == 0 && c != "{")) exit 1
+      if (c == "\"") q = 1
+      else if (c == "{" || c == "[") d++
+      else if (c == "}" || c == "]") { if (--d == 0) z = 1 }
+    }
+    exit !z }' "$1" 2>/dev/null || return 1
+  rfd=$(head -c 65536 "$1" 2>/dev/null | awk "$NORM_FN$JSON_FACTS" 2>/dev/null | awk -F "$TAB" -v a="$AGENT" '
+    a == "claude" && $1 == "claudeAiOauth.expiresAt" && $2 == "r" && !m++ { print "ms " $3 }
+    a == "codex" && $1 == "tokens.access_token" && $2 == "s" && !j++ { if (split($3, P, "[.]") == 3) print "jwt " P[2] }
+    a == "codex" && $1 == "last_refresh" && $2 == "s" && !l++ { print "lr " $3 }' 2>/dev/null)
+  rfp=$(printf '%s\n' "$rfd" | sed -n 's/^jwt //p')
+  case $rfp in
+    '' | *[!A-Za-z0-9_-]*) ;;
+    *)
+      # The JWT's payload: base64url without padding, padded to base64.
+      while [ $((${#rfp} % 4)) -ne 0 ]; do rfp=$rfp=; done
+      rfd=$rfd$NL$(printf '%s' "$rfp" | tr '_-' '/+' | openssl base64 -d -A 2>/dev/null | head -c 65536 |
+        awk "$NORM_FN$JSON_FACTS" 2>/dev/null | awk -F "$TAB" '$1 == "exp" && $2 == "r" { print "exp " $3; exit }' 2>/dev/null)
+      ;;
+  esac
+  printf '%s\n' "$rfd" | awk -v now="$NOW" "$ISO_FN"'
+    $1 == "ms" && $2 ~ /^-?[0-9]+$/ { if ($2 - now * 1000 < 600000) due = 1 }
+    $1 == "exp" && $2 ~ /^-?[0-9]+$/ { if ($2 - now < 600) due = 1 }
+    $1 == "lr" && $2 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]([.][0-9]+)?(Z|[+-][0-9][0-9]:[0-9][0-9])$/ {
+      e = isoepoch($2); if (e >= 0 && now - e > 604800) due = 1 }
+    END { exit !due }' 2>/dev/null
+}
+
 # At the end of a turn, while the app is connected, at most every 5 minutes
 # per agent and settings folder: asks Claude Code or Codex for its limits in
-# the background (stdio closed, 20 seconds at most), unless asks of the
-# version of the executable that the ask runs were stopped (SimpleTerm if/usage-ask#failures, hist/usage-ask#d21, hist/usage-ask#d22). After a failed sign-in or an answer of no plan limits
+# the background (stdio closed, its answer awaited 60 seconds at most),
+# unless asks of the version of the executable that the ask runs were
+# stopped (SimpleTerm if/usage-ask#failures, hist/usage-ask#d21, hist/usage-ask#d22) or the agent is about to refresh its
+# sign-in token (ask_refresh_due). After a failed sign-in or an answer of no plan limits
 # (not-subscriber) it asks again only once the agent's credentials file
 # changed. usage_ask=off in agent-hook.conf turns it off; usage_ask_codex=off
 # turns off Codex's only (its app-server writes its own state, syncs its
@@ -3964,6 +4019,13 @@ usage_ask() {
     rm -f "$af.auth"
   fi
   ask_recent "$af" && return 0
+  # A refresh of the agent's sign-in token due (SimpleTerm if/usage-ask#conditions 9,
+  # if/usage-ask-refresh#skip): no ask in this turn; nothing is counted and the 5-minute
+  # slot is not taken.
+  if ask_refresh_due "$ind"; then
+    log "usage-ask $AGENT skipped: sign-in refresh due"
+    return 0
+  fi
   # The slot is claimed at once: Stop hooks of several sessions of this
   # agent and settings folder may end together. $af.lk is held while the
   # time is checked again and written; one left by a hook that died is
@@ -3984,11 +4046,20 @@ usage_ask() {
   (ask_run "$ASK_EXE" "$af") </dev/null >/dev/null 2>&1 &
 }
 
+# True if a line of the first MiB of the ask's output ($AQ.out) matches
+# extended regular expression $1.
+ask_seen() { # ere
+  head -c 1048576 "$AQ.out" 2>/dev/null | awk -v r="$1" '$0 ~ r { f = 1; exit } END { exit !f }' 2>/dev/null
+}
+
 # Runs command "$@" in ~/.simpleterm/probe with SIMPLETERM_PROBE=1, its
 # standard input the lines of file $AQ.in followed by the lines that
-# ask_more prints once file $AQ.out holds $AQ_WAIT1, then open until
-# $AQ.out holds $AQ_WAIT2 (or 20 seconds); its output in $AQ.out. Sets
-# AQ_RES: ok (got $AQ_WAIT2), gone (ended without it) or timeout.
+# ask_more prints once file $AQ.out holds $AQ_WAIT1, then open until a line
+# of $AQ.out matches extended regular expression $AQ_WAIT2 (or 60 seconds:
+# longer than the agents' own sign-in refresh, SimpleTerm if/usage-ask#run,
+# if/usage-ask-refresh#no-cut); its output in
+# $AQ.out. Sets AQ_RES: ok (got $AQ_WAIT2), gone (ended without it) or
+# timeout.
 ask_pipe() { # command...
   : >"$AQ.out"
   rm -f "$AQ.done"
@@ -3999,7 +4070,7 @@ ask_pipe() { # command...
       cat "$AQ.in"
       if [ -n "$AQ_WAIT1" ]; then
         aw=0
-        while [ "$aw" -lt 20 ] && [ ! -f "$AQ.done" ]; do
+        while [ "$aw" -lt 60 ] && [ ! -f "$AQ.done" ]; do
           case $(head -c 1048576 "$AQ.out" 2>/dev/null) in *"$AQ_WAIT1"*) break ;; esac
           sleep 1
           aw=$((aw + 1))
@@ -4007,17 +4078,17 @@ ask_pipe() { # command...
         cat "$AQ.more" 2>/dev/null
       fi
       aw=0
-      while [ "$aw" -lt 20 ] && [ ! -f "$AQ.done" ]; do sleep 1; aw=$((aw + 1)); done
+      while [ "$aw" -lt 60 ] && [ ! -f "$AQ.done" ]; do sleep 1; aw=$((aw + 1)); done
     } | ask_exec "$@" >"$AQ.out" 2>/dev/null &
     apid=$!
     aw=0 res=timeout
-    while [ "$aw" -lt 20 ]; do
-      case $(head -c 1048576 "$AQ.out" 2>/dev/null) in *"$AQ_WAIT2"*) res=ok; break ;; esac
+    while [ "$aw" -lt 60 ]; do
+      ask_seen "$AQ_WAIT2" && { res=ok; break; }
       kill -0 "$apid" 2>/dev/null || { res=gone; break; }
       sleep 1
       aw=$((aw + 1))
     done
-    case $(head -c 1048576 "$AQ.out" 2>/dev/null) in *"$AQ_WAIT2"*) res=ok ;; esac
+    ask_seen "$AQ_WAIT2" && res=ok
     printf '%s\n' "$res" >"$AQ.res"
     : >"$AQ.done"
     aw=0
@@ -4030,9 +4101,10 @@ ask_pipe() { # command...
   AQ_RES=$(cat "$AQ.res" 2>/dev/null)
 }
 
-# The first line of $AQ.out holding $1, cut to 256 KiB, as facts.
-ask_facts() { # text
-  awk -v t="$1" 'index($0, t) { print; exit }' "$AQ.out" 2>/dev/null | head -c 262144 | awk "$NORM_FN$JSON_FACTS" 2>/dev/null
+# The first line of $AQ.out matching extended regular expression $1, cut to
+# 256 KiB, as facts.
+ask_facts() { # ere
+  awk -v r="$1" '$0 ~ r { print; exit }' "$AQ.out" 2>/dev/null | head -c 262144 | awk "$NORM_FN$JSON_FACTS" 2>/dev/null
 }
 
 # Claude Code get_usage control response (facts) -> "OK <usage line>" or
@@ -4151,10 +4223,12 @@ ask_run() { # agent-executable ask-file
     codex)
       printf '%s\n' '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"simpleterm","version":"'"$HOOK_VERSION"'"}}}' >"$AQ.in"
       printf '%s\n' '{"method":"initialized"}' '{"id":2,"method":"account/rateLimits/read"}' >"$AQ.more"
-      AQ_WAIT1='"id":1,' AQ_WAIT2='"id":2,'
+      # The answer: "id":2 then , or } (an error answer ends with "id":2}; SimpleTerm if/usage-ask#run,
+      # hist/usage-ask#d23).
+      AQ_WAIT1='"id":1,' AQ_WAIT2='"id":2[,}]'
       ask_pipe "$1" app-server
       at=$(ask_now)
-      [ "$AQ_RES" = ok ] && A=$(ask_facts '"id":2,' | awk -v at="$at" "$CODEX_USAGE" 2>/dev/null)
+      [ "$AQ_RES" = ok ] && A=$(ask_facts "$AQ_WAIT2" | awk -v at="$at" "$CODEX_USAGE" 2>/dev/null)
       ;;
   esac
   rm -f "$AQ".* 2>/dev/null
@@ -4321,6 +4395,14 @@ if [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ "${2:-}" = __conf ]; then
     codex_goal_check) conf_int codex_goal_check 5; echo ;;
     ask_delay) conf_int ask_delay 2; echo ;;
   esac
+  exit 0
+fi
+# Tests only: `agent-hook.sh <claude|codex> __refresh <credentials-file> <now>`
+# prints skip or ask: whether a refresh is due at epoch <now> (the vectors of
+# SimpleTerm if/usage-ask-refresh#vectors).
+if [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ "${2:-}" = __refresh ]; then
+  NOW=${4:-0}
+  if ask_refresh_due "${3:-}"; then echo skip; else echo ask; fi
   exit 0
 fi
 

@@ -3356,10 +3356,78 @@ function Invoke-AskVerChild($job) {
     Remove-FileQ ($vc + '.lock')
 }
 
+# True if a refresh of the agent's sign-in token is due (SimpleTerm
+# if/usage-ask-refresh#skip, hist/usage-ask#d23; ask_refresh_due): an ask now
+# would make the asking process refresh it, and one ended after the server
+# rotated the token signs every process of that agent out. Read from the first
+# 64 KiB of credentials file $ind (if/usage-ask-refresh#fields, #bytes): Claude
+# Code's claudeAiOauth.expiresAt (an integer, milliseconds), Codex's exp of the
+# JWT tokens.access_token (an integer, seconds) and last_refresh (RFC 3339).
+# Due when the token expires in less than 10 minutes or has expired, or
+# (Codex) the last refresh is more than 7 days old. A file that is not there or
+# cannot be read, or a value that is not there or not of its form, does not
+# make it due: the ask runs, and its answer wait outlasts the agent's own
+# refresh (if/usage-ask-refresh#no-cut). The values are not logged.
+function Test-AskRefreshDue([string]$ind) {
+    # The file is JSON only if all of it is read and it is one whole object:
+    # the facts parser reads a document cut short as far as it goes. (A file
+    # over 64 KiB is not known to be JSON.)
+    $len = -1
+    try { $len = (New-Object IO.FileInfo($ind)).Length } catch { $len = -1 }
+    if ($len -lt 0 -or $len -gt 65536) { return $false }
+    $t = Read-HeadB $ind 65536
+    if (-not $t) { return $false }
+    $d = 0; $q = $false; $z = $false
+    for ($i = 0; $i -lt $t.Length; $i++) {
+        $c = $t[$i]
+        if ($q) {
+            if ($c -eq [char]92) { $i++ } elseif ($c -eq [char]34) { $q = $false }
+            continue
+        }
+        if ($c -eq [char]32 -or $c -eq [char]9 -or $c -eq [char]13 -or $c -eq [char]10) { continue }
+        if ($z -or ($d -eq 0 -and $c -ne [char]123)) { return $false }
+        if ($c -eq [char]34) { $q = $true }
+        elseif ($c -eq [char]123 -or $c -eq [char]91) { $d++ }
+        elseif ($c -eq [char]125 -or $c -eq [char]93) { $d--; if ($d -eq 0) { $z = $true } }
+    }
+    if (-not $z) { return $false }
+    $m = Read-FactMap (Get-Facts ($t + "`n") '')
+    $now = [double]$Script:Now
+    $num = '\A-?[0-9]+\z'
+    if ($Script:Agent -ceq 'claude') {
+        $ms = Get-FactV $m 'claudeAiOauth.expiresAt'
+        return ((Get-FactT $m 'claudeAiOauth.expiresAt') -ceq 'r' -and $ms -cmatch $num -and ([double]::Parse($ms, $Inv) - $now * 1000) -lt 600000)
+    }
+    $due = $false
+    $tok = ''
+    if ((Get-FactT $m 'tokens.access_token') -ceq 's') { $tok = Get-FactV $m 'tokens.access_token' }
+    $parts = $tok.Split([char]'.')
+    if ($parts.Length -eq 3 -and $parts[1] -cmatch '\A[A-Za-z0-9_-]+\z') {
+        # The JWT's payload: base64url without padding, padded to base64.
+        $b = $parts[1].Replace('-', '+').Replace('_', '/')
+        while ($b.Length % 4 -ne 0) { $b += '=' }
+        $pl = ''
+        try { $pl = $Latin1.GetString([Convert]::FromBase64String($b)) } catch { $pl = '' }
+        if ($pl.Length -gt 65536) { $pl = $pl.Substring(0, 65536) }
+        if ($pl) {
+            $pm = Read-FactMap (Get-Facts ($pl + "`n") '')
+            $exp = Get-FactV $pm 'exp'
+            if ((Get-FactT $pm 'exp') -ceq 'r' -and $exp -cmatch $num -and ([double]::Parse($exp, $Inv) - $now) -lt 600) { $due = $true }
+        }
+    }
+    $lr = Get-FactV $m 'last_refresh'
+    if ((Get-FactT $m 'last_refresh') -ceq 's' -and $lr -cmatch '\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})\z') {
+        $e = Get-IsoEpoch $lr
+        if ($e -ge 0 -and ($now - $e) -gt 604800) { $due = $true }
+    }
+    return $due
+}
+
 # At the end of a turn, while the app is connected, at most every 5 minutes
 # per agent and settings folder: asks Claude Code or Codex for its limits in a
-# detached child (stdio closed, 20 seconds at most), unless asks of the version
-# of the executable that the ask runs were stopped (SimpleTerm if/usage-ask#failures, hist/usage-ask#d21, hist/usage-ask#d22).
+# detached child (stdio closed, its answer awaited 60 seconds at most), unless
+# asks of the version of the executable that the ask runs were stopped (SimpleTerm if/usage-ask#failures, hist/usage-ask#d21, hist/usage-ask#d22)
+# or the agent is about to refresh its sign-in token (Test-AskRefreshDue).
 # After a failed sign-in or an answer of no plan limits (not-subscriber) it
 # asks again only once the agent's credentials file changed. usage_ask=off in
 # agent-hook.conf turns it off; usage_ask_codex=off turns off Codex's only
@@ -3397,6 +3465,13 @@ function Invoke-UsageAsk {
         Remove-FileQ $auth
     }
     if (Test-AskRecent $af) { return }
+    # A refresh of the agent's sign-in token due (SimpleTerm if/usage-ask#conditions 9,
+    # if/usage-ask-refresh#skip): no ask in this turn; nothing is counted and the 5-minute
+    # slot is not taken.
+    if (Test-AskRefreshDue $ind) {
+        Write-Log ('usage-ask ' + $Script:Agent + ' skipped: sign-in refresh due')
+        return
+    }
     # The slot is claimed at once: Stop hooks of several sessions of this
     # agent and settings folder may end together. $af.lk is held while the
     # time is checked again and written; one left by a hook that died is taken
@@ -3457,10 +3532,11 @@ function Get-AskHead($st) {
 
 # Runs agent $exe ($argLine) in ~/.simpleterm/probe with SIMPLETERM_PROBE=1,
 # its standard input the lines $inLines, then the lines $moreLines once its
-# output holds $w1 (or at once without $w1), then open until the output holds
-# $w2 or 20 seconds passed; then closed, and the agent stopped 3 seconds
-# later (ask_pipe). Returns @{ res: ok (got $w2), gone (ended without it) or
-# timeout; text: its output }.
+# output holds $w1 (or at once without $w1), then open until the output
+# matches regular expression $w2 or 60 seconds passed (longer than the agents'
+# own sign-in refresh, SimpleTerm if/usage-ask#run, if/usage-ask-refresh#no-cut); then closed, and the agent
+# stopped 3 seconds later (ask_pipe). Returns @{ res: ok (got $w2), gone
+# (ended without it) or timeout; text: its output }.
 function Invoke-AskPipe([string]$exe, [string]$argLine, [string[]]$inLines, [string[]]$moreLines, [string]$w1, [string]$w2) {
     $st = @{ res = 'gone'; text = ''; eof = $false; task = $null; so = $null; buf = (New-Object byte[] 65536) }
     $p = $null
@@ -3479,12 +3555,12 @@ function Invoke-AskPipe([string]$exe, [string]$argLine, [string[]]$inLines, [str
         $si = $p.StandardInput.BaseStream
         Write-AskLines $si $inLines
         $sent = ($w1.Length -eq 0)
-        $until = [DateTime]::UtcNow.AddSeconds(20)
+        $until = [DateTime]::UtcNow.AddSeconds(60)
         $st.res = 'timeout'
         while ($true) {
             Step-AskOut $st
             if (-not $sent -and (Get-AskHead $st).Contains($w1)) { Write-AskLines $si $moreLines; $sent = $true }
-            if ((Get-AskHead $st).Contains($w2)) { $st.res = 'ok'; break }
+            if ([regex]::IsMatch((Get-AskHead $st), $w2)) { $st.res = 'ok'; break }
             if ($p.HasExited) {
                 # Ended: what it wrote is read to the end first.
                 $end = [DateTime]::UtcNow.AddSeconds(2)
@@ -3495,7 +3571,7 @@ function Invoke-AskPipe([string]$exe, [string]$argLine, [string[]]$inLines, [str
             if ([DateTime]::UtcNow -ge $until) { break }
             Start-Sleep -Milliseconds 100
         }
-        if ((Get-AskHead $st).Contains($w2)) { $st.res = 'ok' }
+        if ([regex]::IsMatch((Get-AskHead $st), $w2)) { $st.res = 'ok' }
         if (-not $sent) { Write-AskLines $si $moreLines }
         try { $p.StandardInput.Close() } catch { }
         $kill = [DateTime]::UtcNow.AddSeconds(3)
@@ -3511,11 +3587,11 @@ function Invoke-AskPipe([string]$exe, [string]$argLine, [string[]]$inLines, [str
     return $st
 }
 
-# The facts of the first line of output $text holding $w, cut to 256 KiB
-# (ask_facts).
+# The facts of the first line of output $text matching regular expression $w,
+# cut to 256 KiB (ask_facts).
 function Get-AskFacts([string]$text, [string]$w) {
     foreach ($line in $text.Split([char]10)) {
-        if (-not $line.Contains($w)) { continue }
+        if (-not [regex]::IsMatch($line, $w)) { continue }
         $l = $line + "`n"
         if ($l.Length -gt 262144) { $l = $l.Substring(0, 262144) }
         return (Get-Facts $l '')
@@ -3683,7 +3759,9 @@ function Invoke-AskChild($job) {
             if ($head.Contains('{"type":"system","subtype":"' + $k + '"')) { $hk = $true }
         }
     } elseif ($Script:Agent -ceq 'codex') {
-        $w2 = '"id":2,'
+        # The answer: "id":2 then , or } (an error answer ends with "id":2}; SimpleTerm if/usage-ask#run,
+        # hist/usage-ask#d23).
+        $w2 = '"id":2[,}]'
         $q = Invoke-AskPipe $ap 'app-server' @('{"id":1,"method":"initialize","params":{"clientInfo":{"name":"simpleterm","version":"' + $HookVersion + '"}}}') `
             @('{"method":"initialized"}', '{"id":2,"method":"account/rateLimits/read"}') '"id":1,' $w2
     } else { return }
@@ -6232,6 +6310,16 @@ try {
         elseif ($k -ceq 'codex_goal_check') { $o = [string](Get-ConfInt 'codex_goal_check' 5) }
         elseif ($k -ceq 'ask_delay') { $o = [string](Get-ConfInt 'ask_delay' 2) }
         Write-Out ($o + "`n")
+        exit 0
+    }
+    # Tests only: `agent-hook.ps1 <claude|codex> __refresh <credentials-file> <now>`
+    # prints skip or ask: whether a refresh is due at epoch <now> (the vectors of
+    # SimpleTerm if/usage-ask-refresh#vectors; as in agent-hook.sh).
+    if ($env:SIMPLETERM_HOOK_TEST -eq '1' -and $Mode -ceq '__refresh' -and $ScriptArgs.Count -gt 3) {
+        $Script:Agent = $Agent
+        $Script:Now = [int64]0
+        if (Test-UInt ([string]$ScriptArgs[3])) { $Script:Now = [int64][string]$ScriptArgs[3] }
+        if (Test-AskRefreshDue ([string]$ScriptArgs[2])) { Write-Out "skip`n" } else { Write-Out "ask`n" }
         exit 0
     }
     if ($Mode -eq '__send') {
