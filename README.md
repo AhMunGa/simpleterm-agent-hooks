@@ -593,10 +593,12 @@ the hook asks Codex as well (all its limit ids, also between requests). Asks hap
 
 - while the SimpleTerm app is connected (an SSH tunnel took the last event within 10 minutes);
 - once per 5 minutes per agent and settings folder (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`);
-- while asks of that agent version are not stopped (below). Every version and OS is asked.
+- while asks of that agent version are not stopped (below). Every version and OS is asked;
+- while the agent is not about to refresh its sign-in and, for Codex, while the hook can see its
+  sign-in's state (below).
 
 The ask runs in the background (the turn's hook does not wait), with its input and output
-closed, at most 20 seconds, in the empty folder `~/.simpleterm/probe`, with
+closed, its answer awaited 60 seconds at most, in the empty folder `~/.simpleterm/probe`, with
 `SIMPLETERM_PROBE=1` (a hook that the ask runs does nothing). It runs the agent's executable on
 `PATH`, links followed to the end (a native Claude Code install links `~/.local/bin/claude` to
 `~/.local/share/claude/versions/<version>`, which gives the version); otherwise the version is the
@@ -605,7 +607,7 @@ turn) when the executable changes, `unknown` if it gives none. The answer goes t
 only. Only one ask starts per 5 minutes even when several sessions end a turn at once.
 
 The sh hook starts the ask in a process group of its own (with `perl`, else `setsid`): when the
-agent has not ended 3 seconds after its answer (or the 20 seconds), every process of that group
+agent has not ended 3 seconds after its answer (or the 60 seconds), every process of that group
 gets TERM, and what is left 2 seconds later KILL, those that left the agent's tree too. On a
 server with neither `perl` nor `setsid` (a minimal container) the hook ends the agent's process
 tree instead, the same way, and a process that left the tree (its parent gone) is not reached. The
@@ -628,7 +630,7 @@ measured. What stops a version (an `unknown` one too):
   that version of the executable is not asked again (it is added to
   `~/.simpleterm/run/ask.<agent>.off`, one version a line). Codex's answer has no such numbers.
 - For Claude Code and Codex alike: after 3 failed asks in a row of the same version (no answer,
-  an unknown one, or none in 20 seconds) that version stops the same way. An answer clears the
+  an unknown one, or none in 60 seconds) that version stops the same way. An answer clears the
   count (`~/.simpleterm/run/ask.<agent>.fail`); a sign-in result (below) does not change it.
 
 What the asks do request: Claude Code its usage (`GET /api/oauth/usage`, about 10 small account
@@ -649,10 +651,31 @@ Codex 0.165.0 in an empty `CODEX_HOME`):
   plugin endpoints when signed in);
 - with an expired ChatGPT sign-in it refreshes the token (8 token requests were seen).
 
-Not checked: whether a successful refresh rewrites `auth.json`, and what happens when another
-Codex on the server refreshes at the same moment; whether the ChatGPT backend accepts the client
-name `simpleterm` it sees. To keep Codex out of it, set `usage_ask_codex=off`; its limits still
-come from its rollout.
+**Sign-in refresh.** An agent asked while its sign-in is about to expire refreshes it in the ask,
+and a successful refresh rewrites its credentials file (`auth.json`, `.credentials.json`); other
+running sessions of that agent then read the new token (measured 2026-11-16 with a mock sign-in
+server, Codex 0.167.0 and Claude Code 2.1.325). The server replaces the refresh token on each
+refresh, so an ask ended after that and before it saved the new one would sign every session of
+that agent out. So the hook does not ask in a turn where the credentials file says a refresh is due:
+the access token expires in less than 10 minutes or has expired (Claude Code
+`claudeAiOauth.expiresAt`, Codex the access token's `exp`), or Codex's `last_refresh` is more than 7
+days old. Nothing is counted, and a later turn asks once the agent has refreshed. Only those values
+(and whether Codex's `OPENAI_API_KEY` is set) are read, from the first 64 KiB of the file, only when
+the whole file is one complete JSON object, and they are not logged. When the file gives no value:
+
+- Claude Code is asked anyway (also with no such file, its sign-in kept in the macOS keychain): its
+  60-second wait is longer than its own refresh timeout (30 seconds), so the ask does not cut a
+  refresh (measured).
+- Codex is asked only with an API key sign-in (`tokens` empty, `OPENAI_API_KEY` set) or when the
+  hook read the access token's `exp` and no refresh is due. Otherwise it is not asked: no
+  `auth.json` (`cli_auth_credentials_store` other than `file`), one that cannot be read, is not
+  whole JSON or is larger than 64 KiB, or a token whose `exp` is not seen. An ask of Codex refreshes
+  at start-up and answers before it saved the refresh, whatever the wait (measured), so an ask that
+  cannot see the token's state is not started. The log says
+  `usage-ask codex skipped: sign-in state unknown`.
+
+Not checked: whether the ChatGPT backend accepts the client name `simpleterm` it sees. To keep
+Codex out of it, set `usage_ask_codex=off`; its limits still come from its rollout.
 
 The ask stops not only after a failed sign-in (`auth`) but also when the account has no plan
 limits to give (`not-subscriber`: no sign-in, an API key, `CLAUDE_CODE_OAUTH_TOKEN`, a gateway):
