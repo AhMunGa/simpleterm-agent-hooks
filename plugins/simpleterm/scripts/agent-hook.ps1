@@ -3356,49 +3356,78 @@ function Invoke-AskVerChild($job) {
     Remove-FileQ ($vc + '.lock')
 }
 
-# True if a refresh of the agent's sign-in token is due (SimpleTerm
-# if/usage-ask-refresh#skip, hist/usage-ask#d23; ask_refresh_due): an ask now
-# would make the asking process refresh it, and one ended after the server
-# rotated the token signs every process of that agent out. Read from the first
-# 64 KiB of credentials file $ind (if/usage-ask-refresh#fields, #bytes): Claude
-# Code's claudeAiOauth.expiresAt (an integer, milliseconds), Codex's exp of the
-# JWT tokens.access_token (an integer, seconds) and last_refresh (RFC 3339).
-# Due when the token expires in less than 10 minutes or has expired, or
-# (Codex) the last refresh is more than 7 days old. A file that is not there or
-# cannot be read, or a value that is not there or not of its form, does not
-# make it due: the ask runs, and its answer wait outlasts the agent's own
-# refresh (if/usage-ask-refresh#no-cut). The values are not logged.
-function Test-AskRefreshDue([string]$ind) {
+# Why the ask is skipped for the agent's sign-in token, or '' when it runs
+# (SimpleTerm if/usage-ask-refresh#skip, #fields, hist/usage-ask#d23, #d24;
+# ask_signin_skip): an ask now would make the asking process refresh the
+# token, and one ended after the server rotated it signs every process of that
+# agent out. Read from the first 64 KiB of credentials file $ind, and only when
+# the whole file is one complete JSON object (if/usage-ask-refresh#bytes):
+# Claude Code's claudeAiOauth.expiresAt (an integer, milliseconds), Codex's exp
+# of the JWT tokens.access_token (an integer, seconds), last_refresh (RFC 3339)
+# and whether OPENAI_API_KEY is a non-empty string. A refresh is due when the
+# token expires in less than 10 minutes or has expired, or (Codex) the last
+# refresh is more than 7 days old. Claude Code: an unknown value, or no values,
+# does not skip; the ask runs and its answer wait outlasts the agent's own
+# refresh (if/usage-ask-refresh#no-cut). Codex: the ask runs only for an API
+# key login (tokens missing or null) or a read exp with no refresh due;
+# anything else skips, since a Codex ask process may refresh at start-up and
+# answer before saving it (hist/usage-ask#e6). The values are not logged.
+function Get-AskSignInSkip([string]$ind) {
+    $unknown = ''
+    if ($Script:Agent -ceq 'codex') { $unknown = 'sign-in state unknown' }
     # The file is JSON only if all of it is read and it is one whole object:
     # the facts parser reads a document cut short as far as it goes. (A file
-    # over 64 KiB is not known to be JSON.)
+    # over 64 KiB gives no values.) The scan also notes the top-level tokens
+    # value: - none, n null, v another.
     $len = -1
-    try { $len = (New-Object IO.FileInfo($ind)).Length } catch { $len = -1 }
-    if ($len -lt 0 -or $len -gt 65536) { return $false }
+    try { if ([IO.File]::Exists($ind)) { $len = (New-Object IO.FileInfo($ind)).Length } } catch { $len = -1 }
+    if ($len -lt 0 -or $len -gt 65536) { return $unknown }
     $t = Read-HeadB $ind 65536
-    if (-not $t) { return $false }
-    $d = 0; $q = $false; $z = $false
+    if (-not $t) { return $unknown }
+    $d = 0; $q = $false; $z = $false; $ek = $false; $kq = $false; $vs = $false; $k = ''; $kb = ''; $tv = '-'
     for ($i = 0; $i -lt $t.Length; $i++) {
         $c = $t[$i]
         if ($q) {
-            if ($c -eq [char]92) { $i++ } elseif ($c -eq [char]34) { $q = $false }
+            if ($c -eq [char]92) {
+                if ($kq -and $i + 1 -lt $t.Length) { $kb += [string]$c + $t[$i + 1] }
+                $i++
+            } elseif ($c -eq [char]34) {
+                $q = $false
+                if ($kq) { $k = $kb; $kq = $false }
+            } elseif ($kq) { $kb += $c }
             continue
         }
         if ($c -eq [char]32 -or $c -eq [char]9 -or $c -eq [char]13 -or $c -eq [char]10) { continue }
-        if ($z -or ($d -eq 0 -and $c -ne [char]123)) { return $false }
-        if ($c -eq [char]34) { $q = $true }
-        elseif ($c -eq [char]123 -or $c -eq [char]91) { $d++ }
+        if ($z -or ($d -eq 0 -and $c -ne [char]123)) { return $unknown }
+        if ($vs) {
+            $vs = $false
+            if ($k -ceq 'tokens' -and $tv -ceq '-') {
+                $tv = 'v'
+                if ($i + 4 -lt $t.Length -and $t.Substring($i, 4) -ceq 'null' -and " `t`r`n,}".IndexOf($t[$i + 4]) -ge 0) { $tv = 'n' }
+            }
+        }
+        if ($c -eq [char]34) {
+            $q = $true
+            if ($d -eq 1 -and $ek) { $kq = $true; $kb = ''; $ek = $false }
+        }
+        elseif ($c -eq [char]123 -or $c -eq [char]91) { $d++; if ($d -eq 1) { $ek = $true } }
         elseif ($c -eq [char]125 -or $c -eq [char]93) { $d--; if ($d -eq 0) { $z = $true } }
+        elseif ($d -eq 1 -and $c -eq [char]44) { $ek = $true }
+        elseif ($d -eq 1 -and $c -eq [char]58) { $vs = $true }
     }
-    if (-not $z) { return $false }
+    if (-not $z) { return $unknown }
     $m = Read-FactMap (Get-Facts ($t + "`n") '')
     $now = [double]$Script:Now
     $num = '\A-?[0-9]+\z'
     if ($Script:Agent -ceq 'claude') {
         $ms = Get-FactV $m 'claudeAiOauth.expiresAt'
-        return ((Get-FactT $m 'claudeAiOauth.expiresAt') -ceq 'r' -and $ms -cmatch $num -and ([double]::Parse($ms, $Inv) - $now * 1000) -lt 600000)
+        if ((Get-FactT $m 'claudeAiOauth.expiresAt') -ceq 'r' -and $ms -cmatch $num -and ([double]::Parse($ms, $Inv) - $now * 1000) -lt 600000) { return 'sign-in refresh due' }
+        return ''
     }
+    # An API key login: nothing to refresh.
+    if ($tv -cne 'v' -and (Get-FactT $m 'OPENAI_API_KEY') -ceq 's' -and (Get-FactV $m 'OPENAI_API_KEY') -cne '') { return '' }
     $due = $false
+    $ex = $false
     $tok = ''
     if ((Get-FactT $m 'tokens.access_token') -ceq 's') { $tok = Get-FactV $m 'tokens.access_token' }
     $parts = $tok.Split([char]'.')
@@ -3412,7 +3441,10 @@ function Test-AskRefreshDue([string]$ind) {
         if ($pl) {
             $pm = Read-FactMap (Get-Facts ($pl + "`n") '')
             $exp = Get-FactV $pm 'exp'
-            if ((Get-FactT $pm 'exp') -ceq 'r' -and $exp -cmatch $num -and ([double]::Parse($exp, $Inv) - $now) -lt 600) { $due = $true }
+            if ((Get-FactT $pm 'exp') -ceq 'r' -and $exp -cmatch $num) {
+                $ex = $true
+                if (([double]::Parse($exp, $Inv) - $now) -lt 600) { $due = $true }
+            }
         }
     }
     $lr = Get-FactV $m 'last_refresh'
@@ -3420,14 +3452,16 @@ function Test-AskRefreshDue([string]$ind) {
         $e = Get-IsoEpoch $lr
         if ($e -ge 0 -and ($now - $e) -gt 604800) { $due = $true }
     }
-    return $due
+    if ($due) { return 'sign-in refresh due' }
+    if (-not $ex) { return $unknown }
+    return ''
 }
 
 # At the end of a turn, while the app is connected, at most every 5 minutes
 # per agent and settings folder: asks Claude Code or Codex for its limits in a
 # detached child (stdio closed, its answer awaited 60 seconds at most), unless
 # asks of the version of the executable that the ask runs were stopped (SimpleTerm if/usage-ask#failures, hist/usage-ask#d21, hist/usage-ask#d22)
-# or the agent is about to refresh its sign-in token (Test-AskRefreshDue).
+# or the agent is about to refresh its sign-in token (Get-AskSignInSkip).
 # After a failed sign-in or an answer of no plan limits (not-subscriber) it
 # asks again only once the agent's credentials file changed. usage_ask=off in
 # agent-hook.conf turns it off; usage_ask_codex=off turns off Codex's only
@@ -3465,11 +3499,12 @@ function Invoke-UsageAsk {
         Remove-FileQ $auth
     }
     if (Test-AskRecent $af) { return }
-    # A refresh of the agent's sign-in token due (SimpleTerm if/usage-ask#conditions 9,
-    # if/usage-ask-refresh#skip): no ask in this turn; nothing is counted and the 5-minute
-    # slot is not taken.
-    if (Test-AskRefreshDue $ind) {
-        Write-Log ('usage-ask ' + $Script:Agent + ' skipped: sign-in refresh due')
+    # A refresh of the agent's sign-in token due, or (Codex) its state not seen
+    # (SimpleTerm if/usage-ask#conditions 9, if/usage-ask-refresh#skip, #fields): no ask in
+    # this turn; nothing is counted and the 5-minute slot is not taken.
+    $why = Get-AskSignInSkip $ind
+    if ($why) {
+        Write-Log ('usage-ask ' + $Script:Agent + ' skipped: ' + $why)
         return
     }
     # The slot is claimed at once: Stop hooks of several sessions of this
@@ -6319,7 +6354,7 @@ try {
         $Script:Agent = $Agent
         $Script:Now = [int64]0
         if (Test-UInt ([string]$ScriptArgs[3])) { $Script:Now = [int64][string]$ScriptArgs[3] }
-        if (Test-AskRefreshDue ([string]$ScriptArgs[2])) { Write-Out "skip`n" } else { Write-Out "ask`n" }
+        if (Get-AskSignInSkip ([string]$ScriptArgs[2])) { Write-Out "skip`n" } else { Write-Out "ask`n" }
         exit 0
     }
     if ($Mode -eq '__send') {

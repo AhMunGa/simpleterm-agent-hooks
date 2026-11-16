@@ -3990,6 +3990,10 @@ def t_v2_usage_ask(s):
             "codex": snap("codex", 4), "codex_bengalfox": snap("codex_bengalfox", 17)}}}, separators=(",", ":")) + "\n"
         cstop = json.dumps({"session_id": "cx9", "turn_id": "t", "transcript_path": str(ro), "cwd": "/w/repo", "hook_event_name": "Stop",
                             "model": "gpt-5.5", "stop_hook_active": False, "last_assistant_message": "Done."})
+        # A ChatGPT sign-in whose token the hook can see, 2 hours left (a Codex ask runs only then or for an
+        # API key login: SimpleTerm if/usage-ask-refresh#fields).
+        xp = base64.urlsafe_b64encode(json.dumps({"exp": int(time.time()) + 7200}).encode()).decode().rstrip("=")
+        write(s.home / ".codex" / "auth.json", json.dumps({"OPENAI_API_KEY": None, "tokens": {"access_token": "eyJhbGciOiJub25lIn0.%s.c2ln" % xp}}))
         # On by default (SimpleTerm hist/usage-ask#d22); usage_ask_codex=off turns off Codex's asks only.
         for v in ("off", "No", "OFF   # not Codex", '"false"', "0"):
             setup({"id": 1, "result": {"userAgent": "x"}}, conf={"usage_ask_codex": v})
@@ -4010,17 +4014,19 @@ def t_v2_usage_ask(s):
                 and p.get("plan") == "plus" and p.get("uq", {}).get("ok") is True, str(p)[:500])
         (s.tmp / "reply2").unlink()
     finally:
+        (s.home / ".codex" / "auth.json").unlink() if (s.home / ".codex" / "auth.json").exists() else None
         tun.terminate()
         tun.wait(5)
 
 
 def t_v2_usage_ask_refresh(s):
-    """SimpleTerm if/usage-ask-refresh#skip, #no-cut, if/usage-ask#run, hist/usage-ask#d23: no ask in a turn where the agent is about to refresh its
-    sign-in token (Claude Code: claudeAiOauth.expiresAt less than 10 minutes away or past; Codex: the exp of the JWT
-    tokens.access_token so, or last_refresh more than 7 days ago), and then nothing is counted and the 5-minute slot is
-    not taken; a credentials file that is not there, cannot be read or is broken, or a value not there or not of its
-    form, asks. The answer is awaited 60 seconds (0.5.1: 20). A Codex error answer, which ends with "id":2}, is read
-    (auth, not-subscriber), not taken for a timeout."""
+    """SimpleTerm if/usage-ask-refresh#skip, #fields, #no-cut, if/usage-ask#run, hist/usage-ask#d23, #d24: no ask in a turn where the agent is
+    about to refresh its sign-in token (Claude Code: claudeAiOauth.expiresAt less than 10 minutes away or past; Codex: the
+    exp of the JWT tokens.access_token so, or last_refresh more than 7 days ago), and then nothing is counted and the
+    5-minute slot is not taken. Claude Code: a credentials file that is not there, cannot be read or is broken, or a
+    value not there or not of its form, asks. Codex asks only for an API key login (tokens null) or a read exp with no
+    refresh due; anything else skips the same way (sign-in state unknown). The answer is awaited 60 seconds (0.5.1:
+    20). A Codex error answer, which ends with "id":2}, is read (auth, not-subscriber), not taken for a timeout."""
     tun, tctl = s.spawn_mock()
     run = s.home / ".simpleterm" / "run"
     ccred = s.home / ".claude" / ".credentials.json"
@@ -4122,24 +4128,40 @@ def t_v2_usage_ask_refresh(s):
         auth = lambda tok, lr: json.dumps({"OPENAI_API_KEY": None, "tokens": {"id_token": jwt({"exp": now + 7200}), "access_token": tok,
                                                                               "refresh_token": "rt-x", "account_id": "acc"}, "last_refresh": lr}, indent=2)
         acct = {"https://api.openai.com/auth": {"chatgpt_account_id": "acc", "chatgpt_plan_type": "plus"}}
-        for name, text in (("exp in 5 minutes", auth(jwt(dict(acct, exp=now + 300)), iso(now - 86400))),
-                           ("exp a minute past", auth(jwt(dict(acct, exp=now - 60)), iso(now - 86400))),
-                           ("last_refresh 8 days ago", auth(jwt(dict(acct, exp=now + 7200)), iso(now - 8 * 86400))),
-                           ("no JWT, last_refresh 8 days ago", auth("not-a-jwt", iso(now - 8 * 86400)))):
-            setup("codex")
-            write(xcred, text)
-            s.check("ask refresh: codex, %s -> not asked" % name, not_asked("codex"), "%d asks" % asks())
-            left = sorted(f.name for f in run.glob("ask.codex.*"))
-            s.check("ask refresh: codex, %s -> nothing counted, no 5-minute slot, logged" % name,
-                    not left and "usage-ask codex skipped: sign-in refresh due" in s.log_text(), "%s; %s" % (left, s.log_text()[-200:]))
-        for name, text in (("exp in 2 hours, last_refresh a day ago", auth(jwt(dict(acct, exp=now + 7200)), iso(now - 86400))),
-                           ("exp in 2 hours (a padded payload), last_refresh with an offset", auth(jwt(dict(acct, exp=now + 7200, x="ab")), iso(now - 86400)[:19] + "+09:00")),
-                           ("no JWT, last_refresh a day ago", auth("not-a-jwt", iso(now - 86400))),
-                           ("a JWT payload not base64url", auth(jwt("e30%%%"), iso(now - 86400))), ("a JWT payload not JSON", auth(jwt("AAAA"), iso(now - 86400))),
-                           ("no file", None), ("not JSON", "{\"tokens\": "), ("an API key", json.dumps({"OPENAI_API_KEY": "sk-x", "tokens": None, "last_refresh": None}))):
+        fresh = auth(jwt(dict(acct, exp=now + 7200)), iso(now - 86400))
+        skips = [("exp in 5 minutes", auth(jwt(dict(acct, exp=now + 300)), iso(now - 86400)), "refresh due"),
+                 ("exp a minute past", auth(jwt(dict(acct, exp=now - 60)), iso(now - 86400)), "refresh due"),
+                 ("last_refresh 8 days ago", auth(jwt(dict(acct, exp=now + 7200)), iso(now - 8 * 86400)), "refresh due"),
+                 ("no JWT, last_refresh 8 days ago", auth("not-a-jwt", iso(now - 8 * 86400)), "refresh due"),
+                 # The token's state not seen (#fields): skipped too, logged apart.
+                 ("no JWT, last_refresh a day ago", auth("not-a-jwt", iso(now - 86400)), "state unknown"),
+                 ("a JWT payload not base64url", auth(jwt("e30%%%"), iso(now - 86400)), "state unknown"),
+                 ("a JWT payload not JSON", auth(jwt("AAAA"), iso(now - 86400)), "state unknown"),
+                 ("tokens without access_token", json.dumps({"OPENAI_API_KEY": None, "tokens": {"refresh_token": "rt-x"}}), "state unknown"),
+                 ("no file", None, "state unknown"), ("not JSON", "not json\n", "state unknown"), ("cut short", fresh[:60], "state unknown"),
+                 ("larger than 64 KiB", json.dumps(dict(json.loads(fresh), pad="x" * 70000)), "state unknown"),
+                 ("unreadable", fresh, "state unknown")]
+        for name, text, why in skips:
             setup("codex")
             if text is not None:
                 write(xcred, text)
+                if name == "unreadable":
+                    xcred.chmod(0)
+            s.check("ask refresh: codex, %s -> not asked" % name, not_asked("codex"), "%d asks" % asks())
+            left = sorted(f.name for f in run.glob("ask.codex.*"))
+            s.check("ask refresh: codex, %s -> nothing counted, no 5-minute slot, logged (%s)" % (name, why),
+                    not left and ("usage-ask codex skipped: sign-in " + why) in s.log_text(), "%s; %s" % (left, s.log_text()[-200:]))
+        # The slot was not taken: once the hook sees a fresh token, the next turn asks at once.
+        xcred.chmod(0o600)
+        write(xcred, fresh)
+        s.check("ask refresh: codex, then a token it can see (2 hours left) -> asked at once", asked("codex"), "%d asks; %s" % (asks(), s.log_text()[-200:]))
+        for name, text in (("exp in 2 hours, last_refresh a day ago", fresh),
+                           ("exp in 2 hours (a padded payload), last_refresh with an offset", auth(jwt(dict(acct, exp=now + 7200, x="ab")), iso(now - 86400)[:19] + "+09:00")),
+                           ("exp in 2 hours, no last_refresh", json.dumps({"tokens": {"access_token": jwt(dict(acct, exp=now + 7200))}})),
+                           ("an API key", json.dumps({"OPENAI_API_KEY": "sk-x", "tokens": None, "last_refresh": None})),
+                           ("an API key, no tokens", json.dumps({"OPENAI_API_KEY": "sk-x"}))):
+            setup("codex")
+            write(xcred, text)
             s.check("ask refresh: codex, %s -> asked" % name, asked("codex"), "%d asks; %s" % (asks(), s.log_text()[-200:]))
         # --- The answer wait (60 seconds): an answer after 50 seconds is read (0.5.1 waited 20).
         setup("claude", delay=50)
@@ -4151,6 +4173,7 @@ def t_v2_usage_ask_refresh(s):
         for msg, err in (("codex account authentication required to read rate limits", "auth"),
                          ("chatgpt authentication required to read rate limits", "not-subscriber")):
             setup("codex", reply2={"error": {"code": -32600, "message": msg}, "id": 2})
+            write(xcred, fresh)
             t0 = time.time()
             turn("codex")
             u = wait_for(lambda: events("codex"), 30)
@@ -4167,46 +4190,77 @@ def t_v2_usage_ask_refresh(s):
 
 
 def t_usage_ask_refresh_vectors(s):
-    """SimpleTerm if/usage-ask-refresh#vectors (now 1800000000) and #fields: whether a refresh is due, as the hook's
-    test mode `__refresh <file> <now>` prints it; values not of their form (a fraction, a date-time not RFC 3339,
-    a padded JWT payload) and a value past the first 64 KiB are unknown, and so is a file that is not one whole JSON
-    object (the facts parser reads a document cut short as far as it goes): ask."""
+    """SimpleTerm if/usage-ask-refresh#vectors (now 1800000000) and #fields: whether the ask is skipped, as the hook's
+    test mode `__refresh <file> <now>` prints it. Values not of their form (a fraction, a date-time not RFC 3339, a
+    padded JWT payload) and a value past the first 64 KiB are unknown, and a file that is not one whole JSON object
+    (the facts parser reads a document cut short as far as it goes) gives no values: Claude Code then asks, Codex
+    skips unless it is an API key login (tokens missing or null, OPENAI_API_KEY a non-empty string)."""
     now = "1800000000"
     hdr = "eyJhbGciOiJub25lIn0"
+    ok = hdr + ".eyJleHAiOjE4MDAwMDA2MDF9."
     b64 = lambda o: base64.urlsafe_b64encode(json.dumps(o, separators=(",", ":")).encode()).decode()
     codex = lambda tok, lr=None: json.dumps(dict({"tokens": {"access_token": tok}}, **({} if lr is None else {"last_refresh": lr})))
     claude = lambda ms: json.dumps({"claudeAiOauth": {"accessToken": "x", "expiresAt": ms}})
     raw_claude = lambda ms: '{"claudeAiOauth":{"expiresAt":%s}}' % ms
+    pad = lambda t, n: t + " " * (n - len(t))
+    v2, v9 = codex(ok, "2027-01-15T07:00:00Z"), claude(1800000601000)
     vectors = [
         ("V1", "codex", codex(hdr + ".eyJleHAiOjE4MDAwMDA1OTl9."), "skip"),
-        ("V2", "codex", codex(hdr + ".eyJleHAiOjE4MDAwMDA2MDF9.", "2027-01-15T07:00:00Z"), "ask"),
+        ("V2", "codex", v2, "ask"),
         ("V3", "codex", codex(hdr + ".eyJleHAiOjE3OTk5OTk5OTl9."), "skip"),
-        ("V4", "codex", codex(hdr + ".eyJleHAiOjE4MDAwMDA2MDF9.", "2027-01-08T07:59:59.999999Z"), "skip"),
-        ("V5", "codex", codex(hdr + ".eyJleHAiOjE4MDAwMDA2MDF9.", "2027-01-08T16:59:59+09:00"), "skip"),
-        ("V6", "codex", codex(hdr + ".eyJleHAiOjE4MDAwMDA2MDF9.", "2027-01-08T08:00:01Z"), "ask"),
-        ("V7", "codex", codex("abc"), "ask"),
+        ("V4", "codex", codex(ok, "2027-01-08T07:59:59.999999Z"), "skip"),
+        ("V5", "codex", codex(ok, "2027-01-08T16:59:59+09:00"), "skip"),
+        ("V6", "codex", codex(ok, "2027-01-08T08:00:01Z"), "ask"),
+        ("V7", "codex", codex("abc"), "skip"),
         ("V8", "claude", claude(1800000599000), "skip"),
-        ("V9", "claude", claude(1800000601000), "ask"),
+        ("V9", "claude", v9, "ask"),
         ("V10", "claude", claude(0), "skip"),
-        ("V11 missing", "codex", None, "ask"),
-        ("V11 missing", "claude", None, "ask"),
-        ("V11 not JSON", "codex", "not json", "ask"),
-        ("V11 not JSON", "claude", "{\"claudeAiOauth\": {\"expiresAt\": 1800000599000", "ask"),
+        ("V11a missing", "claude", None, "ask"),
+        ("V11b not JSON", "claude", "not json", "ask"),
+        ("V11c cut off", "claude", v9[:-1], "ask"),
+        ("V11d 65537 bytes", "claude", pad(v9, 65537), "ask"),
+        ("V12a missing", "codex", None, "skip"),
+        ("V12b not JSON", "codex", "not json", "skip"),
+        ("V12c cut off", "codex", v2[:-1], "skip"),
+        ("V12d 65537 bytes", "codex", pad(v2, 65537), "skip"),
+        ("V12e 65536 bytes", "codex", pad(v2, 65536), "ask"),
+        ("V13", "codex", '{"OPENAI_API_KEY":"sk-test","tokens":null}', "ask"),
+        ("V14", "codex", json.dumps({"tokens": {"id_token": "x", "refresh_token": "y"}}), "skip"),
+        ("V15", "codex", '{"OPENAI_API_KEY":"","tokens":null}', "skip"),
+        ("V16", "codex", json.dumps({"OPENAI_API_KEY": "sk-test", "tokens": {"id_token": "x", "refresh_token": "y"}}), "skip"),
+        ("V17 exp a string", "codex", codex(hdr + "." + b64({"exp": "1800000601"}).rstrip("=") + "."), "skip"),
+        ("V17 exp not an integer", "codex", codex(hdr + "." + b64({"exp": 1800000601.5}).rstrip("=") + "."), "skip"),
+        ("V18", "codex", codex(ok), "ask"),
+        # Past the spec's vectors: the same bounds the other way, the API key cases, values not of their form.
+        ("cut off, a past expiresAt", "claude", "{\"claudeAiOauth\": {\"expiresAt\": 1800000599000", "ask"),
+        ("larger than 64 KiB, a past expiresAt", "claude", json.dumps({"pad": "x" * 70000, "claudeAiOauth": {"expiresAt": 1800000599000}}), "ask"),
+        ("65536 bytes, a past expiresAt", "claude", pad(claude(1800000599000), 65536), "skip"),
         ("cut after an inner }", "claude", raw_claude("1800000599000")[:-1], "ask"),
         ("text after the object", "claude", raw_claude("1800000599000") + " x", "ask"),
         ("braces in a string", "claude", '{"a":"}{\\"","claudeAiOauth":{"expiresAt":1800000599000}}\n', "skip"),
-        # Not of its form (#fields): unknown, so no skip.
-        ("exp with a fraction", "codex", codex(hdr + "." + b64({"exp": 1800000599.5}).rstrip("=") + "."), "ask"),
-        ("exp a string", "codex", codex(hdr + "." + b64({"exp": "1800000599"}).rstrip("=") + "."), "ask"),
-        ("a padded payload", "codex", codex(hdr + "." + b64({"exp": 1800000599, "a": 12}) + "."), "ask"),
-        ("last_refresh with a space", "codex", codex("abc", "2027-01-08 07:59:59Z"), "ask"),
-        ("last_refresh with z", "codex", codex("abc", "2027-01-08T07:59:59z"), "ask"),
-        ("last_refresh +0900", "codex", codex("abc", "2027-01-08T16:59:59+0900"), "ask"),
-        ("last_refresh without a zone", "codex", codex("abc", "2027-01-08T07:59:59"), "ask"),
+        ("within 64 KiB", "codex", json.dumps({"pad": "x" * 60000, "tokens": {"access_token": ok}}), "ask"),
+        # The API key login: tokens missing or null at the top level, the key a non-empty string; last_refresh is not read.
+        ("an API key, no tokens", "codex", '{"OPENAI_API_KEY":"sk-test"}', "ask"),
+        ("an API key, tokens null with spaces", "codex", '{ "OPENAI_API_KEY" : "sk-test" , "tokens" :  null }', "ask"),
+        ("an API key, last_refresh 8 days", "codex", '{"OPENAI_API_KEY":"sk-test","tokens":null,"last_refresh":"2027-01-07T08:00:00Z"}', "ask"),
+        ("an API key, tokens in another object", "codex", '{"x":{"tokens":{"access_token":"abc"}},"OPENAI_API_KEY":"sk-test"}', "ask"),
+        ("an API key, \"tokens\": in a string", "codex", '{"a":"\\"tokens\\":{","OPENAI_API_KEY":"sk-test","tokens":null}', "ask"),
+        ("an API key not a string", "codex", '{"OPENAI_API_KEY":5,"tokens":null}', "skip"),
+        ("no API key, tokens null", "codex", '{"OPENAI_API_KEY":null,"tokens":null}', "skip"),
+        ("an API key, tokens an empty object", "codex", '{"OPENAI_API_KEY":"sk-test","tokens":{}}', "skip"),
+        ("an API key, tokens nullx", "codex", '{"OPENAI_API_KEY":"sk-test","tokens":nullx}', "skip"),
+        ("an API key, tokens with exp due", "codex", json.dumps({"OPENAI_API_KEY": "sk-test", "tokens": {"access_token": hdr + ".eyJleHAiOjE4MDAwMDA1OTl9."}}), "skip"),
+        ("an API key, tokens with exp fine", "codex", json.dumps({"OPENAI_API_KEY": "sk-test", "tokens": {"access_token": ok}}), "ask"),
+        # Not of its form (#fields): unknown. Codex: an exp in 10 minutes and 1 second not read, so skipped (V17
+        # too); a last_refresh 7 days and 1 second old not read, so the ask runs on a fine exp.
+        ("a padded payload", "codex", codex(hdr + "." + b64({"exp": 1800000601, "a": 12}) + "."), "skip"),
+        ("last_refresh with a space", "codex", codex(ok, "2027-01-08 07:59:59Z"), "ask"),
+        ("last_refresh with z", "codex", codex(ok, "2027-01-08T07:59:59z"), "ask"),
+        ("last_refresh +0900", "codex", codex(ok, "2027-01-08T16:59:59+0900"), "ask"),
+        ("last_refresh without a zone", "codex", codex(ok, "2027-01-08T07:59:59"), "ask"),
         ("last_refresh 8 days, no JWT", "codex", codex("abc", "2027-01-07T08:00:00Z"), "skip"),
         ("expiresAt with a fraction", "claude", raw_claude("1800000599000.5"), "ask"),
         ("expiresAt a string", "claude", claude("1800000599000"), "ask"),
-        ("expiresAt past 64 KiB", "claude", json.dumps({"pad": "x" * 70000, "claudeAiOauth": {"expiresAt": 1800000599000}}), "ask"),
         ("expiresAt within 64 KiB", "claude", json.dumps({"pad": "x" * 60000, "claudeAiOauth": {"expiresAt": 1800000599000}}), "skip"),
     ]
     for i, (name, agent, text, want) in enumerate(vectors):

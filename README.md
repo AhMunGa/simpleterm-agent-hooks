@@ -594,7 +594,8 @@ the hook asks Codex as well (all its limit ids, also between requests). Asks hap
 - while the SimpleTerm app is connected (an SSH tunnel took the last event within 10 minutes);
 - once per 5 minutes per agent and settings folder (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`);
 - while asks of that agent version are not stopped (below). Every version and OS is asked;
-- while the agent is not about to refresh its sign-in (below).
+- while the agent is not about to refresh its sign-in and, for Codex, while the hook can see its
+  sign-in's state (below).
 
 The ask runs in the background (the turn's hook does not wait), with its input and output
 closed, its answer awaited 60 seconds at most, in the empty folder `~/.simpleterm/probe`, with
@@ -659,11 +660,19 @@ that agent out. So the hook does not ask in a turn where the credentials file sa
 the access token expires in less than 10 minutes or has expired (Claude Code
 `claudeAiOauth.expiresAt`, Codex the access token's `exp`), or Codex's `last_refresh` is more than 7
 days old. Nothing is counted, and a later turn asks once the agent has refreshed. Only those values
-are read, from the first 64 KiB of the file, and they are not logged. Where there is no such file
-(Claude Code keeping its sign-in in the macOS keychain), or it cannot be read or is not whole JSON,
-the ask runs; its 60-second wait
-is longer than the agents' own refresh timeouts (Codex 45 seconds, Claude Code 30 seconds), so the
-ask does not cut a refresh.
+(and whether Codex's `OPENAI_API_KEY` is set) are read, from the first 64 KiB of the file, only when
+the whole file is one complete JSON object, and they are not logged. When the file gives no value:
+
+- Claude Code is asked anyway (also with no such file, its sign-in kept in the macOS keychain): its
+  60-second wait is longer than its own refresh timeout (30 seconds), so the ask does not cut a
+  refresh (measured).
+- Codex is asked only with an API key sign-in (`tokens` empty, `OPENAI_API_KEY` set) or when the
+  hook read the access token's `exp` and no refresh is due. Otherwise it is not asked: no
+  `auth.json` (`cli_auth_credentials_store` other than `file`), one that cannot be read, is not
+  whole JSON or is larger than 64 KiB, or a token whose `exp` is not seen. An ask of Codex refreshes
+  at start-up and answers before it saved the refresh, whatever the wait (measured), so an ask that
+  cannot see the token's state is not started. The log says
+  `usage-ask codex skipped: sign-in state unknown`.
 
 Not checked: whether the ChatGPT backend accepts the client name `simpleterm` it sees. To keep
 Codex out of it, set `usage_ask_codex=off`; its limits still come from its rollout.

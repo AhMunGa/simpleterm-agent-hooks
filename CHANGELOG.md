@@ -3,7 +3,7 @@
 ## Unreleased
 
 The usage ask no longer signs Claude Code or Codex out by cutting a sign-in refresh (SimpleTerm
-`if/usage-ask-refresh`, `hist/usage-ask#d23`, `hist/usage-ask#e5`, issue AhMunGa/simple-term#693).
+`if/usage-ask-refresh`, `hist/usage-ask#d23`, `#d24`, `hist/usage-ask#e5`, `#e6`, issue AhMunGa/simple-term#693).
 
 - **What happened**: an ask started while the agent's access token was about to expire made the asking process
   refresh it. When the ask was ended at its 20-second limit after the server had rotated the refresh token, the saved
@@ -12,8 +12,13 @@ The usage ask no longer signs Claude Code or Codex out by cutting a sign-in refr
   server on Codex 0.167.0 and Claude Code 2.1.325; their own refresh timeouts are 45 and 30 seconds.
 - **Now**, in the sh and the PowerShell hook: no ask in a turn where the credentials file says a refresh is due (the
   access token expires in less than 10 minutes or has expired; for Codex also a `last_refresh` more than 7 days old),
-  and nothing is counted then; a file that is not there, cannot be read or is not whole JSON still asks. The answer is awaited 60
-  seconds instead of 20.
+  and nothing is counted then. The answer is awaited 60 seconds instead of 20.
+  - Claude Code: a file that is not there, cannot be read or is not whole JSON still asks; the 60 seconds outlast its
+    refresh (measured).
+  - Codex: asked only with an API key sign-in or when the hook read the access token's `exp` and no refresh is due.
+    A missing, unreadable, broken or over-64-KiB `auth.json`, or a token whose `exp` is not seen, skips the ask
+    (logged `sign-in state unknown`): an ask of Codex refreshes at start-up and answers before saving the refresh,
+    whatever the wait (measured).
 - **Codex error answers**: an error answer ends with `"id":2}`, which the ask did not take for an answer, so a failed
   sign-in or an API key was read as `timeout` after 20 seconds, and three of them stopped asks of that Codex version.
   It is now read as `auth` or `not-subscriber`.
