@@ -3017,6 +3017,144 @@ def t_copilot_hooks(s):
     s.check("copilot paths: a marketplace install first", rc == 0 and out.strip() == "market copilot preToolUse", "%d %r" % (rc, out))
 
 
+TTY_PY = (
+    # Makes the pty slave argv[1] this session's controlling terminal (the hook's /dev/tty), then runs argv[2:].
+    "import fcntl, os, sys, termios\n"
+    "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+    "try:\n"
+    "    fcntl.ioctl(fd, termios.TIOCSCTTY, 0)\n"
+    "except OSError:\n"
+    "    pass\n"
+    "os.close(fd)\n"
+    "os.execv(sys.argv[2], sys.argv[2:])\n"
+)
+
+
+def on_tty(s, agent, stdin, extra, args=(), hold=None):
+    """Runs the hook with a pty as its controlling terminal, as Copilot CLI runs its hooks (in the shell's
+    session: SimpleTerm hist/hook-events#e27). Returns (stdout, bytes the hook wrote to the terminal). With `hold`,
+    the input is held back until hold(read, process) returns: read() gives the terminal's bytes so far.
+    The master is read the whole time the hook lives, and the slave stays open here: a session leader whose terminal
+    has unread output does not finish exiting on macOS (it stays `?Es`, measured), and a pty whose slave is closed
+    loses what is written to it."""
+    master, slave = os.openpty()
+    got = bytearray()
+    lock = threading.Lock()
+    stop = threading.Event()
+
+    def drain(wait):
+        while select.select([master], [], [], wait)[0]:
+            try:
+                b = os.read(master, 4096)
+            except OSError:
+                return
+            if not b:
+                return
+            with lock:
+                got.extend(b)
+
+    def pump():
+        while not stop.is_set():
+            drain(0.05)
+            time.sleep(0.02)
+
+    def read():
+        with lock:
+            return bytes(got)
+    th = threading.Thread(target=pump, daemon=True)
+    th.start()
+    try:
+        cmd = [sys.executable, "-I", "-c", TTY_PY, os.ttyname(slave)] + list(s.argv) + [agent] + list(args)
+        p = s.popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=s.env(extra), cwd=str(s.tmp))
+        if hold:
+            hold(read, p)
+        try:
+            out, _ = p.communicate(stdin.encode(), timeout=60)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            try:
+                p.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+            s.check("on a terminal: %s %s ends within 60 s" % (agent, " ".join(args)), False, "env %s; tty %r" % (extra, read()))
+            return "", read()
+        stop.set()
+        th.join(2)
+        drain(0.2)
+        return out.decode("utf-8", "replace"), read()
+    finally:
+        stop.set()
+        th.join(2)
+        os.close(slave)
+        os.close(master)
+
+
+def t_copilot_session_end(s):
+    """Copilot CLI writes no OSC 7501 `clear` when it ends (1.0.109); on sessionEnd the hook writes exactly
+    ESC ] 7501 ; state=clear BEL to /dev/tty, once and before anything else (the record, the relay send), only with
+    SIMPLETERM=1, TMUX, STY and HERDR_ENV all empty and a terminal; else nothing and no log line (SimpleTerm
+    if/hook-events#session-end, #vectors, hist/hook-events#d10). No other agent's end writes it."""
+    clear = bytes.fromhex("1b5d373530313b73746174653d636c65617207")
+    tun, tctl = s.spawn_mock()
+    try:
+        session_end_cases(s, tctl, clear)
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+
+def session_end_cases(s, tctl, clear):
+    s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})])
+    tctl("/_ctl/reset", {})
+    tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown")}})
+    base = {"sessionId": "cse-1", "timestamp": 1793635914148, "cwd": "/w/proj", "reason": "user_exit"}
+    env = {"SIMPLETERM": "1", "COPILOT_CLI_BINARY_VERSION": "1.0.109"}
+    s.run("copilot", json.dumps(dict(base, source="new", initialPrompt="")), env, args=("sessionStart",))
+    s.settle("the sessionStart hook's background work")
+    ended = lambda: list((s.home / ".simpleterm" / "sessions").glob("*/*.ended"))
+    states = lambda: [r["plain_json"].get("st") for r in ingests(s, "state", ctl=tctl)]
+    sent0 = len(ingests(s, ctl=tctl))
+    seen = {}
+
+    def first(read, p):
+        # The clear is on the terminal while the hook still waits for its input: nothing else came first.
+        seen["tty"] = wait_for(read, 10)
+        seen["running"] = p.poll() is None
+        seen["ended"] = ended()
+        seen["sent"] = len(ingests(s, ctl=tctl)) - sent0
+    out, tty = on_tty(s, "copilot", json.dumps(base), env, ("sessionEnd",), hold=first)
+    s.check("session end: the bytes, once", tty == clear, repr(tty))
+    s.check("session end: before anything else (the input not read yet, no record, no send)",
+            seen.get("tty") == clear and seen.get("running") and seen.get("ended") == [] and seen.get("sent") == 0, str(seen))
+    st = wait_for(lambda: "ended" in states() and states(), 10)
+    s.check("session end: then the record and the tunnel send", ended() != [] and "ended" in (st or []), "%s %s" % (ended(), st))
+    s.check("session end: nothing on stdout", out == "", out)
+    s.settle("the sessionEnd hook's background work")
+
+    log0 = s.log_text()
+    for label, extra in (("SIMPLETERM unset", {"SIMPLETERM": ""}), ("TMUX set", {"TMUX": "/tmp/tmux-1/default,1,0"}),
+                         ("STY set", {"STY": "123.pts-1.host"}), ("HERDR_ENV=1", {"HERDR_ENV": "1"})):
+        out, tty = on_tty(s, "copilot", json.dumps(dict(base, sessionId="cse-" + label[:4])), dict(env, **extra), ("sessionEnd",))
+        s.check("session end: %s -> nothing on the terminal" % label, tty == b"", repr(tty))
+    _, out, _, _ = s.run("copilot", json.dumps(dict(base, sessionId="cse-notty")), env, args=("sessionEnd",))
+    s.settle("the sessionEnd hooks' background work")
+    new = s.log_text()[len(log0):]
+    s.check("session end: no terminal -> nothing, no log line about it (the sends log as always)",
+            out == "" and not re.search(r"tty|7501|clear", new), new[-300:])
+    # Other events and other agents' ends write nothing; a Claude-format hook in Copilot (COPILOT_CLI=1) writes it once.
+    _, tty = on_tty(s, "copilot", json.dumps(dict(base, stopReason="end_turn")), env, ("agentStop",))
+    s.check("session end: Copilot agentStop -> nothing on the terminal", tty == b"", repr(tty))
+    for agent, ev in (("claude", {"session_id": "cse-cc", "hook_event_name": "SessionEnd", "reason": "other"}),
+                      ("codex", {"session_id": "cse-cx", "hook_event_name": "SessionEnd"}),
+                      ("grok", {"sessionId": "cse-gk", "hook_event_name": "SessionEnd", "reason": "shutdown"})):
+        _, tty = on_tty(s, agent, json.dumps(ev), env)
+        s.check("session end: %s SessionEnd -> nothing on the terminal" % agent, tty == b"", repr(tty))
+    _, tty = on_tty(s, "claude", json.dumps({"sessionId": "cse-cf", "hook_event_name": "SessionEnd", "reason": "user_exit"}),
+                    dict(env, COPILOT_CLI="1"))
+    s.check("session end: Copilot through the Claude Code plugin -> the bytes, once", tty == clear, repr(tty))
+    s.settle("the hooks' background work")
+
+
 def t_copilot(s):
     """GitHub Copilot CLI 1.0.105 (measured with a local model stub): errors Copilot retries are
     not alerts, the error that ends a session is; a subagent's own agentStop is not the session's
@@ -6548,7 +6686,7 @@ def copies_check():
 
 
 TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t_timeout, t_multi_link,
-         t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_screen_values, t_question_while_background, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_schedule_end, t_done_delay, t_background_events_and_badges, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
+         t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_screen_values, t_question_while_background, t_copilot_session_end, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_schedule_end, t_done_delay, t_background_events_and_badges, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_schedule, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js, t_opencode_schedule,
@@ -6564,7 +6702,7 @@ COMPAT = {"t_vectors", "t_allow_deny", "t_invalid_dmac", "t_missing_deps", "t_ho
           "t_conf_vectors"}
 
 # Tests of the sh hook only (scripts and behaviour the PowerShell hook does not have).
-SH_ONLY = {"t_v2_versions", "t_v2_n10", "t_v2_opencode_js", "t_copilot_hooks", "t_copilot", "t_copilot_schedules", "t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_delivery", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_notify_no_tty", "t_cli_wrapper",
+SH_ONLY = {"t_copilot_session_end", "t_v2_versions", "t_v2_n10", "t_v2_opencode_js", "t_copilot_hooks", "t_copilot", "t_copilot_schedules", "t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_delivery", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_notify_no_tty", "t_cli_wrapper",
            "t_agy", "t_agy_schedule", "t_agy_paths", "t_opencode_sh", "t_opencode_js", "t_opencode_schedule"}
 
 

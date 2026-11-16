@@ -4391,6 +4391,21 @@ ask_once() {
   once "q.$(printf '%s|%s' "$SID" "${QTEXT:-$DESC}" | cksum | awk '{ print $1 }')"
 }
 
+# Copilot CLI writes no OSC 7501 `clear` when it ends (1.0.109), and the app
+# would keep its agent session until a shell prompt: on sessionEnd the hook
+# writes that root `clear` to its terminal before anything else, once. Only
+# in a SimpleTerm session outside a multiplexer (tmux, screen, herdr: the
+# bytes would reach the multiplexer, and a `clear` passed out of one pane
+# could end another pane's agent on the tab) and when /dev/tty opens (no
+# terminal, nothing to clear); else nothing, silently. Copilot's hook runs in
+# the shell's session and its write lands before Copilot restores the
+# terminal (measured; SimpleTerm if/hook-events#session-end).
+copilot_end_clear() {
+  [ "${SIMPLETERM:-}" = 1 ] && [ -z "${TMUX:-}" ] && [ -z "${STY:-}" ] && [ -z "${HERDR_ENV:-}" ] || return 0
+  { printf '\033]7501;state=clear\007' >/dev/tty; } 2>/dev/null
+  return 0
+}
+
 # --- main ----------------------------------------------------------------
 
 case $AGENT in
@@ -4413,6 +4428,9 @@ case $AGENT in
   notify) APP=script ;;
   *) exit 0 ;;
 esac
+# Our Copilot hooks name the event on the command line; a Claude-format hook
+# (COPILOT_CLI=1) has it in the input (read below).
+[ "$AGENT" = copilot ] && [ "$MODE" = sessionEnd ] && copilot_end_clear
 
 if [ "$AGENT" = codex-notify ]; then
   INPUT=''
@@ -5197,6 +5215,7 @@ if [ "$AGENT" = copilot ]; then
     SubagentStart) EVENT=subagentStart ;;
     SubagentStop) EVENT=subagentStop ;;
   esac
+  [ -z "$MODE" ] && [ "$EVENT" = sessionEnd ] && copilot_end_clear
 fi
 RAWSID=$SID
 SID=$(printf '%s' "$SID" | tr -c 'A-Za-z0-9_-' '_' | cut -c1-80)
