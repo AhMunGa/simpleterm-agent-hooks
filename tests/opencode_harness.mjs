@@ -2,6 +2,7 @@
 //   node tests/opencode_harness.mjs v1|v2 <plugin file> '<scenario JSON>'
 // scenario: {directory, env?, getDelay?, instances?: [dir], sessions: {id: info}, schedules?: {id: [Schedule.Info]},
 //            steps: [{event, gap?} | {sleep: ms} | {schedules: {id: [Schedule.Info]}}], wait: ms}
+// wait: the most to wait at the end for the plugin to finish (settle()).
 // schedules: OpenCode's schedule_list tool (ctx.tool.list) answers with that session's list; a step replaces it.
 // Prints the plugin's calls (permission replies) as JSON on the last line.
 import { pathToFileURL } from "node:url";
@@ -10,12 +11,21 @@ const [kind, file, scenarioJson] = process.argv.slice(2);
 const scenario = JSON.parse(scenarioJson);
 const calls = [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// Waits up to `ms`, or less once `scenario.replies` permission replies arrived.
+// What the plugin has under way, as Node counts it: a hook it runs (ProcessWrap), a timer (its lane
+// limit, schedule_list's limit, a slow session lookup here), a file request. Between two of this
+// harness's own sleeps nothing else can be pending: work that waits on none of these never resumes.
+const BUSY = new Set(["ProcessWrap", "Timeout", "Immediate", "FSReqCallback", "FSReqPromise", "FileHandle"]);
+const idle = () => !process.getActiveResourcesInfo().some((r) => BUSY.has(r));
+// Waits until the plugin is idle (twice in a row, 100 ms apart) or `scenario.replies` permission
+// replies arrived; `ms` at most (then the test's own checks say what is missing).
 async function settle(ms) {
   const want = scenario.replies || 0;
   const end = Date.now() + ms;
+  let quiet = 0;
   while (Date.now() < end) {
     if (want && calls.filter((c) => c.reply).length >= want) return;
+    quiet = idle() ? quiet + 1 : 0;
+    if (quiet >= 2) return;
     await sleep(100);
   }
 }

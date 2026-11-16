@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Tests for plugins/simpleterm/scripts (stdlib only). Run with `python3 -I`.
 
-  python3 -I tests/run_tests.py                 # sh hook, every shell found
-  python3 -I tests/run_tests.py --shell /bin/dash
-  python3 -I tests/run_tests.py --pwsh /path/to/pwsh   # PowerShell hook
+  python3 -I tests/run_tests.py                 # ubuntu, macos, windows (every case) and compat
+  python3 -I tests/run_tests.py --suite full    # or --suite compat
+  python3 -I tests/run_tests.py --pwsh /path/to/pwsh   # the PowerShell 7 to use (default: pwsh in PATH)
+  python3 -I tests/run_tests.py --openssl /path/to/openssl   # the OpenSSL 3 to use (default: Homebrew's)
+  python3 -I tests/run_tests.py --shell /path/to/bash --suite compat   # another shell
   python3 -I tests/run_tests.py --hook old/agent-hook.sh # another sh hook (baseline)
 
 Each suite gets its own temporary HOME (with ~/.simpleterm/links/*.conf) and
-its own mock_relay.py process. The sh hook is run once per shell × openssl
-(macOS LibreSSL at /usr/bin/openssl and OpenSSL 3 when found).
+its own mock_relay.py process. The environments are each server OS's /bin/sh
+and openssl (ENVIRONMENTS): dash with OpenSSL 3, macOS's /bin/sh with LibreSSL,
+PowerShell 7, and /bin/sh with OpenSSL 3 for the cases where they meet (COMPAT).
+Cases wait for what they look for (wait_for, Suite.settle), not for a set time.
 
 The hook's test-only overrides (SIMPLETERM_HOOK_TEST=1 with
 SIMPLETERM_HOOK_TEST_IV/NONCE/RID/TS) pin the random values so the envelope
@@ -39,8 +43,157 @@ HOOK_SH = ROOT / "plugins" / "simpleterm" / "scripts" / "agent-hook.sh"
 SCRIPTS = HOOK_SH.parent
 HOOK_PS1 = ROOT / "plugins" / "simpleterm" / "scripts" / "agent-hook.ps1"
 MOCK = HERE / "mock_relay.py"
-# Every process group a suite started (Suite.popen), for the check that a run leaves nothing.
-ALL_GROUPS = set()
+
+# --- the processes a run starts ------------------------------------------------------
+# Every process group a case starts (Suite.popen, notify_pty), with its suite, for reap(), settle() and
+# the check that a run leaves nothing. A group id names a group only while one of its processes exists
+# (the id of a live group is never handed out): a look at every process that finds none of a group's
+# drops it, since its id may be anyone's later. observe() looks at least once a second (watch()), and
+# ids come round only after tens of thousands of new processes, so a group is dropped long before its id
+# could name another run's processes (two runs at once counted each other's: AhMunGa/simple-term#449).
+GROUPS = {}  # group id -> (Suite, time.monotonic() when added)
+GROUPS_LOCK = threading.Lock()
+SUITES = []  # every suite of the run: a process whose command names a suite's folder is the run's
+# A `sleep` this long or longer is a timer no case waits out (bg_done_after's 600 s, the 15 s watchdog of
+# a version measurement), and so is a PowerShell hook's background process (`__send`) this old that a
+# pause's file accounts for (busy()).
+LONG_TIMER = 15
+
+
+def track(pgid, suite):
+    with GROUPS_LOCK:
+        GROUPS[pgid] = (suite, time.monotonic())
+
+
+def ps_rows(command=False):
+    """(pid, ppid, pgid, stat, command) of every process (the command only when asked: it costs twice
+    as much), or None when `ps` failed (a machine out of processes)."""
+    cols = "pid=,ppid=,pgid=,stat=" + (",command=" if command else "")
+    me = os.getpid()
+    for _ in range(3):
+        try:
+            out = subprocess.run(["ps", "-A", "-o", cols], capture_output=True).stdout.decode("utf-8", "replace")
+        except OSError:
+            out = ""
+        rows = []
+        for line in out.splitlines():
+            f = line.split(None, 4)
+            if len(f) >= 4 and f[0].isdigit() and f[1].isdigit() and f[2].isdigit():
+                rows.append((int(f[0]), int(f[1]), int(f[2]), f[3], f[4] if len(f) > 4 else ""))
+        if any(r[0] == me for r in rows):
+            return rows
+        time.sleep(0.2)
+    return None
+
+
+def observe(command=False):
+    """One look at every process (ps_rows): drops the groups none is left of (added before the look
+    began) and adds those this run's processes started (an ask leads a group of its own, SimpleTerm
+    if/usage-ask#run-time). Returns the rows, or None."""
+    t = time.monotonic()
+    rows = ps_rows(command)
+    if rows is None:
+        return None
+    present = {r[2] for r in rows}
+    with GROUPS_LOCK:
+        for g, (_, added) in list(GROUPS.items()):
+            if added < t and g not in present:
+                del GROUPS[g]
+        owner = {r[0]: GROUPS[r[2]][0] for r in rows if r[2] in GROUPS and not r[3].startswith("Z")}
+        for pid, ppid, pgid, stat, _ in rows:
+            if pgid not in GROUPS and ppid in owner and not stat.startswith("Z"):
+                GROUPS[pgid] = (owner[ppid], t)
+    return rows
+
+
+def watch(stop):
+    """observe() once a second until `stop` is set, so that no group outlives its id unseen."""
+    while not stop.wait(1):
+        observe()
+
+
+def ours(rows, suites=None, but=(), groups=()):
+    """This run's processes (not zombies) among `rows`, {pid: row}: those in a group of `suites` (every
+    suite: None) or in `groups`, those whose command names a suite's folder (a stand-in agent), and what
+    they started; but not the processes `but` (pids) and what runs under them."""
+    me = os.getpid()
+    with GROUPS_LOCK:
+        mine_g = {g for g, (o, _) in GROUPS.items() if suites is None or o in suites} | set(groups)
+    marks = [str(x.tmp) for x in (SUITES if suites is None else suites)]
+    live = {r[0]: r for r in rows if not r[3].startswith("Z") and r[0] != me and not (r[1] == me and r[4].startswith("ps "))}
+    kids = {}
+    for r in live.values():
+        kids.setdefault(r[1], []).append(r[0])
+
+    def under(pids):
+        found, todo = set(pids), list(pids)
+        while todo:
+            for k in kids.get(todo.pop(), ()):
+                if k not in found:
+                    found.add(k)
+                    todo.append(k)
+        return found
+    skip = under([p for p in but if p in live])
+    mine = {pid for pid, r in live.items() if r[2] in mine_g or (r[4] and any(m in r[4] for m in marks))}
+    return {pid: live[pid] for pid in under(mine - skip) - skip}
+
+
+def etime_s(text):
+    """Seconds of a `ps -o etime` value ([[dd-]hh:]mm:ss)."""
+    days, _, rest = text.strip().rpartition("-")
+    total = 0
+    for part in rest.split(":"):
+        total = total * 60 + int(part)
+    return total + int(days or 0) * 86400
+
+
+def busy(procs, home=None):
+    """`procs` ({pid: row}) without the timers no case waits out (LONG_TIMER) and the shells that only
+    wait for such. The sh hook's pause is a `sleep 600`. The PowerShell hook's is a background process
+    (`__send`) like every send, so one is taken for a pause only when it is LONG_TIMER old and the HOME
+    `home` holds a pause's file (<sid>.bg, written before the pause starts, gone once a turn ends it):
+    no more of them, the oldest first, than there are such files. A send that is merely slow is waited
+    for."""
+    if not procs:
+        return procs
+    out = subprocess.run(["ps", "-o", "pid=,etime=,command=", "-p", ",".join(map(str, procs))],
+                         capture_output=True).stdout.decode("utf-8", "replace")
+    parked = set()
+    sends = []
+    for line in out.splitlines():
+        f = line.split(None, 2)
+        if len(f) < 3 or not f[0].isdigit() or int(f[0]) not in procs:
+            continue
+        m = re.match(r"(?:\S*/)?sleep (\d+)$", f[2].strip())
+        try:
+            age = etime_s(f[1])
+        except ValueError:
+            age = 0
+        if m and int(m.group(1)) >= LONG_TIMER:
+            parked.add(int(f[0]))
+        elif " __send " in f[2] and age >= LONG_TIMER:
+            sends.append((age, int(f[0])))
+    if sends and home is not None:
+        pauses = len(list((Path(home) / ".simpleterm" / "run").glob("*.bg")))
+        parked.update(pid for _, pid in sorted(sends, reverse=True)[:pauses])
+    grew = True
+    while grew:
+        grew = False
+        for pid in procs:
+            kids = [k for k, r in procs.items() if r[1] == pid]
+            if pid not in parked and kids and all(k in parked for k in kids):
+                parked.add(pid)
+                grew = True
+    return {pid: r for pid, r in procs.items() if pid not in parked}
+
+
+def commands(pids):
+    """'pid command' lines of `pids` (for messages)."""
+    if not pids:
+        return []
+    out = subprocess.run(["ps", "-o", "pid=,command=", "-p", ",".join(map(str, sorted(pids)))],
+                         capture_output=True).stdout.decode("utf-8", "replace")
+    return [line.strip()[:140] for line in out.splitlines() if line.strip()]
 
 # Relay protocol v1 test vectors (envelope: AES-256-CBC + HMAC-SHA256).
 V_ENC = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
@@ -92,11 +245,12 @@ def perm_input(command="npm test", cwd="/home/u/api", session="sess-1", tool="Ba
 class Suite:
     """One hook runtime (shell or pwsh) × openssl, with its own HOME and relay."""
 
-    def __init__(self, name, argv, openssl=None, kind="sh"):
+    def __init__(self, name, argv, openssl=None, kind="sh", cases="full"):
         self.name = name
         self.argv = argv
         self.openssl = openssl
         self.kind = kind
+        self.cases = cases  # full: every case; compat: COMPAT only
         self.results = []
         self.tmp = Path(tempfile.mkdtemp(prefix="st-hooktest-"))
         self.home = self.tmp / "home"
@@ -115,7 +269,7 @@ class Suite:
             os.symlink(argv[0], self.bin / "sh")
             os.symlink(argv[0], self.bare / "sh")
         self.relay = None
-        self.groups = set()  # process groups of the hooks this suite started (reaped after each case)
+        SUITES.append(self)
         self.start_relay()
 
     def start_relay(self):
@@ -222,8 +376,7 @@ class Suite:
         hook leaves running in the background (a send, a done that waits up to 600 s, an ask) is
         in that group."""
         p = subprocess.Popen(argv, start_new_session=True, **kw)
-        self.groups.add(p.pid)
-        ALL_GROUPS.add(p.pid)
+        track(p.pid, self)
         return p
 
     def proc_run(self, argv, input=None, timeout=60, **kw):
@@ -240,16 +393,16 @@ class Suite:
             raise
         return subprocess.CompletedProcess(argv, p.returncode, out, err)
 
+    def running(self, but=()):
+        """This suite's processes that run now (ours()), {pid: row}; None when `ps` failed."""
+        rows = observe()
+        return None if rows is None else ours(rows, [self], but)
+
     def reap(self):
-        """Ends what is left of the process groups this case started (TERM, then KILL a second
-        later): nothing a case leaves in the background outlives it. Only processes of this run
-        are touched, by id: a group id is reused once its processes are gone, so a group may
-        belong to someone else by now."""
-        groups, self.groups = self.groups, set()
-        if not groups:
-            return
+        """Ends what the case left running (TERM, then KILL to what is left 2 seconds later): nothing a
+        case leaves in the background outlives it. Only this suite's processes are touched (ours())."""
         for sig in (signal.SIGTERM, signal.SIGKILL):
-            pids = ours(groups, (str(ROOT), str(self.tmp)))
+            pids = self.running() or {}
             for pid in pids:
                 try:
                     os.kill(pid, sig)
@@ -257,7 +410,28 @@ class Suite:
                     pass
             if not pids or sig == signal.SIGKILL:
                 break
-            time.sleep(1)
+            wait_for(lambda: self.running() == {}, 2, 0.2)
+
+    def settle(self, what, but=(), timeout=60):
+        """Waits until what this case started has ended (the hooks and what they left in the background:
+        the sends, a done's wait), but the processes `but` (Popen objects: a hook that still waits, a
+        stand-in agent) and what runs under them, and the timers no case waits out (busy()). A send's
+        record is in the relay once its curl ended (mock_relay.py records before it answers). After
+        `timeout` seconds a failed check says what was waited for and what still ran. Returns whether
+        all ended."""
+        skip = [p.pid for p in but]
+        end = time.time() + timeout
+        while True:
+            left = self.running(skip)
+            if left is not None:
+                left = busy(left, self.home)
+                if not left:
+                    return True
+            if time.time() >= end:
+                break
+            time.sleep(0.2)
+        self.check("settle: %s within %d s" % (what, timeout), False, "still running: %s" % commands(left or {}))
+        return False
 
     def start(self, agent, stdin="", extra=None, bare=False, args=()):
         cmd = list(self.argv) + [agent] + list(args)
@@ -552,6 +726,8 @@ def t_local_answer(s):
     wait_for(lambda: s.records("/v1/decision"), 15)
     other = perm_input(command="ls", session="loc-1", event="PostToolUse")
     s.run("claude", other)
+    # (A set time on purpose: the waiting hook looks once a second (request_flow), and that it went on
+    # waiting is all there is to see. 2.5 s is two looks and more.)
     time.sleep(2.5)
     s.check("local answer: other tool does not cancel", p.poll() is None)
     same = perm_input(command="make deploy", session="loc-1", event="PostToolUse")
@@ -561,9 +737,11 @@ def t_local_answer(s):
     s.check("local answer: same tool cancels the wait", time.time() - t < 5 and out == "", "%.2fs %s" % (time.time() - t, out))
     s.check("local answer: logged", "answered-at-terminal" in s.log_text(), s.log_text())
     # A new prompt also ends the wait.
+    n = len(s.records("/v1/decision"))
     p = s.start("claude", perm_input(command="make deploy", session="loc-2"))
-    wait_for(lambda: len(s.records("/v1/decision")) > 1, 15)
-    time.sleep(0.5)
+    # Its first poll: it waits now, and what it found at its start (RES_BASE) is behind it. (The hook above
+    # polled too: count from here.)
+    wait_for(lambda: len(s.records("/v1/decision")) > n, 15)
     t = time.time()
     s.run("claude", json.dumps({"session_id": "loc-2", "hook_event_name": "UserPromptSubmit", "prompt": "next", "cwd": "/x"}))
     rc, out, err, el = s.finish(p, 30)
@@ -592,7 +770,7 @@ def t_notifications(s):
     note = json.dumps({"session_id": "nd-1", "hook_event_name": "Notification", "cwd": "/x",
                        "message": "Claude needs your permission", "notification_type": "permission_prompt"})
     _, out, _, _ = s.run("claude", note, {"SIMPLETERM": "1"})
-    time.sleep(1.5)
+    s.settle("the Notification hook's sends", but=[p])
     evs = [r["body"]["ev"] for r in s.records("/v1/ingest") if r.get("body")]
     s.check("notification: permission_prompt adds no relay event", evs == ["permission"], str(evs))
     s.check("notification: permission_prompt prints nothing", out == "", out)
@@ -600,7 +778,7 @@ def t_notifications(s):
     s.finish(p, 30)
     s.ctl("/_ctl/reset", {})
     s.run("claude", note.replace("nd-1", "nd-2"))
-    time.sleep(1.5)
+    s.settle("the Notification hook's sends")
     s.check("notification: permission_prompt ignored without a waiting hook too", not s.records("/v1/ingest"))
     s.ctl("/_ctl/reset", {})
     _, out, _, _ = s.run("claude", json.dumps({"session_id": "q", "hook_event_name": "Notification",
@@ -646,7 +824,7 @@ def t_background_work(s):
     s.check("background work: idle_prompt meanwhile prints nothing", out2 == "", out2)
     s.check("background work: a background subagent's tool keeps the background state",
             seqs(out3).startswith("\x1b]9;simpleterm:state=background shell: Run the test suite"), repr(out3))
-    time.sleep(1.5)
+    s.settle("the hooks' background work")
     s.check("background work: no relay event for that Stop or idle_prompt", not ingests(s), str(ingests(s))[:300])
 
     _, out4, _, _ = s.run("claude", ev("UserPromptSubmit", prompt="<task-notification>\n<status>completed</status>"), st)
@@ -660,7 +838,7 @@ def t_background_work(s):
             len(rec) == 1 and rec[0]["plain_json"].get("msg") == "Tests pass.", str(ingests(s))[:300])
     s.ctl("/_ctl/reset", {})
     s.run("claude", ev("Notification", notification_type="idle_prompt", message="Claude is waiting for your input"), st)
-    time.sleep(1.5)
+    s.settle("the Notification hook's sends")
     s.check("background work: idle_prompt after a done turn repeats it: no question", not ingests(s), str(ingests(s))[:200])
 
     many = [dict(shell, id="b%08d" % i) for i in range(12)]
@@ -698,25 +876,26 @@ def t_background_work_kinds(s):
     s.ctl("/_ctl/reset", {})
     t0 = time.time()
     stop("k3", [task("shell", "Start the dev server", command="node worker.js")], last="The server is up.")
-    time.sleep(1)
-    s.check("kinds: a shell alone -> nothing at first", not ingests(s), str(ingests(s))[:200])
     rec = wait_for(lambda: ingests(s, "done"), 20)
+    # (By the relay's clock: nothing came before bg_done_after, 2 s.)
+    s.check("kinds: a shell alone -> nothing at first", all(r["received"] - t0 >= 1.8 for r in ingests(s)),
+            str([(r["body"]["ev"], round(r["received"] - t0, 2)) for r in ingests(s)])[:200])
     s.check("kinds: ... then done once after bg_done_after, saying what runs",
             len(rec) == 1 and rec[0]["received"] - t0 >= 1.8
             and rec[0]["plain_json"].get("msg") == "The server is up. (still running in the background: shell: Start the dev server)",
             str([(r["plain_json"].get("msg"), round(r["received"] - t0, 2)) for r in rec]))
-    time.sleep(1)
+    s.settle("the pause's wait and send")
     s.check("kinds: ... and only once", len(ingests(s, "done")) == 1, str(ingests(s))[:200])
     # A subagent alongside: it reports back, so no time limit.
     s.ctl("/_ctl/reset", {})
     stop("k4", [task("shell", "Run tests", command="npm test"), task("subagent", "Review")])
-    time.sleep(3.5)
+    s.settle("the Stop hook's background work (a wait of bg_done_after, 2 s, if it started one)")
     s.check("kinds: a subagent left -> no time limit", not ingests(s), str(ingests(s))[:200])
     # A new turn before the limit ends the wait.
     s.ctl("/_ctl/reset", {})
     stop("k5", [task("monitor", "Watch the deploy")])
     s.run("claude", json.dumps({"session_id": "k5", "hook_event_name": "UserPromptSubmit", "prompt": "<task-notification>"}), st)
-    time.sleep(3.5)
+    s.settle("the pause's wait (bg_done_after, 2 s)")
     s.check("kinds: a new turn before the limit -> no late done", not ingests(s), str(ingests(s))[:200])
 
 
@@ -846,7 +1025,7 @@ def t_question_while_background(s):
     _, out2, _, _ = s.run("claude", cc_event("qb1", "Notification", notification_type="idle_prompt",
                                              message="Claude is waiting for your input"), st)
     s.check("question while waiting: idle_prompt meanwhile prints nothing", out2 == "", out2)
-    time.sleep(1.5)
+    s.settle("the hooks' background work")
     s.check("question while waiting: no done and no second question", len(ingests(s)) == 1, str(ingests(s))[:300])
 
     # Claude Code 2.1.295+: a blocked (question) record of the hook instead of the working one; taken back at the next turn.
@@ -886,7 +1065,7 @@ def t_question_while_background(s):
         out = stop("qb3", last)
         s.check("question while waiting: %s -> background" % name,
                 seqs(out).startswith("\x1b]9;simpleterm:state=background subagent: Review the diff"), repr(out))
-    time.sleep(1.5)
+    s.settle("the Stop hooks' background work")
     s.check("question while waiting: ... and no event", not ingests(s), str(ingests(s))[:300])
 
     # Korean and English asks that are not marked with a question mark.
@@ -909,7 +1088,7 @@ def t_question_while_background(s):
     s.ctl("/_ctl/reset", {})
     out = stop("qb5", "The server is up. Should I open the browser?", tasks=(dict(SHELL, command="node worker.js"),))
     wait_for(lambda: ingests(s, "question"), 20)
-    time.sleep(3.5)
+    s.settle("the Stop hook's background work (a wait of bg_done_after, 2 s, if it started one)")
     s.check("question while waiting: shell only -> question, and no late done",
             [r["body"]["ev"] for r in ingests(s)] == ["question"], str([r["body"]["ev"] for r in ingests(s)]))
 
@@ -1069,7 +1248,7 @@ def t_service_shells(s):
     s.ctl("/_ctl/reset", {})
     out = stop("sv-big", [shell("echo " + "x" * 70000 + "; npm run dev", "Run it")])
     s.check("service shell: a command over 64 KiB is not looked at", seqs(out).startswith("\x1b]9;simpleterm:state=background"), repr(out)[:200])
-    time.sleep(1)
+    s.settle("the Stop hooks' background work")
     # Mixes: only services (and the agent's own housekeeping) count as services.
     s.ctl("/_ctl/reset", {})
     out = stop("sv4", [shell("npm run dev"), shell("tail -f app.log", "Follow the log")])
@@ -1084,7 +1263,7 @@ def t_service_shells(s):
     out = stop("sv8", [shell("npm run dev")], extra={"transcript_path": str(cc_transcript(s))})
     s.check("service shell: no OSC 7501 working record", seqs(out) == "\x1b]9;simpleterm:state=done\x07", repr(out))
     # Grok Build.
-    time.sleep(1.5)  # the sends of the cases above have landed
+    s.settle("the sends of the cases above")
     s.ctl("/_ctl/reset", {})
     gt = {"id": "9f1d0a52-6c55-4a5a-8d2c-1d7e3c0c5b11", "type": "shell", "status": "running", "command": "python3 -m http.server 8000"}
     inp, env = grok_input("Stop", reason="end_turn", promptId="sv-g", timestamp="2026-11-02T10:01:00.000Z",
@@ -1131,7 +1310,7 @@ def t_user_prompt_old_tasks(s):
     s.check("auto turn: task-notification prompt -> waits for the rest", waits(stop("uo1", [new])))
     run("uo1", "UserPromptSubmit", prompt="<agent-message from=\"n9n9n9n9n\">\n[Subagent hand-back] ...")
     s.check("auto turn: agent-message prompt -> waits", waits(stop("uo1", [new])))
-    time.sleep(1.5)
+    s.settle("the hooks' background work")
     s.check("auto turn: no event from the waiting turns", not ingests(s), str(ingests(s))[:300])
     # The `source` field, where Claude Code sends it.
     for source, expect_wait in (("loop_wakeup", True), ("schedule_wakeup", True), ("system", True), ("poll_event", True),
@@ -1160,7 +1339,7 @@ def t_user_prompt_old_tasks(s):
     out = run("uo4", "Stop", stop_hook_active=False, last_assistant_message="Still deploying.", background_tasks=[old], session_crons=[cron])
     s.check("auto turn: a prompt equal to a schedule's -> waits", waits(out), repr(out))
     # Grok Build: the prompt id says who started the turn.
-    time.sleep(2)  # the sends of the cases above have landed
+    s.settle("the sends of the cases above")
     s.ctl("/_ctl/reset", {})
     gt = {"id": "48d7f629-d7ca-4ac8-94ac-419eb88970a7", "type": "subagent", "status": "running", "description": "sleep sub",
           "agentType": "general-purpose"}
@@ -1176,11 +1355,11 @@ def t_user_prompt_old_tasks(s):
 
     gprompt("0773d809-9300-4d94-aa8b-bed0ee67f947", "2026-11-02T10:10:00.000Z")
     gstop("0773d809-9300-4d94-aa8b-bed0ee67f947", "2026-11-02T10:10:05.000Z")
-    time.sleep(1)
+    s.settle("the Grok hooks' background work")
     s.check("grok user turn: the turn that starts the task waits", not ingests(s), str(ingests(s))[:200])
     gprompt("scheduler-fired-7", "2026-11-02T10:11:00.000Z")
     gstop("scheduler-fired-7", "2026-11-02T10:11:05.000Z")
-    time.sleep(1)
+    s.settle("the Grok hooks' background work")
     s.check("grok scheduled turn: waits", not ingests(s), str(ingests(s))[:200])
     gprompt("11111111-9300-4d94-aa8b-bed0ee67f947", "2026-11-02T10:12:00.000Z")
     gstop("11111111-9300-4d94-aa8b-bed0ee67f947", "2026-11-02T10:12:05.000Z")
@@ -1216,7 +1395,7 @@ def t_schedules(s):
     s.run("claude", cc_event("sc1", "UserPromptSubmit", prompt="morning report"), st)
     out = stop("sc1", cron, "Report.")
     s.check("schedule: a prompt equal to a schedule's -> background", seqs(out).startswith("\x1b]9;simpleterm:state=background scheduled:"), repr(out))
-    time.sleep(1.5)
+    s.settle("the hooks' background work")
     s.check("schedule: no event from the scheduled turns", not ingests(s), str(ingests(s))[:300])
     # Claude Code 2.1.295+: a working record, with the schedule as its text; taken back at the next turn.
     tr = cc_transcript(s)
@@ -1235,7 +1414,7 @@ def t_schedules(s):
     s.ctl("/_ctl/reset", {})
     s.run("claude", cc_event("sc3", "UserPromptSubmit", prompt="x", source="loop_wakeup"), st)
     out = stop("sc3", [], "The deploy finished; the loop ended.")
-    time.sleep(1.5)
+    s.settle("the hooks' background work")
     s.check("schedule: no schedule left -> done_scheduled on the screen, nothing to the relay",
             not ingests(s) and seqs(out) == "\x1b]9;simpleterm:state=done_scheduled\x07", repr(out) + str(ingests(s))[:300])
     # Grok Build.
@@ -1246,7 +1425,7 @@ def t_schedules(s):
     inp, env = grok_input("Stop", reason="end_turn", promptId="scheduler-fired-1", timestamp="2026-11-02T11:00:03.000Z",
                           lastAssistantMessage="Still fine.", backgroundTasks=[], sessionCrons=gcron)
     s.run("claude", inp, env)
-    time.sleep(1.5)
+    s.settle("the Grok hooks' background work")
     s.check("schedule: Grok Build scheduled turn -> nothing", not ingests(s), str(ingests(s))[:200])
     inp, env = grok_input("UserPromptSubmit", promptId="22222222-9300-4d94-aa8b-bed0ee67f947", timestamp="2026-11-02T11:05:00.000Z", prompt="hi")
     s.run("claude", inp, dict(env, GROK_HOOK_EVENT="user_prompt_submit"))
@@ -1277,12 +1456,12 @@ def t_schedules(s):
     s.ctl("/_ctl/reset", {})
     grok_run(1, mcron)
     grok_run(2, mcron)
-    time.sleep(4.5)  # past done_delay (3 s on Grok)
+    s.settle("the Grok hooks' background work (a done's wait, if one started)")
     s.check("schedule: Grok Build scheduled runs (subagent-completed-, schedule named) -> nothing",
             not ingests(s), str([(r.get("body") or {}).get("ev") for r in ingests(s)])[:200])
     # The run whose turn dropped the schedule (its Stop lists none) is the last: no relay push either.
     grok_run(3, [])
-    time.sleep(4.5)
+    s.settle("the Grok hooks' background work (a done's wait, if one started)")
     s.check("schedule: Grok Build last scheduled run -> nothing to the relay", not ingests(s),
             str([(r.get("body") or {}).get("ev") for r in ingests(s)])[:200])
     # A background subagent the agent started itself (no schedule named) still reports as a task: done.
@@ -1304,7 +1483,7 @@ def t_schedules(s):
     cc("sw1", "UserPromptSubmit", prompt="<task-notification>\n<task-id>a5c0ffee000000001</task-id>\n<status>completed</status>")
     out = cc("sw1", "Stop", stop_hook_active=False, last_assistant_message="All checks passed.", background_tasks=[],
              session_crons=cron)
-    time.sleep(4.5)  # past done_delay (3 s on Claude Code)
+    s.settle("the hooks' background work (a done's wait, if one started)")
     s.check("schedule: the report of a loop turn's background agent rests with the loop (no done)",
             not ingests(s) and seqs(out).startswith("\x1b]9;simpleterm:state=background scheduled:"), repr(out) + str(ingests(s))[:200])
     s.ctl("/_ctl/reset", {})
@@ -1327,7 +1506,7 @@ def t_schedules(s):
        background_tasks=[dict(agent, id="a5c0ffee00000000b", description="fix the checks")], session_crons=cron)
     cc("sw3", "UserPromptSubmit", prompt="<task-notification>\n<task-id>a5c0ffee00000000b</task-id>\n<status>completed</status>")
     out = cc("sw3", "Stop", stop_hook_active=False, last_assistant_message="Fixed.", background_tasks=[], session_crons=cron)
-    time.sleep(4.5)
+    s.settle("the hooks' background work (a done's wait, if one started)")
     s.check("schedule: a chain of reports from a loop turn (agent A starts agent B) rests with the loop (no done)",
             not ingests(s) and seqs(out).startswith("\x1b]9;simpleterm:state=background scheduled:"), repr(out) + str(ingests(s))[:200])
 
@@ -1344,7 +1523,7 @@ def t_schedules(s):
     cc("sw4", "UserPromptSubmit", prompt=note)
     m = mark("sw4")
     out = cc("sw4", "Stop", stop_hook_active=False, last_assistant_message="Checks passed.", background_tasks=[], session_crons=cron)
-    time.sleep(4.5)
+    s.settle("the hooks' background work (a done's wait, if one started)")
     s.check("schedule: a report inside a loop turn keeps the loop's mark -> quiet (no done)",
             m[0] == "schedule" and not ingests(s) and seqs(out).startswith("\x1b]9;simpleterm:state=background scheduled:"),
             repr(m) + repr(out) + str(ingests(s))[:200])
@@ -1391,7 +1570,7 @@ def t_schedules(s):
     m = mark("sw9")
     out = cc("sw9", "Stop", stop_hook_active=False, last_assistant_message="Checks passed.", background_tasks=[],
              session_crons=cron, prompt_id=pa)
-    time.sleep(4.5)
+    s.settle("the hooks' background work (a done's wait, if one started)")
     s.check("schedule: a report with the running turn's prompt_id keeps the loop's mark -> quiet",
             m[0] == "schedule" and m[3:5] == ["open", pa] and not ingests(s)
             and seqs(out).startswith("\x1b]9;simpleterm:state=background scheduled:"), repr(m) + repr(out) + str(ingests(s))[:200])
@@ -1410,7 +1589,7 @@ def t_schedules(s):
     inp, env = grok_input("Stop", reason="end_turn", promptId="task-completed-gbash01", timestamp="2026-11-11T08:00:31.000Z",
                           lastAssistantMessage="Tests pass.", backgroundTasks=[], sessionCrons=mcron)
     s.run("claude", inp, env)
-    time.sleep(4.5)
+    s.settle("the Grok hooks' background work (a done's wait, if one started)")
     s.check("schedule: Grok Build report of a scheduled run's command -> nothing", not ingests(s),
             str([(r.get("body") or {}).get("ev") for r in ingests(s)])[:200])
 
@@ -1447,12 +1626,15 @@ def t_schedule_end(s):
         s.run("claude", cc_event("se1", "UserPromptSubmit", prompt="check the deploy", source="loop_wakeup"), st)
         t0 = time.time()
         out = stop("se1", [], "The deploy finished; the loop ended.")
+        # No done_delay: the hook left no se1.pend, the file a done that waits keeps until it goes (both hooks).
+        # (Not a time bound: on a loaded machine a PowerShell send alone takes seconds to start.)
+        waited = (s.home / ".simpleterm" / "run" / "se1.pend").exists()
         s.check("schedule end: the screen says done_scheduled", seqs(out) == "\x1b]9;simpleterm:state=done_scheduled\x07", repr(out))
         d = wait_for(lambda: tunnel("done"), 10)
         s.check("schedule end: one done with by schedule to the tunnel, at once (no done_delay)",
-                len(d) == 1 and turn(d).get("by") == "schedule" and d[0]["received"] - t0 < 2.5,
-                str([(turn([r]), round(r["received"] - t0, 2)) for r in d])[:300])
-        time.sleep(max(0, t0 + 4.5 - time.time()))  # past the shipped done_delay (3 s)
+                len(d) == 1 and turn(d).get("by") == "schedule" and not waited,
+                "waited %s %s" % (waited, str([(turn([r]), round(r["received"] - t0, 2)) for r in d])[:300]))
+        s.settle("the Stop hook's background work (the shipped done_delay, 3 s, if a done waits)")
         s.check("schedule end: nothing to the relay", not ingests(s), str(ingests(s))[:300])
 
         # Decision 9 (SimpleTerm hist/turn-state#d9): a scheduled turn that ended asking is a plain done everywhere.
@@ -1479,7 +1661,7 @@ def t_schedule_end(s):
         out = stop("se3", cron, "Still deploying.")
         s.check("scheduled turn with a schedule set: still background", seqs(out).startswith("\x1b]9;simpleterm:state=background scheduled:"), repr(out))
         st_ev = wait_for(lambda: [x for x in tunnel("state") if (x.get("plain_json") or {}).get("st") == "scheduled"], 10)
-        time.sleep(1.5)
+        s.settle("the Stop hook's background work (the shipped done_delay, 3 s, if a done waits)")
         s.check("scheduled turn with a schedule set: state scheduled, no done anywhere",
                 st_ev and not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300])
 
@@ -1508,9 +1690,10 @@ def t_done_delay(s):
     stop = cc_event("dd1", "Stop", stop_hook_active=False, last_assistant_message="Implemented it.", background_tasks=[], session_crons=[])
     rc, out, err, el = s.run("claude", stop, {"SIMPLETERM": "1"})
     s.check("done delay: the badge changes at once", seqs(out) == "\x1b]9;simpleterm:state=done\x07" and el < 2, "%r %.2fs" % (out, el))
-    time.sleep(1.2)
-    s.check("done delay: no event yet after 1.2 s", not ingests(s), str(ingests(s))[:200])
     rec = wait_for(lambda: ingests(s, "done"), 20)
+    # (By the relay's clock.)
+    s.check("done delay: no event yet after 1.2 s", all(r["received"] - t0 >= 1.2 for r in ingests(s)),
+            str([(r["body"]["ev"], round(r["received"] - t0, 2)) for r in ingests(s)])[:200])
     s.check("done delay: sent after about 3 s", len(rec) == 1 and 2.7 <= rec[0]["received"] - t0 <= 12,
             str([round(r["received"] - t0, 2) for r in rec]))
     s.check("done delay: the event is made then (its time is the send time)",
@@ -1519,14 +1702,14 @@ def t_done_delay(s):
     s.ctl("/_ctl/reset", {})
     s.run("claude", stop, {"SIMPLETERM": "1"})
     s.run("claude", cc_event("dd1", "PostToolUse", tool_name="Bash", tool_input={"command": "npm test"}), {"SIMPLETERM": "1"})
-    time.sleep(4.5)
+    s.settle("the done's wait (done_delay, 3 s)")
     s.check("done delay: a newer event of the session -> no done", not ingests(s), str(ingests(s))[:200])
     # ... and the Stop that follows replaces it: one done, with its message.
     s.ctl("/_ctl/reset", {})
     s.run("claude", cc_event("dd2", "Stop", stop_hook_active=False, last_assistant_message="First.", background_tasks=[], session_crons=[]))
     s.run("claude", cc_event("dd2", "Stop", stop_hook_active=True, last_assistant_message="Second.", background_tasks=[], session_crons=[]))
     rec = wait_for(lambda: ingests(s, "done"), 20)
-    time.sleep(4)
+    s.settle("both dones' waits (done_delay, 3 s)")
     d = ingests(s, "done")
     s.check("done delay: a second Stop replaces the first", len(d) == 1 and d[0]["plain_json"].get("msg") == "Second.", str(d)[:300])
     s.check("done delay: stop_hook_active is passed on", d and d[0]["plain_json"].get("stop_hook_active") is True, str(d[0].get("plain") if d else None))
@@ -1585,7 +1768,7 @@ def t_background_events_and_badges(s):
     stop("bev1", [old], last="The reviewer is still working.")
     run("bev1", "PostToolUse", tool_name="Read", tool_input={"file_path": "/w/proj/a.dart"}, agent_id="a42a3936ffcdae563")
     rec = wait_for(lambda: ingests(s, "done"), 20)
-    time.sleep(4)
+    s.settle("the hooks' background work (done_delay, 3 s)")
     d = ingests(s, "done")
     s.check("typed turn, old task left: a background subagent's tool call does not cancel the done",
             len(d) == 1 and d[0]["received"] - t0 < 8 and "still running in the background" in d[0]["plain_json"].get("msg", ""),
@@ -1601,7 +1784,7 @@ def t_background_events_and_badges(s):
     run("bev4", "PostToolUse", tool_name="Bash", tool_input={"command": "npm test"})
     run("bev4", "Stop", stop_hook_active=True, last_assistant_message="Second.", background_tasks=[old], session_crons=[])
     wait_for(lambda: ingests(s, "done"), 20)
-    time.sleep(4)
+    s.settle("the hooks' background work (done_delay, 3 s)")
     d = ingests(s, "done")
     s.check("blocked Stop with an old task left: one done, for the real end",
             len(d) == 1 and d[0]["plain_json"].get("msg", "").startswith("Second."), str([r["plain_json"].get("msg") for r in d]))
@@ -1627,7 +1810,7 @@ def t_background_events_and_badges(s):
     stop("bev7", [], last=qd)
     wait_for(lambda: ingests(s, "done"), 20)
     run("bev7", "Notification", notification_type="idle_prompt", message="Claude is waiting for your input")
-    time.sleep(1.5)
+    s.settle("the Notification hook's sends")
     evs = ingests(s)
     s.check("question-ended turn: done carries the question, idle_prompt adds no question",
             [r["body"]["ev"] for r in evs] == ["done"] and evs[0]["plain_json"].get("msg") == qd, str([r["plain_json"].get("msg") for r in evs]))
@@ -1640,7 +1823,7 @@ def t_background_events_and_badges(s):
     wait_for(lambda: ingests(s, "done"), 20)
     s.ctl("/_ctl/reset", {})
     out = run("bev5", "Notification", **idle)
-    time.sleep(1.5)
+    s.settle("the Notification hook's sends")
     s.check("idle_prompt after a done: no question, no badge change", out == "" and not ingests(s), repr(out) + str(ingests(s))[:200])
     run("bev5", "UserPromptSubmit", prompt="next")
     run("bev5", "PostToolUseFailure", tool_name="Bash", tool_input={"command": "ls"}, is_interrupt=True, error="interrupted")
@@ -1676,7 +1859,7 @@ def t_small_audit_fixes(s):
     q = {"questions": [{"question": "Which database should I use?", "header": "DB", "options": [{"label": "Postgres"}], "multiSelect": False}]}
     s.run("claude", cc_event("au1", "PreToolUse", tool_name="AskUserQuestion", tool_input=q), st)
     s.run("claude", cc_event("au1", "PermissionRequest", tool_name="AskUserQuestion", tool_input=q), st)
-    time.sleep(1.5)
+    s.settle("the hooks' background work (the PreToolUse report's ask_delay)")
     qs = ingests(s, "question")
     s.check("AskUserQuestion: one alert for PreToolUse + PermissionRequest", len(qs) == 1 and qs[0]["plain_json"].get("msg") == "Which database should I use?",
             str(ingests(s))[:300])
@@ -1685,7 +1868,7 @@ def t_small_audit_fixes(s):
     s.run("claude", cc_event("au1", "PreToolUse", tool_name="AskUserQuestion", tool_input=q2), st)
     s.run("claude", cc_event("au2", "PreToolUse", tool_name="AskUserQuestion", tool_input=q), st)
     wait_for(lambda: len(ingests(s, "question")) >= 3, 20)
-    time.sleep(1)
+    s.settle("the hooks' background work (the PreToolUse reports' ask_delay)")
     s.check("AskUserQuestion: another question or another session is another alert", len(ingests(s, "question")) == 3,
             str([r["plain_json"].get("msg") for r in ingests(s)]))
     _, out, _, _ = s.run("claude", cc_event("au1", "PreToolUse", tool_name="AskUserQuestion", tool_input=q), st)
@@ -1757,8 +1940,8 @@ def t_agent_gone(s):
     s.check("agent gone: hook exits", wait_for(gone, 20), "pid %d" % hook_pid)
     s.check("agent gone: logged", wait_for(lambda: "permission agent-gone" in s.log_text(), 3), s.log_text())
     n = len(s.records("/v1/decision"))
-    time.sleep(3)
-    s.check("agent gone: polling stopped", len(s.records("/v1/decision")) == n)
+    s.settle("the hook's polls")
+    s.check("agent gone: polling stopped", len(s.records("/v1/decision")) == n, "%d -> %d" % (n, len(s.records("/v1/decision"))))
 
 
 def t_events(s):
@@ -1783,7 +1966,7 @@ def t_events(s):
             s.check("events: question text", rec[0]["plain_json"].get("msg") == "Which DB?", str(rec[0].get("plain_json")))
     s.ctl("/_ctl/reset", {})
     s.run("codex", json.dumps({"session_id": "e", "hook_event_name": "Stop", "last_assistant_message": '{"title":"Fix tests"}'}))
-    time.sleep(1.5)
+    s.settle("the Stop hook's background work")
     s.check("events: codex title-generation Stop filtered", not s.records("/v1/ingest"))
     for first, expect in (("Generate a concise, single-line task title for this", 0), ("Fix the tests", 1)):
         s.ctl("/_ctl/reset", {})
@@ -1792,7 +1975,7 @@ def t_events(s):
         s.run("codex-notify", "", args=(j,))
         if expect:
             wait_for(lambda: s.records("/v1/ingest"), 20)
-        time.sleep(1.5)
+        s.settle("the notify hook's background work")
         s.check("events: codex notify %s" % ("filtered" if expect == 0 else "sent"),
                 len(s.records("/v1/ingest")) == expect, str(s.records("/v1/ingest"))[:200])
 
@@ -1887,24 +2070,34 @@ def t_argv(s):
 
 def t_external_printf(s):
     """OpenBSD sh/ksh and mksh run printf from /usr/bin: secrets would show in `ps`, so no relay."""
+    if s.kind != "sh":
+        return
+    argv = s.argv
     shell = os.path.basename(s.argv[0])
-    if s.kind != "sh" or shell not in ("bash", "zsh"):
-        return  # only these two can switch the builtin off for the test
+    if shell not in ("bash", "zsh"):
+        # Only these two can switch the builtin off (bash not in sh mode: as sh it reads no BASH_ENV), so
+        # bash stands in for the environment's shell; the hook's check (`command -v printf`) is the same.
+        if not os.path.exists("/bin/bash"):
+            return
+        s.argv, shell = ["/bin/bash"] + s.argv[1:], "bash"
     rc_dir = s.tmp / "rc"
     rc_dir.mkdir(exist_ok=True)
     (rc_dir / "bashenv").write_text("enable -n printf\n")
     (rc_dir / ".zshenv").write_text("disable printf\n")
     extra = {"BASH_ENV": str(rc_dir / "bashenv")} if shell == "bash" else {"ZDOTDIR": str(rc_dir)}
-    s.setup([(LINK_A, {"decision": "allow", "after": 1})])
-    rc, out, err, el = s.run("claude", perm_input(), dict(extra, SIMPLETERM="1"))
-    s.check("external printf: nothing sent", not s.records("/v1/ingest"), str(s.records())[:200])
-    s.check("external printf: no decision, exit 0", rc == 0 and out.strip() == "", out + err)
-    s.check("external printf: logged", "printf is not a shell builtin; relay disabled" in s.log_text(), s.log_text())
-    stop = json.dumps({"session_id": "s", "hook_event_name": "Stop", "cwd": "/x", "last_assistant_message": "ok"})
-    rc, out, err, el = s.run("claude", stop, dict(extra, SIMPLETERM="1"))
-    s.check("external printf: terminal sequence still works", "simpleterm:state=done" in out, out + err)
-    time.sleep(1)
-    s.check("external printf: no background send either", not s.records("/v1/ingest"))
+    try:
+        s.setup([(LINK_A, {"decision": "allow", "after": 1})])
+        rc, out, err, el = s.run("claude", perm_input(), dict(extra, SIMPLETERM="1"))
+        s.check("external printf: nothing sent", not s.records("/v1/ingest"), str(s.records())[:200])
+        s.check("external printf: no decision, exit 0", rc == 0 and out.strip() == "", out + err)
+        s.check("external printf: logged", "printf is not a shell builtin; relay disabled" in s.log_text(), s.log_text())
+        stop = json.dumps({"session_id": "s", "hook_event_name": "Stop", "cwd": "/x", "last_assistant_message": "ok"})
+        rc, out, err, el = s.run("claude", stop, dict(extra, SIMPLETERM="1"))
+        s.check("external printf: terminal sequence still works", "simpleterm:state=done" in out, out + err)
+        s.settle("the Stop hook's background work")
+        s.check("external printf: no background send either", not s.records("/v1/ingest"))
+    finally:
+        s.argv = argv
 
 
 # --- usage fixtures (keys and numbers only; no real conversation) -------------
@@ -2017,7 +2210,7 @@ def t_usage_claude(s):
     # Unchanged: nothing more (no sequence, no event).
     s.ctl("/_ctl/reset", {})
     rc, out, err, el = s.run("claude", json.dumps(stop), {"SIMPLETERM": "1"})
-    time.sleep(1.5)
+    s.settle("the Stop hook's sends")
     s.check("usage claude: unchanged usage is not repeated",
             seqs(out) == "\x1b]9;simpleterm:state=done\x07" and not ingests(s, "usage"), repr(out))
     # A compaction after the last response: its postTokens.
@@ -2069,7 +2262,7 @@ def t_usage_claude(s):
     # usage=0 turns it off.
     s.setup([(LINK_A, {"push": "disabled", "kind": "tunnel"})], conf={"usage": 0})
     rc, out, err, el = s.run("claude", json.dumps(dict(stop, session_id="u-off")), {"SIMPLETERM": "1"})
-    time.sleep(1.5)
+    s.settle("the Stop hook's sends")
     s.check("usage claude: usage=0 sends nothing", seqs(out) == "\x1b]9;simpleterm:state=done\x07" and not ingests(s, "usage"), out)
 
 
@@ -2240,14 +2433,14 @@ def t_usage_relay_policy(s):
         with open(tr, "a") as f:
             f.write(claude_line(inp=20) + "\n")
         s.run("claude", json.dumps(dict(base, hook_event_name="PostToolUse", tool_name="Bash", tool_input={"command": "ls"})))
-        time.sleep(1.5)
+        s.settle("the PostToolUse hook's sends")
         s.check("usage policy: PostToolUse at most every 20 s", len(ingests(s, "usage", tctl)) == 1, str(len(ingests(s, "usage", tctl))))
         s.run("claude", json.dumps(dict(base, hook_event_name="Stop", last_assistant_message="ok")))
         s.check("usage policy: turn end reaches the tunnel (changed)", wait_for(lambda: len(ingests(s, "usage", tctl)) == 2, 20))
         got = (ingests(s, "usage", tctl)[-1].get("plain_json") or {}).get("ctx", {}) if ingests(s, "usage", tctl) else {}
         s.check("usage policy: the turn's last value", got.get("used") == 5320, str(got))
         s.check("usage policy: the relay gets done", wait_for(lambda: ingests(s, "done"), 20))
-        time.sleep(1)
+        s.settle("the Stop hook's sends")
         s.check("usage policy: the relay gets no usage at all", not ingests(s, "usage"), str(ingests(s, "usage"))[:200])
     finally:
         tun.terminate()
@@ -2281,7 +2474,7 @@ def t_usage_delivery(s):
                 wait_for(lambda: ingests(s, "usage", tctl), 20), s.log_text()[-300:])
         n = len(ingests(s, "usage", tctl))
         s.run("codex", stop)
-        time.sleep(1.5)
+        s.settle("the Stop hook's sends")
         s.check("usage delivery: and not again after it got there", len(ingests(s, "usage", tctl)) == n,
                 str(len(ingests(s, "usage", tctl))))
     finally:
@@ -2333,7 +2526,7 @@ def t_usage_codex(s):
     s.ctl("/_ctl/reset", {})
     s.run("codex", json.dumps(dict(inp, transcript_path=None, session_id="cx2")))
     wait_for(lambda: ingests(s, "done"), 20)
-    time.sleep(1.5)
+    s.settle("the Stop hook's sends")
     s.check("usage codex: null transcript_path -> no usage", not ingests(s, "usage") and ingests(s, "done"))
 
 
@@ -2415,7 +2608,7 @@ def t_gemini(s):
     s.ctl("/_ctl/reset", {})
     s.run("gemini", json.dumps(dict(base, hook_event_name="BeforeAgent", prompt="p")))
     s.run("gemini", json.dumps(dict(note, notification_type="Other")))
-    time.sleep(1.5)
+    s.settle("the hooks' background work")
     s.check("gemini: other events send nothing", not ingests(s))
 
     # Gemini CLI registers no event that would come within moments to cancel a wait: no wait by default.
@@ -2435,8 +2628,7 @@ def notify_pty(s, args, extra=None):
     pid, fd = pty.fork()
     if pid > 0:
         # (Its own session: reaped with the case.)
-        s.groups.add(pid)
-        ALL_GROUPS.add(pid)
+        track(pid, s)
     if pid == 0:
         try:
             os.chdir(str(s.tmp))
@@ -2523,7 +2715,7 @@ def t_notify(s):
                     got == (want_t, want_b, want_t, want_b), repr(got)[:300])
         s.ctl("/_ctl/reset", {})
         rc, tty = notify_pty(s, ["notify", "   ", "\n\t "], {"SIMPLETERM": "1"})
-        time.sleep(1.5)
+        s.settle("simpleterm notify's background work")
         s.check("notify: only whitespace sends nothing", rc == 0 and b"\x1b]777" not in tty and not ingests(s, "notify"),
                 repr(tty))
         s.ctl("/_ctl/reset", {})
@@ -2676,7 +2868,7 @@ def t_copilot(s):
         for _ in range(3):
             s.run("copilot", json.dumps(err), env, args=("errorOccurred",))
         s.run("copilot", json.dumps(dict(base, errorContext="tool_execution", recoverable=False, error={"message": "exit 1", "name": "Error"})), env, args=("errorOccurred",))
-        time.sleep(1.5)
+        s.settle("the errorOccurred hooks' background work")
         s.check("copilot: retried and tool errors are no alerts", not ingests(s) and not ingests(s, ctl=tctl), str(ingests(s, ctl=tctl))[:200])
         s.run("copilot", json.dumps(dict(base, reason="error")), env, args=("sessionEnd",))
         e = wait_for(lambda: ingests(s, "error", ctl=tctl), 10)
@@ -2743,7 +2935,7 @@ def t_copilot_schedules(s):
         turn = (s.home / ".simpleterm" / "run" / "cops-1.turn").read_text().split("\n")[0]
         s.check("copilot schedule: a scheduled prompt's turn is the schedule's", turn == "schedule", turn)
         st = wait_for(lambda: [r for r in tunnel("state") if (r.get("plain_json") or {}).get("st") == "scheduled"], 10)
-        time.sleep(1.5)
+        s.settle("the agentStop hook's background work")
         s.check("copilot schedule: with the schedule left, state scheduled and no done",
                 st and not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300])
         s.check("copilot schedule: the schedule is in turn.crons",
@@ -2754,7 +2946,7 @@ def t_copilot_schedules(s):
         ev("session.schedule_cancelled", {"id": 1})
         run_turn(1, "The deploy finished.")
         d = wait_for(lambda: tunnel("done"), 10)
-        time.sleep(1.5)
+        s.settle("the agentStop hook's background work")
         s.check("copilot schedule: none left -> done by schedule to the tunnel only",
                 len(d) == 1 and (d[0]["plain_json"].get("turn") or {}).get("by") == "schedule" and not ingests(s, "done"),
                 str(d)[:300] + str(ingests(s))[:200])
@@ -2849,7 +3041,7 @@ def t_copilot_schedules(s):
 
         reset()
         shell_report("[Scheduled prompt #3]\ncheck status", "schedule-3", "sbg1")
-        time.sleep(4.5)
+        s.settle("the hooks' background work (a done's wait, if one started)")
         s.check("copilot schedule: the report of a scheduled run's shell -> no done",
                 not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300] + str(ingests(s))[:200])
         reset()
@@ -2858,7 +3050,7 @@ def t_copilot_schedules(s):
                 wait_for(lambda: ingests(s, "done"), 20), str(ingests(s))[:300])
         reset()
         agent_report("[Scheduled prompt #3]\ncheck status", "schedule-3", "call_7_1", "5b0c2a1e-0000-4000-8000-00000000a001")
-        time.sleep(4.5)
+        s.settle("the hooks' background work (a done's wait, if one started)")
         s.check("copilot schedule: the report of a scheduled run's background subagent -> no done",
                 not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300] + str(ingests(s))[:200])
         reset()
@@ -2867,7 +3059,7 @@ def t_copilot_schedules(s):
                 wait_for(lambda: ingests(s, "done"), 20), str(ingests(s))[:300])
         reset()
         det_report("[Scheduled prompt #3]\ncheck status", "schedule-3", "det7")
-        time.sleep(4.5)
+        s.settle("the hooks' background work (a done's wait, if one started)")
         s.check("copilot schedule: the report of a scheduled run's detached shell -> no done",
                 not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300] + str(ingests(s))[:200])
         reset()
@@ -2900,7 +3092,7 @@ def t_copilot_schedules(s):
         ev("assistant.message", {"content": "It finished."})
         s.run("copilot", json.dumps(dict(base, stopReason="end_turn", stop_hook_active=False, transcriptPath=str(tx))),
               env, args=("agentStop",))
-        time.sleep(4.5)
+        s.settle("the hooks' background work (a done's wait, if one started)")
         s.check("copilot schedule: a notification inside the scheduled run opens no turn; its detached shell's report -> no done",
                 not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300] + str(ingests(s))[:200])
     finally:
@@ -2934,7 +3126,7 @@ def t_agy(s):
             and rec[0]["plain_json"].get("msg") == "Which port?", out + str(rec)[:200])
     s.ctl("/_ctl/reset", {})
     rc, out, err, el = s.run("agy", agy_stop(fullyIdle=False), args=("Stop",))
-    time.sleep(1.5)
+    s.settle("the agy Stop hook's background work")
     s.check("agy: Stop not fully idle -> nothing", out.strip() == "{}" and not ingests(s), out)
     rc, out, err, el = s.run("agy", agy_stop(), args=("Stop",))
     rec = wait_for(lambda: ingests(s, "done"), 20)
@@ -2992,13 +3184,13 @@ def t_agy_schedule(s):
         reset()
         stop(1, 2, False)
         st = wait_for(lambda: state("scheduled"), 10)
-        time.sleep(1.5)
+        s.settle("the agy Stop hook's background work")
         s.check("agy schedule: a cron run with a run left -> state scheduled, no done",
                 st and by(st) == ["schedule"] and not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:300])
         reset()
         stop(1, 3, True)
         d = wait_for(lambda: tunnel("done"), 10)
-        time.sleep(1.5)
+        s.settle("the agy Stop hook's background work")
         s.check("agy schedule: the last cron run -> done by schedule to the tunnel only",
                 by(d) == ["schedule"] and not ingests(s, "done"), str(d)[:300] + str(ingests(s))[:300])
         # A one-shot timer: the person's turn, the timer's turn.
@@ -3008,13 +3200,13 @@ def t_agy_schedule(s):
         reset()
         stop(2, 2, True)
         d = wait_for(lambda: tunnel("done"), 10)
-        time.sleep(1.5)
+        s.settle("the agy Stop hook's background work")
         s.check("agy schedule: the timer's turn -> done by schedule to the tunnel only",
                 by(d) == ["schedule"] and not ingests(s, "done"), str(d)[:300] + str(ingests(s))[:300])
         # A background command of a person's turn: a pause, then its report turn is done (by task).
         reset()
         stop(3, 1, False)
-        time.sleep(1.5)
+        s.settle("the agy Stop hook's background work")
         s.check("agy schedule: a person's turn leaving a command -> no done yet", not ingests(s, "done") and not tunnel("done"),
                 str(ingests(s))[:300])
         reset()
@@ -3027,13 +3219,13 @@ def t_agy_schedule(s):
         wait_for(lambda: ingests(s, "done"), 20)
         reset()
         stop(4, 2, False)
-        time.sleep(1.5)
+        s.settle("the agy Stop hook's background work")
         s.check("agy schedule: the timer's turn leaving a command -> no done", not ingests(s, "done") and not tunnel("done"),
                 str(ingests(s))[:300])
         reset()
         stop(4, 3, True)
         d = wait_for(lambda: tunnel("done"), 10)
-        time.sleep(1.5)
+        s.settle("the agy Stop hook's background work")
         s.check("agy schedule: the report of a command a scheduled turn started -> done by schedule to the tunnel only",
                 by(d) == ["schedule"] and not ingests(s, "done"), str(d)[:300] + str(ingests(s))[:300])
         # A timer that fires inside the person's turn stays in that turn: done (by user).
@@ -3048,7 +3240,7 @@ def t_agy_schedule(s):
         reset()
         stop(6, 2, True)
         d = wait_for(lambda: tunnel("done"), 10)
-        time.sleep(1.5)
+        s.settle("the agy Stop hook's background work")
         s.check("agy schedule: the run that killed its cron -> done by schedule to the tunnel only",
                 by(d) == ["schedule"] and not ingests(s, "done"), str(d)[:300] + str(ingests(s))[:300])
     finally:
@@ -3169,7 +3361,7 @@ def t_grok(s):
     s.check("grok: no terminal output (Grok has no terminalSequence)", out == "", out)
     s.ctl("/_ctl/reset", {})
     rc, out, err, el = s.run("claude", inp, env)
-    time.sleep(1.5)
+    s.settle("the second copy's background work")
     s.check("grok: the same event twice (two copies of the hook) -> one alert", not ingests(s), str(ingests(s))[:200])
     s.check("grok: duplicate logged", "duplicate Stop" in s.log_text(), s.log_text()[-300:])
     inp2, _ = grok_input("Stop", reason="end_turn", promptId="p2", timestamp="2026-10-29T10:05:00.000Z", lastAssistantMessage="Grok done.")
@@ -3179,7 +3371,7 @@ def t_grok(s):
     for reason in ("channel_closed", "shutdown"):
         inp3, _ = grok_input("Stop", reason=reason, timestamp="2026-10-29T10:09:%02d.000Z" % len(reason), lastAssistantMessage="x")
         s.run("claude", inp3, env)
-    time.sleep(1.5)
+    s.settle("the session-end Stop hooks' background work")
     s.check("grok: session-end Stop is not a turn end", not ingests(s), str(ingests(s))[:200])
     note, nenv = grok_input("Notification", notificationType="permission_prompt", message="Tool permission requested", level="info")
     s.run("claude", note, dict(nenv, GROK_HOOK_EVENT="notification"))
@@ -3190,7 +3382,7 @@ def t_grok(s):
     note2, _ = grok_input("Notification", notificationType="task_complete", message="Background task completed: t1",
                           timestamp="2026-10-29T10:10:00.000Z")
     s.run("claude", note2, dict(nenv, GROK_HOOK_EVENT="notification"))
-    time.sleep(1.5)
+    s.settle("the Notification hook's background work")
     s.check("grok: other notifications ignored", not ingests(s))
     fail, fenv = grok_input("StopFailure", error="rate_limit", errorDetails="429", lastAssistantMessage="Rate limited",
                             timestamp="2026-10-29T10:11:00.000Z")
@@ -3269,7 +3461,7 @@ def t_grok(s):
     idle, ienv = grok_input("Notification", notificationType="idle_prompt", message="Waiting for input",
                             timestamp="2026-10-29T10:21:00.000Z")
     s.run("claude", idle, dict(ienv, GROK_HOOK_EVENT="notification"))
-    time.sleep(1.5)
+    s.settle("the hooks' background work")
     s.check("grok background: no done and no idle question while the shell runs", not ingests(s), str(ingests(s))[:200])
     wake, wenv = grok_input("UserPromptSubmit", promptId="task-completed-" + task["id"], timestamp="2026-10-29T10:22:00.000Z")
     s.run("claude", wake, dict(wenv, GROK_HOOK_EVENT="user_prompt_submit"))
@@ -3284,7 +3476,7 @@ def t_grok(s):
     idle2, ienv2 = grok_input("Notification", notificationType="idle_prompt", message="Waiting for input",
                               timestamp="2026-10-29T10:23:00.000Z")
     s.run("claude", idle2, dict(ienv2, GROK_HOOK_EVENT="notification"))
-    time.sleep(1.5)
+    s.settle("the Notification hook's background work")
     s.check("grok: idle_prompt after a done repeats it (no question)", not ingests(s, "question"), str(ingests(s))[:200])
 
 
@@ -3304,7 +3496,7 @@ def t_opencode_sh(s):
                                   "background_tasks": [{"id": "sh_1", "type": "shell", "command": "node worker.js"}]}))
     s.run("opencode", json.dumps({"hook_event_name": "StopFailure", "session_id": "oc-2", "cwd": "/w/ocproj",
                                   "error": "APIError", "last_assistant_message": "boom"}))
-    time.sleep(3.5)
+    s.settle("the pause's wait (bg_done_after, 2 s) and the error's send")
     evs = [r["body"]["ev"] for r in ingests(s)]
     s.check("opencode sh: a failed turn ends the pause (error, no later done)", evs == ["error"], str(evs))
     s.setup([(LINK_A, {"push": "disabled"})])
@@ -3784,9 +3976,10 @@ def t_v2_usage_ask_gate(s):
             f = run / "ask.claude.fail"
             return f.read_text().strip() if f.exists() else None
 
-        def turn(sid="sg1", wait=2.5):
+        def turn(sid="sg1"):
+            # A turn's end, and what it started in the background (an ask, a --version) ended.
             s.run("claude", stop(sid), {"SIMPLETERM": "1"})
-            time.sleep(wait)
+            s.settle("the Stop hook's ask or --version, if any")
 
         def asked(sid="sg1", within=20):
             # One more ask, its event sent.
@@ -3848,7 +4041,7 @@ def t_v2_usage_ask_gate(s):
             if i < 2:
                 wait_for(lambda: asks() > before and len(off()) > i, 15)
             else:
-                time.sleep(2.5)
+                s.settle("the Stop hook's ask, if any")
         s.check("ask gate: spend by 2.1.316 and by 2.1.317 -> each asked once, both stopped", asks() == 2 and sorted(off()) == ["2.1.316", "2.1.317"],
                 "%d asks, off %s" % (asks(), off()))
         tr.write_text(trl("2.1.316"))
@@ -3988,7 +4181,7 @@ def t_v2_usage_ask_gate(s):
             for pr in ps:
                 s.finish(pr, 60)
             wait_for(lambda: asks() >= 1, 25)
-            time.sleep(3 if s.kind == "sh" else 10)
+            s.settle("the Stop hooks' asks, if more than one started")
             counts.append(asks())
         s.check("ask gate: %d sessions end a turn at once -> one ask, each of %d rounds" % (n, rounds), counts == [1] * rounds, str(counts))
         # agent-hook.conf as people write it: comments, blanks, CRLF, quotes; the key's first line decides.
@@ -4072,7 +4265,7 @@ def t_v2_usage_ask(s):
                 and (s.kind != "sh" or oct(probe.stat().st_mode & 0o777) == "0o700"), env)
         # Five minutes at most per agent and settings folder.
         s.run("claude", stop, {"SIMPLETERM": "1"})
-        time.sleep(3)
+        s.settle("the Stop hook's ask, if any")
         s.check("ask: not again within 5 minutes", asks() == 1, str(asks()))
         # The hook run by an ask does nothing.
         rc, out, err, el = s.run("claude", stop, {"SIMPLETERM": "1", "SIMPLETERM_PROBE": "1"})
@@ -4081,13 +4274,13 @@ def t_v2_usage_ask(s):
         for name, kw in (("no tunnel event", {"live": False}), ("the last one 11 minutes ago", {"age": 660}), ("the last one failed", {"code": 0})):
             setup(ok, **kw)
             s.run("claude", stop, {"SIMPLETERM": "1"})
-            time.sleep(2.5)
+            s.settle("the Stop hook's ask, if any")
             s.check("ask: not asked, app not connected (%s)" % name, asks() == 0, str(asks()))
         # The off switch in any case.
         for v in ("off", "OFF", "No", "FALSE", "0"):
             setup(ok, conf={"usage_ask": v})
             s.run("claude", stop, {"SIMPLETERM": "1"})
-            time.sleep(2.5)
+            s.settle("the Stop hook's ask, if any")
             s.check("ask: usage_ask=%s" % v, asks() == 0, str(asks()))
         # Any session version is asked (SimpleTerm hist/usage-ask#d22).
         for v in ("2.2.0", "1.0.0"):
@@ -4108,7 +4301,7 @@ def t_v2_usage_ask(s):
         for f in [f for f in run.glob("ask.claude.*") if not f.name.endswith((".auth", ".off"))]:
             f.write_text("%d\n" % (int(time.time()) - 400))
         s.run("claude", stop, {"SIMPLETERM": "1"})
-        time.sleep(2.5)
+        s.settle("the Stop hook's ask, if any")
         s.check("ask: after not-subscriber, not again until the credentials change", asks() == 1 and len(ask_events()) == 1,
                 "%d asks, %d events" % (asks(), len(ask_events())))
         # An answer showing model spend: uq failed, and that version is not asked again.
@@ -4122,7 +4315,7 @@ def t_v2_usage_ask(s):
             f.write_text("%d\n" % (int(time.time()) - 400))
         (s.tmp / "reply").write_text(json.dumps(ok, separators=(",", ":")) + "\n")
         s.run("claude", stop, {"SIMPLETERM": "1"})
-        time.sleep(2.5)
+        s.settle("the Stop hook's ask, if any")
         s.check("ask: after model spend, this version is not asked again", asks() == 1, str(asks()))
         (run / "ask.claude.off").unlink() if (run / "ask.claude.off").exists() else None
         # A failed sign-in: no ask again until the credentials file changes.
@@ -4134,7 +4327,7 @@ def t_v2_usage_ask(s):
         for f in af:
             f.write_text("%d\n" % (int(time.time()) - 400))
         s.run("claude", stop, {"SIMPLETERM": "1"})
-        time.sleep(2.5)
+        s.settle("the Stop hook's ask, if any")
         s.check("ask: after a failed sign-in, not again (5 minutes past)", asks() == 1, str(asks()))
         cred = s.home / ".claude" / ".credentials.json"
         write(cred, "{}")
@@ -4170,7 +4363,7 @@ def t_v2_usage_ask(s):
             cseed()
             (s.tmp / "reply2").write_text(reply2)
             s.run("codex", cstop, {"SIMPLETERM": "1"})
-            time.sleep(2.5)
+            s.settle("the Stop hook's ask, if any")
             s.check("ask codex: usage_ask_codex=%s -> not asked" % v, asks() == 0, str(asks()))
         setup({"id": 1, "result": {"userAgent": "x"}})
         cseed()
@@ -4259,7 +4452,7 @@ def t_v2_usage_ask_refresh(s):
 
         def not_asked(agent):
             turn(agent)
-            time.sleep(2.5)
+            s.settle("the Stop hook's ask, if any")
             return asks() == 0
 
         def jwt(payload):
@@ -4559,9 +4752,11 @@ def t_v2_n10(s):
     s.check("N10 answered in the terminal after the decision came: nothing printed", got is not None and got.strip() == "",
             "no attempt where the note came first" if got is None else got)
     # Answered in the terminal first (a prompt or the tool ran): the late decision is not applied.
-    s.setup([(LINK_A, {"fmt": 2, "decision": "allow", "after": 4, "dext": {"act": "allow"}})], conf={"claude_wait": 12})
+    # (The decision comes 8 s after the request: the prompt is well before it, also on a loaded machine.)
+    s.setup([(LINK_A, {"fmt": 2, "decision": "allow", "after": 8, "dext": {"act": "allow"}})], conf={"claude_wait": 12})
     p = s.start("claude", v2_perm(session="sess-n10"))
-    time.sleep(1.5)
+    # Its first poll: it waits now (what it found at its start is behind it).
+    wait_for(lambda: s.records("/v1/decision"), 15)
     s.run("claude", json.dumps({"session_id": "sess-n10", "cwd": "/home/u/api", "hook_event_name": "UserPromptSubmit", "prompt": "go on"}))
     rc, out, err, el = s.finish(p, 60)
     s.check("N10 answered at the terminal first: nothing printed", out.strip() == "", out)
@@ -4614,7 +4809,7 @@ def t_v2_link_results(s):
         # An older app's tunnel (no fmt): no result, no resend.
         setup({"decisions": [dict(bad)]}, {"decision": "allow", "after": 3}, fmt=None)
         rc, out, err, el = s.run("claude", v2_perm(session="lr3"))
-        time.sleep(1)
+        s.settle("the hook's sends to the tunnel")
         s.check("link results: older tunnel: no link result, no resend, relay applies",
                 behavior(out).get("behavior") == "allow" and len(tun_ingests("permission")) == 1
                 and not [r for r in tun_ingests("resolved") if ((r.get("plain_json") or {}).get("res") or {}).get("scope") == "link"],
@@ -4641,7 +4836,8 @@ def t_v2_link_waits(s):
         # An older app's tunnel answers sent: the hook waits for it (even for Codex), the relay gets an alert.
         setup({"push": "sent", "decision": "allow", "after": 1}, {"push": "sent"}, tunnel_fmt=None)
         rc, out, err, el = s.run("codex", codex)
-        rel = s.records("/v1/ingest")
+        # (The relay's alert goes from the background: it may land after the hook ended.)
+        rel = wait_for(lambda: s.records("/v1/ingest"), 15) or []
         s.check("waits: an older tunnel's sent is waited for (codex)", behavior(out).get("behavior") == "allow", out + s.log_text()[-300:])
         s.check("waits: hidden: the relay gets a question without nonce, same rid", rel and rel[0]["body"]["ev"] == "question"
                 and "nh" not in rel[0]["body"] and "nonce" not in (rel[0].get("plain_json") or {})
@@ -4773,7 +4969,7 @@ def t_v2_held(s):
         state(agent.pid, status="busy", waiting_for=None, at=1793232009000)
         done, out = finished(agent, 15)
         n = len(perms())
-        time.sleep(1)
+        s.settle("the hook's sends")
         s.check("held: the prompt closed: no more, the hook ends with no decision",
                 done and out.strip() == "" and n == n0 and len(perms()) == n0 and "held: the window is not open" in s.log_text(),
                 "%r n=%d of %d %s" % (out, n, n0, s.log_text()[-300:]))
@@ -5027,7 +5223,7 @@ def t_v2_held_bg(s):
             jl(tr, [{"step_index": 2, "source": "MODEL", "type": "GENERIC", "status": "DONE", "content": "A1: Red"}])
             ok = ended("held: the window is not open (stop)", n0)
             n1 = len(asks())
-            time.sleep(2.5)
+            s.settle("the sender's last sends", but=[a])
             s.check("held bg: agy: answered (step 2 written): no more, one log line, mark gone",
                     ok and len(asks()) == n1, "%d->%d %s %s" % (n1, len(asks()), marks(), s.log_text()[-300:]))
             stop(a)
@@ -5082,7 +5278,7 @@ def t_v2_held_bg(s):
             close(gd)
             ok = ended("held: the window is not open (stop)", n0)
             k = len(asks())
-            time.sleep(2.5)
+            s.settle("the sender's last sends", but=[g])
             s.check("held bg: grok %s: closed: no more, mark gone" % name, ok and len(asks()) == k,
                     "%d->%d %s %s" % (k, len(asks()), marks(), s.log_text()[-300:]))
             stop(g)
@@ -5189,7 +5385,8 @@ def t_v2_held_bg(s):
         setup(push="suppressed")
         a = gen("conv-h3")
         wait_for(lambda: asks(), 10)
-        time.sleep(3)
+        # (A sender that stayed would tell again every second, HELD_EVERY=1, and keep this from settling.)
+        s.settle("the hook's send", but=[a])
         s.check("held bg: plain suppressed: not told again, no mark", len(asks()) == 1 and not marks(), "%d %s" % (len(asks()), marks()))
         stop(a)
 
@@ -5207,8 +5404,9 @@ def t_v2_held_bg(s):
             (run / ("held.other.k%d" % i)).write_text("%d\n" % os.getpid())
         n0 = s.log_text().count("held: too many senders (stop)")
         a = gen("conv-h5")
+        # (The ninth logs, then takes its mark away: wait for both.)
         s.check("held bg: eight senders alive: a ninth stops",
-                wait_for(lambda: s.log_text().count("held: too many senders (stop)") > n0, 15) and len(marks()) == 8,
+                wait_for(lambda: s.log_text().count("held: too many senders (stop)") > n0 and len(marks()) == 8, 15),
                 "%s %s" % (marks(), s.log_text()[-300:]))
         for p in run.glob("held.other.*"):
             p.unlink()
@@ -5314,15 +5512,16 @@ def t_v2_state(s):
         s.run("claude", ups)
         wait_for(states, 5)
         s.run("claude", ups)
-        time.sleep(2.5)
+        s.settle("the prompt hook's state send (a second's wait, if one started)")
         st = states()
         s.check("state: running once (same state not sent again)", [x.get("st") for x in st] == ["running"], str(st)[:300])
         s.check("state: not to the relay", not [r for r in s.records("/v1/ingest") if r["body"]["ev"] == "state"])
-        # One state a second: a change within the second waits a second, and a newer one replaces it.
+        # One state a second: a change within the second waits a second, and a newer one replaces it. Each
+        # change here comes once the one before was sent, so none replaces another.
         s.run("claude", json.dumps({"session_id": "st1", "cwd": "/w", "hook_event_name": "SubagentStart", "agent_id": "ag1", "agent_type": "explore"}))
-        time.sleep(2.2)
+        wait_for(lambda: len(states()) >= 2, 8)
         s.run("claude", json.dumps({"session_id": "st1", "cwd": "/w", "hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "is_interrupt": True}))
-        time.sleep(2.2)
+        wait_for(lambda: len(states()) >= 3, 8)
         s.run("claude", json.dumps({"session_id": "st1", "cwd": "/w", "hook_event_name": "SessionEnd", "reason": "exit"}))
         wait_for(lambda: len(states()) >= 4, 8)
         st = states()
@@ -5339,7 +5538,7 @@ def t_v2_state(s):
                     sub("SubagentStart", "ag1"), sub("SubagentStart", "ag2"), sub("SubagentStop", "ag1")):
             s.run("claude", inp)
         wait_for(lambda: len(states()) >= 4, 15)
-        time.sleep(1.5)
+        s.settle("the hooks' state sends")
         got = sorted((x.get("st"), (x.get("sub") or {}).get("id")) for x in states())
         s.check("state: subagent events in the same second are all sent",
                 got == sorted([("running", None), ("sub_start", "ag1"), ("sub_start", "ag2"), ("sub_stop", "ag1")]), str(got))
@@ -5574,7 +5773,7 @@ def t_v2_claude_question_once(s):
          "tool_input": {"questions": [{"question": "Which DB?", "header": "DB", "options": [{"label": "A"}, {"label": "B"}]}]}}
     s.run("claude", json.dumps(dict(q, hook_event_name="PreToolUse")))
     s.run("claude", json.dumps(dict(q, hook_event_name="PermissionRequest")))
-    time.sleep(3.5)
+    s.settle("the PreToolUse report's wait (ask_delay, 2 s) and the sends")
     qs = ingests(s, "question")
     s.check("claude question: one alert, the decidable one", len(qs) == 1 and qs[0]["body"].get("nh") and (qs[0].get("plain_json") or {}).get("req", {}).get("can"),
             str([(r["body"].get("nh"), (r.get("plain_json") or {}).get("req")) for r in qs])[:400])
@@ -5713,14 +5912,14 @@ def t_opencode_schedule(s):
         # Run 1 of 2: a schedule is left -> state scheduled, no done.
         run(scheduled(1) + [ev("session.execution.succeeded", sessionID=sid)], info("active", 1))
         st = wait_for(scheduled_state, 10)
-        time.sleep(1.5)
+        s.settle("the plugin's hooks' background work")
         s.check("opencode schedule: a run with a run left -> state scheduled (by schedule), no done",
                 st and by(st) == ["schedule"] and (st[0].get("plain_json") or {}).get("turn", {}).get("crons")
                 and not tunnel("done") and not ingests(s, "done"), str(ingests(s, ctl=tctl))[:400] + str(ingests(s))[:200])
         # Run 2, the last (the schedule is done when its prompt is sent): a done by schedule to the tunnel only.
         run(scheduled(2) + [ev("session.execution.succeeded", sessionID=sid)], info("done", 0))
         dn = wait_for(lambda: tunnel("done"), 10)
-        time.sleep(1.5)
+        s.settle("the plugin's hooks' background work")
         s.check("opencode schedule: the last run -> done by schedule to the tunnel only",
                 by(dn) == ["schedule"] and not ingests(s, "done"), str(dn)[:300] + str(ingests(s))[:300])
         # Without the enqueued item (a plugin that came up late), the inbox id of a schedule's prompt still tells it.
@@ -5728,14 +5927,14 @@ def t_opencode_schedule(s):
              ev("session.inbox.delivered", sessionID=sid, inboxID="msg_%s_3" % sch),
              ev("session.execution.succeeded", sessionID=sid)], [])
         dn = wait_for(lambda: tunnel("done"), 10)
-        time.sleep(1.5)
+        s.settle("the plugin's hooks' background work")
         s.check("opencode schedule: a delivered msg_sch_ id alone -> the schedule's turn",
                 by(dn) == ["schedule"] and not ingests(s, "done"), str(dn)[:300] + str(ingests(s))[:300])
         # No session.inbox.delivered (every 2.2.7 run had one, nothing promises it): an item enqueued while the session
         # was idle is the execution's that starts next, so the last run stays quiet (AhMunGa/simple-term#469) ...
         run(scheduled(2)[:2] + [ev("session.execution.succeeded", sessionID=sid)], info("done", 0))
         dn = wait_for(lambda: tunnel("done"), 10)
-        time.sleep(1.5)
+        s.settle("the plugin's hooks' background work")
         s.check("opencode schedule: the last run without its delivered event -> done by schedule to the tunnel only",
                 by(dn) == ["schedule"] and not ingests(s, "done"), str(dn)[:300] + str(ingests(s))[:300])
         # ... and a person's prompt the same way is the person's turn.
@@ -5748,7 +5947,7 @@ def t_opencode_schedule(s):
         two = [str(s.tmp / "other-project"), d]
         run(scheduled(2)[:2] + [ev("session.execution.succeeded", sessionID=sid)], info("done", 0), two)
         dn = wait_for(lambda: tunnel("done"), 10)
-        time.sleep(1.5)
+        s.settle("the plugin's hooks' background work")
         s.check("opencode schedule, two instances: the last run without its delivered event -> done by schedule, tunnel only",
                 by(dn) == ["schedule"] and not ingests(s, "done"), str(dn)[:300] + str(ingests(s))[:300])
         steps = turn(human("msg_1e29c1412001cccccccccccccccc"))
@@ -5786,7 +5985,7 @@ def t_opencode_schedule(s):
             ev("session.execution.succeeded", sessionID=sid)]
         run(steps, [])
         dn = wait_for(lambda: tunnel("done"), 10)
-        time.sleep(1.5)
+        s.settle("the plugin's hooks' background work")
         s.check("opencode schedule: the report of a shell a scheduled turn started -> one done by schedule, tunnel only",
                 by(dn) == ["schedule"] and not ingests(s, "done"), str(dn)[:300] + str(ingests(s))[:300])
     finally:
@@ -5827,7 +6026,7 @@ def t_opencode_js(s):
                                   "steps": [{"event": {"type": "session.idle", "properties": {"sessionID": "ses_1"}}},
                                             {"event": {"type": "session.idle", "properties": {"sessionID": "ses_sub"}}}], "wait": 3000})
     rec = wait_for(lambda: ingests(s, "done"), 20)
-    time.sleep(1)
+    s.settle("the plugin's hooks' background work")
     s.check("opencode 1.x: session.idle -> done with the session title, subagents skipped",
             len(ingests(s, "done")) == 1 and rec[0]["plain_json"].get("msg") == "Fix the tests", str(ingests(s))[:300])
     # The session's tokens and cost (session info) reach the usage event (SimpleTerm if/usage-report#agents).
@@ -5857,7 +6056,7 @@ def t_opencode_js(s):
                                     st("ses_bg", "idle"), idle("ses_bg"), st("ses_1", "busy"), st("ses_1", "idle"), idle("ses_1")],
                           "wait": 3000})
     wait_for(lambda: ingests(s, "done"), 20)
-    time.sleep(1)
+    s.settle("the plugin's hooks' background work")
     done = ingests(s, "done")
     s.check("opencode 1.x: no done while a background child is busy, then once",
             len(done) == 1 and done[0]["received"] - t0 > 2.0,
@@ -5872,7 +6071,7 @@ def t_opencode_js(s):
                                     idle("ses_1")],
                           "wait": 2500})
     wait_for(lambda: ingests(s, "done"), 20)
-    time.sleep(1)
+    s.settle("the plugin's hooks' background work")
     s.check("opencode 1.x: a child that errored does not hold the parent's done back",
             len(ingests(s, "done")) == 1, str([(r["plain_json"].get("msg")) for r in ingests(s)]))
     # --- 2.x ---
@@ -5926,7 +6125,7 @@ def t_opencode_js(s):
         t0 = time.time()
         node_plugin(s, "v2", {"directory": d, "sessions": sess, "steps": steps, "wait": 3000})
         wait_for(lambda: ingests(s, "done"), 20)
-        time.sleep(1)
+        s.settle("the plugin's hooks' background work")
         done = ingests(s, "done")
         s.check("opencode 2.x: done waits for a running subagent, then comes once (%s)" % name,
                 len(done) == 1 and done[0]["plain_json"].get("msg") == "Ship it" and done[0]["received"] - t0 > 2.0,
@@ -5949,7 +6148,7 @@ def t_opencode_js(s):
                  ev(44, "session.execution.started", "ses_r"), ev(45, "session.execution.succeeded", "ses_r")]
         node_plugin(s, "v2", {"directory": d, "sessions": sess, "steps": steps, "wait": 3000})
         wait_for(lambda: ingests(s, "done"), 20)
-        time.sleep(1)
+        s.settle("the plugin's hooks' background work")
         done = ingests(s, "done")
         s.check("opencode 2.x: no done while a background shell runs, then once (%s)" % name,
                 len(done) == 1 and done[0]["received"] - t0 > 2.0,
@@ -5989,7 +6188,7 @@ def t_opencode_js(s):
         ev(72, "session.execution.succeeded", "ses_r"), {"sleep": 500},
         ev(73, "session.execution.started", "ses_r"), {"sleep": 3500}, ev(74, "session.execution.succeeded", "ses_r")]})
     wait_for(lambda: ingests(s, "done"), 20)
-    time.sleep(2.5)
+    s.settle("the pauses' waits (bg_done_after, 2 s)")
     done = ingests(s, "done")
     s.check("opencode 2.x: a long turn after a pause gets no done before its own end",
             len(done) == 1 and done[0]["received"] - t0 > 3.5, str([(r["plain_json"].get("msg"), round(r["received"] - t0, 2)) for r in done]))
@@ -5997,7 +6196,7 @@ def t_opencode_js(s):
     t0 = running_turns("unknown shell, second turn", "node worker.js", 2, conf={"bg_done_after": 10})
     wait_for(lambda: ingests(s, "done"), 20)
     first = ingests(s, "done")
-    time.sleep(max(0, t0 + 12.5 - time.time()))
+    s.settle("the first pause's wait (bg_done_after, 10 s)")
     done = ingests(s, "done")
     s.check("opencode 2.x: the second turn with the same open shell is done at once (once, the old wait is over)",
             len(first) == 1 and first[0]["received"] - t0 < 9 and len(done) == 1,
@@ -6020,7 +6219,7 @@ def t_opencode_js(s):
                           "env": {"SIMPLETERM_LANE_TIMEOUT_MS": "600"}, "getDelay": {"ses_h": {"ms": 2500, "times": 1}},
                           "steps": [ev(82, "session.execution.started", "ses_h"), ev(83, "session.execution.succeeded", "ses_h")]})
     rec = wait_for(lambda: ingests(s, "done"), 20)
-    time.sleep(1)
+    s.settle("the plugin's hooks' background work")
     s.check("opencode 2.x: the start the lane gave up on sends nothing when its lookup returns late",
             len(rec) == 1 and not (run_dir / "ses_h.turn").exists(), str(rec)[:200] + str(list(run_dir.glob("ses_h*"))))
     s.setup([(LINK_A, {"push": "disabled"})])
@@ -6191,6 +6390,13 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_v2_state, t_v2_sessions, t_v2_mux, t_v2_opencode_js, t_copilot_hooks, t_copilot, t_copilot_schedules,
          t_v2_versions, t_v2_claude_question_once, t_hooks_removed_plugin]
 
+# The cases where the shell and openssl meet (the compat set): the openssl calls (random hex, SHA-256 read
+# by awk, the HMAC whose key blocks printf writes, the AES-256-CBC envelope and dext, base64 both ways),
+# the byte-exact events and terminal sequences, and the shell's own reading of input, settings and argv.
+COMPAT = {"t_vectors", "t_allow_deny", "t_invalid_dmac", "t_missing_deps", "t_hostile_input", "t_argv", "t_external_printf",
+          "t_background_work_7501", "t_v2_fixtures", "t_v2_dext_vector", "t_v2_decisions", "t_usage_ask_refresh_vectors",
+          "t_conf_vectors"}
+
 # Tests of the sh hook only (scripts and behaviour the PowerShell hook does not have).
 SH_ONLY = {"t_v2_versions", "t_v2_n10", "t_v2_opencode_js", "t_copilot_hooks", "t_copilot", "t_copilot_schedules", "t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_delivery", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_notify_no_tty", "t_cli_wrapper",
            "t_agy", "t_agy_schedule", "t_agy_paths", "t_opencode_sh", "t_opencode_js", "t_opencode_schedule"}
@@ -6226,11 +6432,47 @@ def ps51_static_check():
     return problems
 
 
+PWSH_TIMEOUT = 60
+
+
+def pwsh_out(pwsh, script):
+    """What `pwsh -Command script` prints, run in a HOME of its own (pwsh writes caches there); None when
+    it does not run to the end: it cannot start, takes over PWSH_TIMEOUT s, or exits with an error."""
+    home = tempfile.mkdtemp(prefix="st-pwsh-")
+    env = {"HOME": home, "PATH": "/usr/bin:/bin", "POWERSHELL_TELEMETRY_OPTOUT": "1", "POWERSHELL_UPDATECHECK": "Off"}
+    try:
+        p = subprocess.run([pwsh, "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True,
+                           timeout=PWSH_TIMEOUT, env=env)
+        return p.stdout if p.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def ps_parse_check(pwsh):
+    """The parse errors in agent-hook.ps1, one line each. A parse that does not run to the end is one too:
+    no output is not a pass."""
     script = ("$e=$null;$t=$null;[void][System.Management.Automation.Language.Parser]::ParseFile('%s',[ref]$t,[ref]$e);"
               "$e | ForEach-Object { $_.Extent.StartLineNumber.ToString() + ': ' + $_.Message }") % HOOK_PS1
-    out = subprocess.run([pwsh, "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True, timeout=60)
-    return [l for l in out.stdout.splitlines() if l.strip()]
+    out = pwsh_out(pwsh, script)
+    if out is None:
+        return ["the parse did not run to the end (could not start, over %d s, or exited with an error)" % PWSH_TIMEOUT]
+    return [l for l in out.splitlines() if l.strip()]
+
+
+def pwsh_major(pwsh):
+    """PowerShell's major version, 0 when `pwsh` is not PowerShell or does not answer (a parse check alone
+    passes anything that prints nothing)."""
+    out = (pwsh_out(pwsh, "'PS ' + $PSVersionTable.PSVersion.Major") or "").strip()
+    return int(out[3:]) if re.fullmatch(r"PS \d+", out) else 0
+
+
+def shell_works(sh):
+    try:
+        return subprocess.run([sh, "-c", "echo ok"], capture_output=True, text=True, timeout=10).stdout == "ok\n"
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 # Tests that keep the CPU busy (t_service_shells: some 200 Stop hooks, about 40 s of CPU a suite):
@@ -6239,36 +6481,13 @@ def ps_parse_check(pwsh):
 HEAVY = {"t_service_shells": threading.Semaphore(2), "t_v2_held": threading.Semaphore(3), "t_v2_held_bg": threading.Semaphore(3)}
 
 
-def ours(groups, marks):
-    """Processes (not zombies) of the process groups `groups` that are this run's: their command
-    names one of `marks` (this checkout: the hooks, mock relay, node harness; a suite's folder: the
-    stand-in agents), or they were started by one that is (a hook's sleep, curl). Group ids are
-    reused, so the group alone does not say whose a process is."""
-    out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid=,stat=,command="], capture_output=True).stdout.decode("utf-8", "replace")
-    rows = []
-    for line in out.splitlines():
-        f = line.split(None, 4)
-        if len(f) == 5 and f[0].isdigit() and f[1].isdigit() and f[2].isdigit() and not f[3].startswith("Z"):
-            rows.append((int(f[0]), int(f[1]), int(f[2]), f[4]))
-    me = os.getpid()
-    inside = {pid: (ppid, cmd) for pid, ppid, pgid, cmd in rows if pgid in groups and pid != me}
-    mine = {pid for pid, (ppid, cmd) in inside.items() if any(m in cmd for m in marks) and not cmd.startswith("ps -A")}
-    grew = True
-    while grew:
-        grew = False
-        for pid, (ppid, cmd) in inside.items():
-            if pid not in mine and ppid in mine:
-                mine.add(pid)
-                grew = True
-    return sorted(mine)
-
-
 def leftovers():
-    """What the run left running: this run's processes (ours()) in a process group a suite
-    started, or in this run's own group but for this process."""
-    pids = ours(ALL_GROUPS | {os.getpgrp()}, (str(ROOT), "st-hooktest-"))
-    out = subprocess.run(["ps", "-o", "pid=,command=", "-p", ",".join(map(str, pids))], capture_output=True).stdout.decode("utf-8", "replace") if pids else ""
-    return [l.strip()[:140] for l in out.splitlines() if l.strip()]
+    """What the run left running: this run's processes (ours(): the suites' groups and folders, and
+    this run's own group but for this process and its `ps`)."""
+    rows = observe(command=True)
+    if rows is None:
+        return ["(ps failed: cannot tell)"]
+    return ["%d %s" % (pid, r[4][:140]) for pid, r in sorted(ours(rows, groups={os.getpgrp()}).items())]
 
 
 def run_suite(suite, only):
@@ -6276,6 +6495,8 @@ def run_suite(suite, only):
         if only and t.__name__ not in only:
             continue
         if suite.kind == "ps1" and (t is t_missing_deps or t.__name__ in SH_ONLY):
+            continue
+        if suite.cases == "compat" and t.__name__ not in COMPAT:
             continue
         sem = HEAVY.get(t.__name__)
         if sem:
@@ -6331,9 +6552,16 @@ def run_in_own_group(run):
         old = signal.signal(signal.SIGTERM, signal.SIG_IGN)
         try:
             os.killpg(pid, signal.SIGTERM)
-            # (A hook's background wait ignores TERM: then KILL.)
-            time.sleep(1)
-            os.killpg(pid, signal.SIGKILL)
+            # (What does not take TERM within 2 seconds gets KILL.)
+
+            def gone():
+                try:
+                    os.killpg(pid, 0)
+                    return False
+                except OSError:
+                    return True
+            if not wait_for(gone, 2, 0.1):
+                os.killpg(pid, signal.SIGKILL)
         except OSError:
             pass
         finally:
@@ -6345,13 +6573,97 @@ def run_in_own_group(run):
     return code
 
 
+def openssl_kind(path):
+    """'openssl3', 'libressl' or None (not there / neither) from `openssl version`."""
+    try:
+        v = subprocess.run([path, "version"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return "libressl" if v.startswith("LibreSSL") else "openssl3" if re.match(r"OpenSSL 3\.", v) else None
+
+
+# The environments (AhMunGa/simple-term#449). Every plugin runs the hook by `sh` (the hook commands,
+# OpenCode's spawn("sh")), whatever the user's shell: what counts is each server OS's /bin/sh and openssl.
+#   ubuntu   Debian, Ubuntu: dash, OpenSSL 3                 /bin/dash + OpenSSL 3      every case
+#   macos    macOS: bash 3.2 in sh mode, LibreSSL            /bin/sh + /usr/bin/openssl every case
+#   windows  Windows PowerShell 5.1 and PowerShell 7          pwsh 7 (its own HOME)      every case, and
+#            the static check that the script runs on 5.1 (ps51_static_check)
+#   compat   bash in sh mode with OpenSSL 3 (macOS with Homebrew's openssl first in PATH; RHEL, Fedora
+#            and Arch run bash 5 so)                         /bin/sh + OpenSSL 3        COMPAT only
+# Not run: zsh (no OS has it as /bin/sh), ksh93 (no target's /bin/sh; OpenBSD's ksh is pdksh), bash out of
+# sh mode (macOS runs the hook by /bin/sh). busybox ash (Alpine) is dash's kin. Another shell (a bash 5):
+# `--shell PATH --suite compat`.
+ENVIRONMENTS = [("ubuntu", "/bin/dash", "openssl3", "full"), ("macos", "/bin/sh", "libressl", "full"),
+                ("compat", "/bin/sh", "openssl3", "compat")]
+LIBRESSL = "/usr/bin/openssl"  # macOS's
+OPENSSL3 = ("/opt/homebrew/bin/openssl", "/usr/local/bin/openssl", "/usr/bin/openssl")  # Homebrew's, or a Linux's own
+
+
+def select_environments(args):
+    """(suites, missing, pwsh) for the arguments. Only what the asked suites need is looked for, and an
+    environment that cannot run is one failure (`missing`), not a quiet gap. windows (pwsh) is part of
+    the full suite and runs the plugin's PowerShell hook: --suite compat, --no-pwsh, --shell and --hook
+    (both about the sh hook) leave it out, whatever --pwsh says or PATH holds."""
+    sets = args.suite or ["full", "compat"]
+    missing = []
+    found = {}
+
+    def openssl(kind):
+        if kind not in found:
+            cands = [LIBRESSL] if kind == "libressl" else [args.openssl] if args.openssl else list(OPENSSL3)
+            found[kind] = next((p for p in cands if openssl_kind(p) == kind), None)
+        return found[kind]
+
+    def wanted(kind):
+        if kind == "libressl":
+            return "LibreSSL at " + LIBRESSL
+        return "OpenSSL 3 at " + (args.openssl or " or ".join(OPENSSL3)) + " (--openssl PATH)"
+
+    suites = []
+    hook_ok = not args.hook or os.path.isfile(args.hook)
+    if not hook_ok:
+        missing.append("--hook %s: no such file" % args.hook)
+    if not args.no_sh and hook_ok:
+        if args.shell:
+            # Another shell: every case, or the compat set when only that was asked; OpenSSL 3 (LibreSSL when
+            # there is none and none was named).
+            cases = "compat" if set(sets) == {"compat"} else "full"
+            kind = "openssl3" if args.openssl or openssl("openssl3") else "libressl"
+            envs = [(cases, sh, kind, cases) for sh in args.shell]
+        else:
+            envs = [e for e in ENVIRONMENTS if e[3] in sets]
+        for name, sh, kind, cases in envs:
+            why = ([] if shell_works(sh) else ["%s does not run `sh -c`" % sh]) + ([] if openssl(kind) else ["no " + wanted(kind)])
+            if why:
+                missing.append("%s: cannot run (%s)" % (name, "; ".join(why)))
+            else:
+                suites.append(Suite("%s %s+%s" % (name, sh, kind), [sh, str(HOOK_SH)], openssl(kind), cases=cases))
+    pwsh = None
+    if "full" in sets and not (args.no_pwsh or args.shell or args.hook):
+        cand = args.pwsh or shutil.which("pwsh")
+        if not cand:
+            missing.append("windows: no pwsh in PATH (--pwsh PATH, or --no-pwsh to leave it out)")
+        elif pwsh_major(cand) < 7:
+            missing.append("windows: %s is not PowerShell 7 (--pwsh PATH, or --no-pwsh to leave it out)" % cand)
+        else:
+            pwsh = cand
+            suites.append(Suite("windows pwsh", [pwsh, "-NoProfile", "-NonInteractive", "-File", str(HOOK_PS1)], None, "ps1"))
+    if not suites and not missing:
+        missing.append("nothing to run (--no-sh leaves windows only, and --suite compat, --no-pwsh, --shell or --hook leave it out)")
+    return suites, missing, pwsh
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--shell", action="append", help="shell to run agent-hook.sh with (repeatable)")
-    ap.add_argument("--pwsh", help="pwsh executable to run agent-hook.ps1 with")
+    ap.add_argument("--suite", action="append", choices=("full", "compat"),
+                    help="full: ubuntu, macos and windows, every case; compat: the compat set (default: both)")
+    ap.add_argument("--shell", action="append", help="run the sh hook with this shell instead of the environments' (repeatable; no windows)")
+    ap.add_argument("--openssl", help="the OpenSSL 3 to use (default: Homebrew's, else /usr/bin/openssl if it is OpenSSL 3)")
+    ap.add_argument("--pwsh", help="the PowerShell 7 for the windows environment (default: pwsh in PATH)")
+    ap.add_argument("--no-pwsh", action="store_true", help="leave the windows environment out")
     ap.add_argument("--only", action="append", help="test function name (repeatable)")
-    ap.add_argument("--no-sh", action="store_true")
-    ap.add_argument("--hook", help="sh hook to test instead of the plugin's (e.g. an older release)")
+    ap.add_argument("--no-sh", action="store_true", help="leave the sh environments out")
+    ap.add_argument("--hook", help="sh hook to test instead of the plugin's (e.g. an older release; no windows)")
     ap.add_argument("--regen-v2", action="store_true", help="write tests/fixtures/v2/expected.json from the sh hook and exit")
     args = ap.parse_args()
     global HOOK_SH, SCRIPTS
@@ -6362,21 +6674,13 @@ def main():
         regen_v2((args.shell or ["/bin/dash"])[0])
         sys.exit(0)
 
-    suites = []
-    if not args.no_sh:
-        shells = args.shell or [p for p in ("/bin/dash", "/bin/bash", "/bin/zsh", "/bin/ksh", "/bin/sh") if os.path.exists(p)]
-        openssls = [("libressl", "/usr/bin/openssl")]
-        for cand in ("/opt/homebrew/bin/openssl", "/usr/local/bin/openssl"):
-            if os.path.exists(cand):
-                openssls.append(("openssl3", cand))
-                break
-        for sh in shells:
-            for oname, opath in openssls:
-                suites.append(Suite("%s+%s" % (sh, oname), [sh, str(HOOK_SH)], opath))
-    if args.pwsh:
-        suites.append(Suite("pwsh", [args.pwsh, "-NoProfile", "-NonInteractive", "-File", str(HOOK_PS1)], None, "ps1"))
+    suites, missing, pwsh = select_environments(args)
 
     failed = 0
+    print("== environments: %s" % (", ".join(s.name for s in suites) or "none"))
+    for m in missing:
+        print("   FAIL " + m)
+    failed += len(missing)
     copies = copies_check()
     print("== script copies: %s" % ("ok" if not copies else "%d differ" % len(copies)))
     for p in copies:
@@ -6392,13 +6696,16 @@ def main():
     for p in static:
         print("   FAIL " + p)
     failed += len(static)
-    if args.pwsh:
-        parse = ps_parse_check(args.pwsh)
-        print("== PowerShell parse (%s): %s" % (args.pwsh, "ok" if not parse else "errors"))
+    if pwsh:
+        parse = ps_parse_check(pwsh)
+        print("== PowerShell parse (%s): %s" % (pwsh, "ok" if not parse else "errors"))
         for p in parse:
             print("   FAIL " + p)
         failed += len(parse)
 
+    stop = threading.Event()
+    watcher = threading.Thread(target=watch, args=(stop,), daemon=True)
+    watcher.start()
     threads = [threading.Thread(target=run_suite, args=(s, args.only)) for s in suites]
     for th in threads:
         th.start()
@@ -6413,6 +6720,8 @@ def main():
         failed += len(bad)
         s.close()
     # Nothing the cases started may outlive the run (each case's groups are reaped after it).
+    stop.set()
+    watcher.join(10)
     left = leftovers()
     print("== leftover processes: %d" % len(left))
     for p in left[:20]:

@@ -952,14 +952,19 @@ tests/                                 hook tests, mock relay, OpenCode harness,
 
 `tests/` runs the hooks against a mock relay (`tests/mock_relay.py`), which also plays the device:
 it decrypts the envelope, checks the MAC and signs answers. Python 3 standard library only; the
-OpenCode plugin tests also need `node`.
+OpenCode plugin tests also need `node`. The default run needs what macOS with Homebrew has: `/bin/dash`,
+LibreSSL at `/usr/bin/openssl`, an OpenSSL 3 (Homebrew's, or `--openssl PATH`) and PowerShell 7 (`pwsh`
+in PATH, or `--pwsh PATH`); an environment that cannot run counts as a failure.
 
 ```sh
-python3 -I tests/run_tests.py                          # sh hook, every shell found × LibreSSL and OpenSSL 3
-python3 -I tests/run_tests.py --shell /bin/dash
-python3 -I tests/run_tests.py --no-sh --pwsh <path>    # PowerShell hook, plus a Windows PowerShell 5.1 static check
+python3 -I tests/run_tests.py                          # ubuntu (dash + OpenSSL 3), macos (/bin/sh + LibreSSL), windows (pwsh 7), compat
+python3 -I tests/run_tests.py --suite full --no-pwsh   # the sh environments only; --suite compat for the compat set
+python3 -I tests/run_tests.py --pwsh <path>            # the PowerShell 7 to use (default: pwsh in PATH; a missing one fails)
+python3 -I tests/run_tests.py --openssl <path>         # the OpenSSL 3 to use (default: Homebrew's, else /usr/bin/openssl)
+python3 -I tests/run_tests.py --shell <path> --suite compat   # another shell (e.g. bash 5) on the compat set
 python3 -I tests/run_tests.py --hook old/agent-hook.sh # another sh hook, e.g. to see new tests fail on a release
 ```
+`--suite compat`, `--no-pwsh`, `--shell` and `--hook` leave the windows environment out.
 
 `plugins/simpleterm/scripts/` is the source. The Antigravity and OpenCode plugins are installed on
 their own and carry copies of the scripts; after changing a script, copy it (the tests fail while

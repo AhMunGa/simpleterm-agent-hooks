@@ -3103,6 +3103,7 @@
    },
    "files": {
     ".simpleterm/run/tun.e7e7e7e7.last": "NOWEPOCH 200\n",
+    ".codex/auth.json": "{\"OPENAI_API_KEY\":\"sk-test\",\"tokens\":null}\n",
     "ro.jsonl": "{\"timestamp\":\"2026-11-03T01:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"019a\",\"cli_version\":\"0.165.0\"}}\n",
     "fake.reply": "{\"id\":1,\"result\":{\"userAgent\":\"codex/0.165.0\"}}\n",
     "fake.reply2": "{\"id\":2,\"result\":{\"rateLimits\":{\"limitId\":\"codex\",\"limitName\":null,\"primary\":{\"usedPercent\":4,\"windowDurationMins\":300,\"resetsAt\":1795746291},\"secondary\":{\"usedPercent\":3,\"windowDurationMins\":10080,\"resetsAt\":1796000000},\"planType\":\"plus\",\"rateLimitReachedType\":null},\"rateLimitsByLimitId\":{\"codex\":{\"limitId\":\"codex\",\"limitName\":null,\"primary\":{\"usedPercent\":4,\"windowDurationMins\":300,\"resetsAt\":1795746291},\"secondary\":{\"usedPercent\":3,\"windowDurationMins\":10080,\"resetsAt\":1796000000},\"planType\":\"plus\",\"rateLimitReachedType\":null},\"codex_bengalfox\":{\"limitId\":\"codex_bengalfox\",\"limitName\":null,\"primary\":{\"usedPercent\":17,\"windowDurationMins\":300,\"resetsAt\":1795746291},\"secondary\":{\"usedPercent\":3,\"windowDurationMins\":10080,\"resetsAt\":1796000000},\"planType\":\"plus\",\"rateLimitReachedType\":null}}}}\n"
