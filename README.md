@@ -58,23 +58,35 @@ after asking; it does not edit your agents' settings files. It runs the same com
 except where an agent's section says otherwise. Running an install command again changes nothing:
 Gemini CLI and Grok Build then report that the plugin is already installed (exit 1), and where a
 block clones `~/.simpleterm/src` and you already have it, run
-`git -C ~/.simpleterm/src pull --ff-only` instead of the clone.
+`git -C ~/.simpleterm/src fetch --depth 1 origin release` and
+`git -C ~/.simpleterm/src checkout -B release FETCH_HEAD` instead of the clone.
+
+Every command takes the branch `release`, not `main`. `release` moves only to a commit that raises
+the plugin version, so an install follows released versions and not whatever is on `main` (Claude
+Code does not receive a new commit that keeps the version). If you installed from `main` before,
+see [Move an install from `main` to `release`](#move-an-install-from-main-to-release).
 
 ### Claude Code
 
 ```sh
-claude plugin marketplace add AhMunGa/simpleterm-agent-hooks
+claude plugin marketplace remove simpleterm-agent-hooks
+claude plugin marketplace add "https://github.com/AhMunGa/simpleterm-agent-hooks.git#release"
 claude plugin install simpleterm@simpleterm-agent-hooks
 ```
 
-The hooks load in new sessions. In a running session, run `/reload-plugins`.
+The first line only clears an old entry of this marketplace (a marketplace of the same name cannot
+be added from another source); with none it fails, and you go on. The hooks load in new sessions.
+In a running session, run `/reload-plugins`.
 
 ### Codex
 
 ```sh
-codex plugin marketplace add AhMunGa/simpleterm-agent-hooks
+codex plugin marketplace remove simpleterm-agent-hooks
+codex plugin marketplace add https://github.com/AhMunGa/simpleterm-agent-hooks --ref release
 codex plugin add simpleterm@simpleterm-agent-hooks
 ```
+
+The first line is the same clean-up as for Claude Code; with no old entry it fails, and you go on.
 
 **Trust the hooks once.** Codex does not run plugin hooks until you review them. Start `codex`;
 at **Hooks need review** choose **Trust all and continue** (or open `/hooks`). `codex exec` skips
@@ -85,7 +97,7 @@ after every update, because trust is tied to the plugin's contents.
 
 ```sh
 mkdir -p -m 700 ~/.simpleterm
-cd ~/.simpleterm && gemini extensions install https://github.com/AhMunGa/simpleterm-agent-hooks --consent --skip-settings
+cd ~/.simpleterm && gemini extensions install https://github.com/AhMunGa/simpleterm-agent-hooks --ref release --consent --skip-settings
 ```
 
 With `--consent`, Gemini CLI also trusts the folder the command runs in if it is not trusted yet
@@ -99,9 +111,12 @@ SimpleTerm app makes the folder itself and runs the second line.
 ### GitHub Copilot CLI
 
 ```sh
-copilot plugin marketplace add AhMunGa/simpleterm-agent-hooks
+copilot plugin marketplace remove simpleterm-agent-hooks
+copilot plugin marketplace add "https://github.com/AhMunGa/simpleterm-agent-hooks.git#release"
 copilot plugin install simpleterm-copilot@simpleterm-agent-hooks
 ```
+
+The first line is the same clean-up as for Claude Code; with no old entry it fails, and you go on.
 
 Copilot reads its own catalog in this repository (`.github/plugin/marketplace.json`), which lists
 only `simpleterm-copilot`; Claude Code and Codex read `.claude-plugin/marketplace.json` and do not
@@ -123,14 +138,14 @@ terminal. Errors that Copilot retries are no alerts; a session that ends on an e
 ### Antigravity CLI (`agy`)
 
 ```sh
-agy plugin install https://github.com/AhMunGa/simpleterm-agent-hooks/tree/main/plugins/antigravity
+agy plugin install https://github.com/AhMunGa/simpleterm-agent-hooks/tree/release/plugins/antigravity
 ```
 
 If your `agy` does not take a GitHub folder, install from a copy:
 
 ```sh
 mkdir -p -m 700 ~/.simpleterm
-git clone --depth 1 https://github.com/AhMunGa/simpleterm-agent-hooks ~/.simpleterm/src
+git clone --depth 1 --branch release https://github.com/AhMunGa/simpleterm-agent-hooks ~/.simpleterm/src
 agy plugin install ~/.simpleterm/src/plugins/antigravity
 ```
 
@@ -177,7 +192,7 @@ If the Claude Code plugin above is installed, **Grok already uses it**: install 
 hook sees Grok's `GROK_HOOK_EVENT` and reports `grok-build` events. Otherwise:
 
 ```sh
-grok plugin install "AhMunGa/simpleterm-agent-hooks#plugins/simpleterm" --trust
+grok plugin install "AhMunGa/simpleterm-agent-hooks@release#plugins/simpleterm" --trust
 ```
 
 Keep the quotes: zsh with `extendedglob` and csh read a bare `#`. Grok loads a plugin name once,
@@ -187,7 +202,7 @@ anyway). Grok has no hook that can approve a permission, so its permission waits
 ### OpenCode 2.x
 
 ```sh
-opencode plugin add "github:AhMunGa/simpleterm-agent-hooks#main::path:plugins/opencode"
+opencode plugin add "github:AhMunGa/simpleterm-agent-hooks#release::path:plugins/opencode"
 ```
 
 `opencode plugin add` records the plugin in `~/.config/opencode/opencode.json`. To leave that
@@ -203,8 +218,8 @@ OpenCode 1.x loads every `.js` file in `~/.config/opencode/plugins/`:
 ```sh
 rm -f ~/.config/opencode/plugins/simpleterm.js ~/.config/opencode/plugins/simpleterm-agent-hook.sh
 mkdir -p ~/.config/opencode/plugins
-curl -fsSL -o ~/.config/opencode/plugins/simpleterm.js https://raw.githubusercontent.com/AhMunGa/simpleterm-agent-hooks/main/plugins/opencode-v1/simpleterm.js
-curl -fsSL -o ~/.config/opencode/plugins/simpleterm-agent-hook.sh https://raw.githubusercontent.com/AhMunGa/simpleterm-agent-hooks/main/plugins/opencode-v1/simpleterm-agent-hook.sh
+curl -fsSL -o ~/.config/opencode/plugins/simpleterm.js https://raw.githubusercontent.com/AhMunGa/simpleterm-agent-hooks/release/plugins/opencode-v1/simpleterm.js
+curl -fsSL -o ~/.config/opencode/plugins/simpleterm-agent-hook.sh https://raw.githubusercontent.com/AhMunGa/simpleterm-agent-hooks/release/plugins/opencode-v1/simpleterm-agent-hook.sh
 ```
 
 The first line removes links that an earlier SimpleTerm app made into `~/.simpleterm/src`
@@ -767,14 +782,41 @@ it to go back to the default).
 
 | Agent | Command |
 |---|---|
-| Claude Code | `claude plugin update simpleterm@simpleterm-agent-hooks` |
+| Claude Code | `claude plugin marketplace update simpleterm-agent-hooks`, then `claude plugin update simpleterm@simpleterm-agent-hooks` (`plugin update` alone says "already at the latest version" while `release` has moved) |
 | Codex | `codex plugin marketplace upgrade simpleterm-agent-hooks`, then trust the changed hooks again in `codex` |
-| Gemini CLI | `gemini extensions update simpleterm` |
-| GitHub Copilot CLI | `copilot plugin update simpleterm-copilot` |
-| Antigravity | run the install commands again (from a copy: `git -C ~/.simpleterm/src pull --ff-only` instead of the clone) |
+| Gemini CLI | `cd ~/.simpleterm && gemini extensions update simpleterm` |
+| GitHub Copilot CLI | `copilot plugin update simpleterm-copilot@simpleterm-agent-hooks` (a direct install has no update: move it, see below) |
+| Antigravity | `git -C ~/.simpleterm/src fetch --depth 1 origin release`, then `git -C ~/.simpleterm/src checkout -B release FETCH_HEAD`, then `agy plugin install ~/.simpleterm/src/plugins/antigravity` (with no copy, the install commands again) |
 | Grok Build | `grok plugin update simpleterm` (nothing to do when it uses the Claude Code plugin) |
-| OpenCode 2.x | `opencode plugin update "github:AhMunGa/simpleterm-agent-hooks#main::path:plugins/opencode"` |
+| OpenCode 2.x | `opencode plugin update "github:AhMunGa/simpleterm-agent-hooks#release::path:plugins/opencode"` (right after OpenCode started, `opencode plugin list` may not show the plugin yet: run it until it does) |
 | OpenCode 1.x | run the install commands again |
+
+## Move an install from `main` to `release`
+
+An install made before the branch `release` existed follows `main`. Move it with the commands of
+your agent (the SimpleTerm app runs the same ones when it finds such an install). Each removes the
+plugin and installs it again from `release`; the plugin keeps its state in `~/.simpleterm`, so
+nothing it needs is lost. Run only the agents you use.
+
+| Agent | Commands, in order |
+|---|---|
+| Claude Code | `claude plugin uninstall simpleterm@simpleterm-agent-hooks`, `claude plugin marketplace remove simpleterm-agent-hooks`, `claude plugin marketplace add "https://github.com/AhMunGa/simpleterm-agent-hooks.git#release"`, `claude plugin install simpleterm@simpleterm-agent-hooks` |
+| Codex | `codex plugin marketplace remove simpleterm-agent-hooks`, `codex plugin marketplace add https://github.com/AhMunGa/simpleterm-agent-hooks --ref release`, `codex plugin marketplace upgrade simpleterm-agent-hooks`, then trust the changed hooks again in `codex` |
+| GitHub Copilot CLI | `copilot plugin uninstall simpleterm-copilot@simpleterm-agent-hooks` (a direct install: `copilot plugin uninstall simpleterm-copilot`), `copilot plugin marketplace remove simpleterm-agent-hooks` (after a direct install it may fail, as no marketplace exists yet: go on), `copilot plugin marketplace add "https://github.com/AhMunGa/simpleterm-agent-hooks.git#release"`, `copilot plugin install simpleterm-copilot@simpleterm-agent-hooks` |
+| Gemini CLI | `gemini extensions uninstall simpleterm`, then `cd ~/.simpleterm && gemini extensions install https://github.com/AhMunGa/simpleterm-agent-hooks --ref release --consent --skip-settings` |
+| Antigravity | `git -C ~/.simpleterm/src fetch --depth 1 origin release`, `git -C ~/.simpleterm/src checkout -B release FETCH_HEAD`, `agy plugin install ~/.simpleterm/src/plugins/antigravity` |
+| Grok Build | `grok plugin uninstall simpleterm --confirm`, then `grok plugin install "AhMunGa/simpleterm-agent-hooks@release#plugins/simpleterm" --trust` (nothing to do when it uses the Claude Code plugin: move that) |
+| OpenCode 2.x | `opencode plugin remove "github:AhMunGa/simpleterm-agent-hooks#main::path:plugins/opencode"`, then `opencode plugin add "github:AhMunGa/simpleterm-agent-hooks#release::path:plugins/opencode"` |
+| OpenCode 1.x | the install commands (they download from `release`; the app copies the same two files from its `~/.simpleterm/src`, which it moves to `release` first) |
+
+- **A plugin you turned off turns on again** for Gemini CLI, Grok Build and a Copilot CLI direct
+  install (they install it anew); turn it off again afterwards, or do not move it. Codex,
+  Antigravity and OpenCode 1.x keep it off. Claude Code counts a turned-off plugin as not installed,
+  and OpenCode 2.x has no off switch.
+- A version above the one the app recommends is not moved by the app; moving it yourself could
+  lower it.
+- OpenCode 2.x: the cache folder of the old `main` spec stays on the server.
+- A move that stops after its removal leaves the plugin removed: run the install commands.
 
 ## Uninstall
 
@@ -788,11 +830,13 @@ agy plugin uninstall simpleterm-antigravity
 copilot plugin uninstall simpleterm-copilot
 copilot plugin marketplace remove simpleterm-agent-hooks
 grok plugin uninstall simpleterm --confirm
+opencode plugin remove "github:AhMunGa/simpleterm-agent-hooks#release::path:plugins/opencode"
 opencode plugin remove "github:AhMunGa/simpleterm-agent-hooks#main::path:plugins/opencode"
 rm -f ~/.config/opencode/plugins/simpleterm.js ~/.config/opencode/plugins/simpleterm-agent-hook.sh
 ```
 
-Run the lines for the agents you installed. To remove the link files, the `simpleterm` command
+Run the lines for the agents you installed. The two `opencode plugin remove` lines name the two
+specs: the second is for an install made from `main`; with none it exits 0. To remove the link files, the `simpleterm` command
 and state too: `rm -rf ~/.simpleterm`, and revoke the link in the app.
 
 **Hooks installed by an earlier SimpleTerm app.** Earlier test builds of the app added the same
@@ -942,7 +986,9 @@ When releasing, bump `version` in every manifest (`plugins/simpleterm/.claude-pl
 `.codex-plugin/plugin.json`, `gemini-extension.json`, `plugins/antigravity/plugin.json`,
 `plugins/opencode/package.json`, `plugins/copilot/plugin.json`) and the release in the scripts (`HOOK_VERSION` in
 `scripts/agent-hook.sh`, `$HookVersion` in `scripts/agent-hook.ps1`); installed copies update only
-when it changes, and the tests fail while they differ.
+when it changes, and the tests fail while they differ. Work lands on `main`; the branch `release`
+moves forward only to a commit that raises the version (never a forced move, never a commit that keeps
+the version: Claude Code does not receive it), and the install and update commands above name it.
 
 ## License
 
