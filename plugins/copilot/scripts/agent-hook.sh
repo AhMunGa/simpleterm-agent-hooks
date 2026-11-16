@@ -4088,15 +4088,16 @@ usage_ask() {
 }
 
 # True if a line of the first MiB of the ask's output ($AQ.out) matches
-# extended regular expression $1.
-ask_seen() { # ere
-  head -c 1048576 "$AQ.out" 2>/dev/null | awk -v r="$1" '$0 ~ r { f = 1; exit } END { exit !f }' 2>/dev/null
+# extended regular expression $1 and not $2 (when given).
+ask_seen() { # ere [ere-not]
+  head -c 1048576 "$AQ.out" 2>/dev/null | awk -v r="$1" -v x="${2:-}" '$0 ~ r && (x == "" || $0 !~ x) { f = 1; exit } END { exit !f }' 2>/dev/null
 }
 
 # Runs command "$@" in ~/.simpleterm/probe with SIMPLETERM_PROBE=1, its
 # standard input the lines of file $AQ.in followed by the lines that
 # ask_more prints once file $AQ.out holds $AQ_WAIT1, then open until a line
-# of $AQ.out matches extended regular expression $AQ_WAIT2 (or 60 seconds:
+# of $AQ.out matches extended regular expression $AQ_WAIT2 and not $AQ_NOT2
+# (when set; or 60 seconds:
 # longer than the agents' own sign-in refresh, SimpleTerm if/usage-ask#run,
 # if/usage-ask-refresh#no-cut); its output in
 # $AQ.out. Sets AQ_RES: ok (got $AQ_WAIT2), gone (ended without it) or
@@ -4124,12 +4125,12 @@ ask_pipe() { # command...
     apid=$!
     aw=0 res=timeout
     while [ "$aw" -lt 60 ]; do
-      ask_seen "$AQ_WAIT2" && { res=ok; break; }
+      ask_seen "$AQ_WAIT2" "$AQ_NOT2" && { res=ok; break; }
       kill -0 "$apid" 2>/dev/null || { res=gone; break; }
       sleep 1
       aw=$((aw + 1))
     done
-    ask_seen "$AQ_WAIT2" && res=ok
+    ask_seen "$AQ_WAIT2" "$AQ_NOT2" && res=ok
     printf '%s\n' "$res" >"$AQ.res"
     : >"$AQ.done"
     aw=0
@@ -4142,10 +4143,10 @@ ask_pipe() { # command...
   AQ_RES=$(cat "$AQ.res" 2>/dev/null)
 }
 
-# The first line of $AQ.out matching extended regular expression $1, cut to
-# 256 KiB, as facts.
-ask_facts() { # ere
-  awk -v r="$1" '$0 ~ r { print; exit }' "$AQ.out" 2>/dev/null | head -c 262144 | awk "$NORM_FN$JSON_FACTS" 2>/dev/null
+# The first line of $AQ.out matching extended regular expression $1 and not
+# $2 (when given), cut to 256 KiB, as facts.
+ask_facts() { # ere [ere-not]
+  awk -v r="$1" -v x="${2:-}" '$0 ~ r && (x == "" || $0 !~ x) { print; exit }' "$AQ.out" 2>/dev/null | head -c 262144 | awk "$NORM_FN$JSON_FACTS" 2>/dev/null
 }
 
 # Claude Code get_usage control response (facts) -> "OK <usage line>" or
@@ -4249,7 +4250,7 @@ ask_run() { # agent-executable ask-file
   case $AGENT in
     claude)
       printf '%s\n' '{"type":"control_request","request_id":"1","request":{"subtype":"get_usage","skip_behaviors":true}}' >"$AQ.in"
-      AQ_WAIT1='' AQ_WAIT2='"type":"control_response"'
+      AQ_WAIT1='' AQ_WAIT2='"type":"control_response"' AQ_NOT2=''
       ask_pipe "$1" -p --input-format stream-json --output-format stream-json --verbose --safe-mode \
         --strict-mcp-config --no-session-persistence --include-hook-events
       at=$(ask_now)
@@ -4264,12 +4265,14 @@ ask_run() { # agent-executable ask-file
     codex)
       printf '%s\n' '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"simpleterm","version":"'"$HOOK_VERSION"'"}}}' >"$AQ.in"
       printf '%s\n' '{"method":"initialized"}' '{"id":2,"method":"account/rateLimits/read"}' >"$AQ.more"
-      # The answer: "id":2 then , or } (an error answer ends with "id":2}; SimpleTerm if/usage-ask#run,
-      # hist/usage-ask#d23).
-      AQ_WAIT1='"id":1,' AQ_WAIT2='"id":2[,}]'
+      # The answer: "id":2 then , or } (an error answer ends with "id":2}), on a
+      # line without "method": a JSON-RPC response, never a notification that
+      # nests an object with that id (SimpleTerm if/usage-ask#run,
+      # if/usage-report-agents, hist/usage-ask#d23).
+      AQ_WAIT1='"id":1,' AQ_WAIT2='"id":2[,}]' AQ_NOT2='"method":'
       ask_pipe "$1" app-server
       at=$(ask_now)
-      [ "$AQ_RES" = ok ] && A=$(ask_facts "$AQ_WAIT2" | awk -v at="$at" "$CODEX_USAGE" 2>/dev/null)
+      [ "$AQ_RES" = ok ] && A=$(ask_facts "$AQ_WAIT2" "$AQ_NOT2" | awk -v at="$at" "$CODEX_USAGE" 2>/dev/null)
       ;;
   esac
   rm -f "$AQ".* 2>/dev/null

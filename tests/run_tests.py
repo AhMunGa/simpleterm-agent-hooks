@@ -4100,6 +4100,8 @@ def t_v2_usage_ask_refresh(s):
             return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t)) + ".123456789Z"
 
         now = int(time.time())
+        # A file mode 0 is read all the same by root: those cases are left out then (no geteuid on Windows).
+        root = hasattr(os, "geteuid") and os.geteuid() == 0
         claude_cred = lambda ms: json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat01-x", "refreshToken": "sk-ant-ort01-x", "expiresAt": ms,
                                                                "scopes": ["user:inference"], "subscriptionType": "max"}})
         # --- Claude Code: claudeAiOauth.expiresAt.
@@ -4118,6 +4120,8 @@ def t_v2_usage_ask_refresh(s):
                            ("cut short", claude_cred((now + 300) * 1000)[:40]), ("no expiresAt", "{}"),
                            ("expiresAt a string", json.dumps({"claudeAiOauth": {"expiresAt": str((now + 300) * 1000)}})),
                            ("expiresAt null", json.dumps({"claudeAiOauth": {"expiresAt": None}})), ("unreadable", claude_cred((now + 300) * 1000))):
+            if name == "unreadable" and root:
+                continue
             setup("claude")
             if text is not None:
                 write(ccred, text)
@@ -4142,6 +4146,8 @@ def t_v2_usage_ask_refresh(s):
                  ("larger than 64 KiB", json.dumps(dict(json.loads(fresh), pad="x" * 70000)), "state unknown"),
                  ("unreadable", fresh, "state unknown")]
         for name, text, why in skips:
+            if name == "unreadable" and root:
+                continue
             setup("codex")
             if text is not None:
                 write(xcred, text)
@@ -4180,6 +4186,17 @@ def t_v2_usage_ask_refresh(s):
             took = time.time() - t0
             s.check("ask codex: an error answer ending with \"id\":2} (%s) -> uq %s at once" % (msg[:24], err),
                     u and u[0].get("uq", {}).get("err") == err and took < 15, "%.1f s, %s" % (took, str(u)[:300]))
+        # --- The answer is a JSON-RPC response, a line without "method": notifications before it that nest an
+        # object with id 2 (ending with , or }) are not the answer (SimpleTerm if/usage-ask#run).
+        setup("codex")
+        write(xcred, fresh)
+        (s.tmp / "reply2").write_text(line({"method": "thread/started", "params": {"thread": {"id": 2, "name": "x"}}})
+                                      + line({"method": "item/completed", "params": {"item": {"id": 2}}}) + line(cok))
+        turn("codex")
+        u = wait_for(lambda: events("codex"), 30)
+        s.check("ask codex: notifications nesting {\"id\":2, ...} and {\"id\":2} before the answer -> the answer read (uq ok, its windows)",
+                u and u[0].get("uq", {}).get("ok") is True and [x["id"] for x in u[0].get("lims", [])] == ["codex.primary", "codex.secondary"],
+                str(u)[:300])
     finally:
         for c in (ccred, xcred):
             if c.exists():

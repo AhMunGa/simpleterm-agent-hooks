@@ -3803,9 +3803,12 @@ function Invoke-AskChild($job) {
             if ($head.Contains('{"type":"system","subtype":"' + $k + '"')) { $hk = $true }
         }
     } elseif ($Script:Agent -ceq 'codex') {
-        # The answer: "id":2 then , or } (an error answer ends with "id":2}; SimpleTerm if/usage-ask#run,
-        # hist/usage-ask#d23).
-        $w2 = '"id":2[,}]'
+        # The answer: "id":2 then , or } (an error answer ends with "id":2}), on a
+        # line without "method": a JSON-RPC response, never a notification that
+        # nests an object with that id (SimpleTerm if/usage-ask#run,
+        # if/usage-report-agents, hist/usage-ask#d23). Matched line by line
+        # ((?m), . stops at a line break), in the output and in Get-AskFacts.
+        $w2 = '(?m)^(?!.*"method":).*"id":2[,}]'
         $q = Invoke-AskPipe $ap 'app-server' @('{"id":1,"method":"initialize","params":{"clientInfo":{"name":"simpleterm","version":"' + $HookVersion + '"}}}') `
             @('{"method":"initialized"}', '{"id":2,"method":"account/rateLimits/read"}') '"id":1,' $w2
     } else { return }

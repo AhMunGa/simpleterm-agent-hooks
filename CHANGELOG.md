@@ -21,7 +21,8 @@ The usage ask no longer signs Claude Code or Codex out by cutting a sign-in refr
     whatever the wait (measured).
 - **Codex error answers**: an error answer ends with `"id":2}`, which the ask did not take for an answer, so a failed
   sign-in or an API key was read as `timeout` after 20 seconds, and three of them stopped asks of that Codex version.
-  It is now read as `auth` or `not-subscriber`.
+  It is now read as `auth` or `not-subscriber`. The answer is the first line with `"id":2` then `,` or `}` and no
+  `"method":` (a JSON-RPC response), so a notification before it that nests an object with id 2 is not taken for it.
 
 The PowerShell hook's held sender runs, and a Claude Code URL form is told again (SimpleTerm
 `if/ssh-tunnel-wait#open-window`, issue AhMunGa/simple-term#446).
