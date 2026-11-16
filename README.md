@@ -955,9 +955,10 @@ it decrypts the envelope, checks the MAC and signs answers. Python 3 standard li
 OpenCode plugin tests also need `node`.
 
 ```sh
-python3 -I tests/run_tests.py                          # sh hook, every shell found × LibreSSL and OpenSSL 3
-python3 -I tests/run_tests.py --shell /bin/dash
-python3 -I tests/run_tests.py --no-sh --pwsh <path>    # PowerShell hook, plus a Windows PowerShell 5.1 static check
+python3 -I tests/run_tests.py                          # ubuntu (dash + OpenSSL 3), macos (/bin/sh + LibreSSL), windows (pwsh 7), compat
+python3 -I tests/run_tests.py --suite full --no-pwsh   # the sh environments only; --suite compat for the compat set
+python3 -I tests/run_tests.py --pwsh <path>            # the PowerShell 7 to use (default: pwsh in PATH; a missing one fails)
+python3 -I tests/run_tests.py --shell <path> --suite compat   # another shell (e.g. bash 5) on the compat set
 python3 -I tests/run_tests.py --hook old/agent-hook.sh # another sh hook, e.g. to see new tests fail on a release
 ```
 
