@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+The last run of an Antigravity CLI or OpenCode schedule is quiet, and a task report after a Claude Code Esc is told
+(SimpleTerm `spec/turn-state#scheduled`, `if/hook-events-scheduled`, `hist/turn-state#d18`, `#d19`, `#d20`, issues
+AhMunGa/simple-term#469, AhMunGa/simple-term#685).
+
+- **Antigravity CLI** (`/schedule`, measured on 1.5.5): no hook says who opened a turn, so at `Stop` the sh hook
+  reads `transcript_full.jsonl` (its last 4 MiB): the step that opened the turn (a person's input, or the message of
+  a cron, timer or background command) and the schedules and commands still left. A turn a schedule woke rests
+  (`state: scheduled`) while a schedule is left, and its last one is a `done` with `by: schedule` to the tunnels
+  only; before, that last run was a plain `done`. The report of a command a scheduled turn started is the
+  schedule's too. A person's turn that only leaves a schedule now ends in `done` (before, it waited as for a shell).
+- **OpenCode 2.x** (2.2.3+ with the `schedules` flag, measured on 2.2.7): the plugin follows the session's inbox
+  (`session.inbox.enqueued`, `session.inbox.delivered`): an execution that only a schedule's prompt started, or the
+  report of a shell such an execution started, is a scheduled turn, and its `Stop` carries `turn_by` and the active
+  schedules from OpenCode's `schedule_list` tool (`session_crons`). Before, every scheduled run ended in `done`.
+- **Claude Code Esc** (2.1.319, 2.1.325 run no hook when Esc stops a turn): the turn mark keeps the `prompt_id` of
+  the prompt that opened the turn, and a task report with another id starts a turn of its own. Before, a report
+  after an Esc took over the stopped turn, and when that was a `/loop` turn with a schedule left, the report's
+  `done` was lost. A Grok Build `StopCancelled` whose `promptId` is not the open turn's leaves that turn alone
+  (Grok can send it after the next turn started). The sh and the PowerShell hook.
+
 The PowerShell hook's held sender runs, and a Claude Code URL form is told again (SimpleTerm
 `if/ssh-tunnel-wait#open-window`, issue AhMunGa/simple-term#446).
 

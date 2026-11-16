@@ -25,6 +25,8 @@ const TYPES = [
   "session.execution.succeeded",
   "session.execution.failed",
   "session.execution.interrupted",
+  "session.inbox.enqueued",
+  "session.inbox.delivered",
   "form.created",
   "shell.created",
   "shell.exited",
@@ -45,6 +47,78 @@ const sessions = (globalThis.__simpletermSessions ??= { running: new Set(), pare
 // decides as it does for Claude Code's background_tasks (a service is not
 // waited for, other shells are, for a while).
 const shells = (globalThis.__simpletermShells ??= new Map());
+
+// Who started a turn (SimpleTerm if/hook-events-scheduled#by-schedule,
+// hist/turn-state#d20; measured on 2.2.7). What starts or joins a turn comes
+// through the session's inbox: `session.inbox.enqueued` names an item, and
+// `session.inbox.delivered` hands it to the execution that runs then. A
+// schedule's prompt is a user item with payload.metadata.schedule (inbox id
+// msg_sch_<schedule>_<run>), a person's prompt a user item without it, the
+// report of a background shell a synthetic item naming the shell
+// (payload.metadata.shellID). inbox: inbox id -> {kind, shell}.
+const inbox = (globalThis.__simpletermInbox ??= new Map());
+// The execution of each session that runs or ran last (session id ->
+// {sched, human, shells}): what was delivered to it.
+const execs = (globalThis.__simpletermExecs ??= new Map());
+// The execution that started each background shell (shell id -> execution):
+// the turn its report wakes belongs to whoever started that one.
+const shellExec = (globalThis.__simpletermShellExec ??= new Map());
+const SCHED_ID = /^msg_sch_[A-Za-z0-9]+_\d+$/;
+
+function newExec(sessionID) {
+  const e = { sched: 0, human: 0, shells: [] };
+  execs.delete(sessionID);
+  execs.set(sessionID, e);
+  if (execs.size > 500) execs.delete(execs.keys().next().value);
+  return e;
+}
+
+// "schedule" when only schedules' prompts started the execution, or the
+// report of a shell that such an execution started; "user" when a person's
+// prompt is in it (a schedule's prompt that came during a person's turn
+// joins that turn); "" when it is not known.
+function turnBy(e, depth = 0) {
+  if (!e || depth > 8) return "";
+  if (e.human) return "user";
+  if (e.sched) return "schedule";
+  for (const id of e.shells) if (turnBy(shellExec.get(id), depth + 1) === "schedule") return "schedule";
+  return "";
+}
+
+// The session's schedules that will still run (status `active`; a paused one
+// does not wake the session), from OpenCode's own schedule_list tool, as the
+// hook's session_crons. The scheduler updates a schedule when it sends the
+// prompt, so at the end of that turn the list is final [measured 2.2.7]. No
+// tool (the `schedules` flag is off), or an error: none left.
+async function activeSchedules(ctx, sessionID) {
+  try {
+    const tools = await ctx.tool.list();
+    const tool = Array.isArray(tools) && tools.find((t) => t && t.name === "schedule_list");
+    if (!tool) return [];
+    const ac = new AbortController();
+    let timer;
+    const r = await Promise.race([
+      tool.execute({}, { sessionID, signal: ac.signal, progress: () => {} }),
+      new Promise((resolve) => {
+        timer = setTimeout(() => {
+          ac.abort();
+          resolve(null);
+        }, 3000);
+      }),
+    ]).finally(() => clearTimeout(timer));
+    const list = r && r.output && Array.isArray(r.output.schedules) ? r.output.schedules : [];
+    return list
+      .filter((s) => s && s.status === "active")
+      .slice(0, 5)
+      .map((s) => {
+        const w = s.when && typeof s.when === "object" ? s.when : {};
+        const at = w.type && w[w.type] !== undefined ? `${w.type} ${w[w.type]}` : String(s.name || "schedule");
+        return { id: String(s.id || ""), schedule: at.slice(0, 80), prompt: String((s.action && s.action.prompt) || "").slice(0, 200) };
+      });
+  } catch {
+    return [];
+  }
+}
 
 // Permission requests that were answered (bounded), for one still waiting on its session lane.
 const replied = (globalThis.__simpletermReplied ??= new Set());
@@ -138,6 +212,10 @@ function track(event) {
       shells.set(info.id, { owner, command: String(info.command || "") });
       if (shells.size > 500) shells.delete(shells.keys().next().value);
     }
+    if (info.id && owner && execs.has(owner)) {
+      shellExec.set(info.id, execs.get(owner));
+      if (shellExec.size > 500) shellExec.delete(shellExec.keys().next().value);
+    }
     return;
   }
   if (event.type === "shell.exited") {
@@ -147,12 +225,40 @@ function track(event) {
   const id = d.sessionID;
   if (!id) return;
   switch (event.type) {
+    case "session.inbox.enqueued": {
+      const item = d.item || {};
+      const p = item.payload || {};
+      const meta = p.metadata && typeof p.metadata === "object" ? p.metadata : {};
+      let kind = "";
+      let shell = "";
+      if (item.type === "user") kind = meta.schedule ? "schedule" : "human";
+      else if (item.type === "synthetic" && meta.source === "shell") {
+        kind = "shell";
+        shell = String(meta.shellID || (/^<shell id="([^"]+)"/.exec(String(p.text || "")) || [])[1] || "");
+      }
+      if (d.inboxID && kind) {
+        inbox.set(d.inboxID, { kind, shell });
+        if (inbox.size > 500) inbox.delete(inbox.keys().next().value);
+      }
+      return;
+    }
+    case "session.inbox.delivered": {
+      const e = execs.get(id) || newExec(id);
+      const it = inbox.get(d.inboxID) || (SCHED_ID.test(String(d.inboxID || "")) ? { kind: "schedule", shell: "" } : null);
+      inbox.delete(d.inboxID);
+      if (!it) return;
+      if (it.kind === "schedule") e.sched++;
+      else if (it.kind === "human") e.human++;
+      else if (it.shell && e.shells.length < 20) e.shells.push(it.shell);
+      return;
+    }
     case "session.created":
       sessions.parent.set(id, d.parentID || "");
       if (sessions.parent.size > 2000) sessions.parent.delete(sessions.parent.keys().next().value);
       return;
     case "session.execution.started":
       remember(sessions.running, id, 500);
+      newExec(id);
       return;
     case "session.execution.succeeded":
     case "session.execution.failed":
@@ -293,6 +399,7 @@ export default {
       const running = done ? [...sessions.running] : [];
       const open = done ? [...shells].map(([id, v]) => ({ id, owner: v.owner, command: v.command })) : [];
       const d = event.data || {};
+      const by = done ? turnBy(execs.get(d.sessionID)) : "";
       if (event.type === "permission.replied") {
         // Answered (in the terminal, or by us): stop waiting for a device.
         // Every instance looks; the waiting one may not see this event first.
@@ -361,7 +468,7 @@ export default {
           });
         case "session.execution.succeeded":
         case "session.execution.failed":
-          return inLane(d.sessionID, (job) => turnEnd(event, d, cwd, running, open, job));
+          return inLane(d.sessionID, (job) => turnEnd(event, d, cwd, running, open, by, job));
         case "form.created": {
           // data: { form: { id, sessionID, title, metadata: {kind}, fields, ... } }:
           // a question (kind question) is answered in the terminal until the
@@ -385,13 +492,17 @@ export default {
       }
     }
 
-    async function turnEnd(event, d, cwd, running, open, job) {
+    async function turnEnd(event, d, cwd, running, open, by, job) {
       const info = await sessionInfo(ctx, d.sessionID);
       sessions.parent.set(d.sessionID, info.parentID || "");
       if (info.parentID) return; // a subagent's session
       const failed = event.type === "session.execution.failed";
       if (!failed && (await hasRunningChild(ctx, d.sessionID, running))) return;
       const background = failed ? [] : await openShellsOf(ctx, d.sessionID, open);
+      // A scheduled turn (turn_by) rests while a schedule is left
+      // (session_crons) and its last one is a quiet done (SimpleTerm
+      // spec/turn-state#scheduled).
+      const crons = !failed && by === "schedule" ? await activeSchedules(ctx, d.sessionID) : [];
       const err = d.error || {};
       if (job.abandoned) return;
       await runHook(
@@ -411,6 +522,8 @@ export default {
               oc: "2",
               last_assistant_message: String(info.title || ""),
               ...(background.length ? { background_tasks: background } : {}),
+              ...(by ? { turn_by: by } : {}),
+              ...(crons.length ? { session_crons: crons } : {}),
               ...usage(info),
             },
         cwd,
