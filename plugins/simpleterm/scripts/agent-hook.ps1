@@ -2479,17 +2479,26 @@ function Write-SessTurn([string]$state, [string]$prompt) {
 # --- terminal sequence (Claude Code only, SimpleTerm sessions only) -------
 
 # $Script:UsageSeq is the JSON-escaped usage OSC to append, if any;
-# $Script:BgSeq the hook's OSC 7501 record for background work.
+# $Script:BgVal the background pause's screen value to write after the state
+# (bg_working, bg_question or bg_clear), with the state's message but for
+# bg_clear (SimpleTerm if/terminal-signals-bg#plugin).
 # $first is a value written just before the state, in the same output: an app
 # that does not know the state drops it and is left with that one
 # (SimpleTerm if/terminal-signals#structured).
+# Claude Code passes terminalSequence on only when every sequence in it is
+# OSC 0, 1, 2, 9, 99, 777 or BEL and the whole is 4096 bytes at most, and an
+# OSC 9 starts with a digit only as 9;4; anything else drops the whole field
+# (SimpleTerm hist/hook-events#e28). OSC 9 alone is written here.
 function Write-State([string]$state, [string]$message, [string]$first = '') {
     if ($Script:Agent -cne 'claude' -or $env:SIMPLETERM -ne '1') { return }
     $m = ''
     if ($message) { $m = ' ' + (Limit-Json $message 80 320) }
     $p = ''
     if ($first) { $p = '\u001b]9;simpleterm:state=' + $first + '\u0007' }
-    Write-Out ('{"terminalSequence":"' + $p + '\u001b]9;simpleterm:state=' + $state + $m + '\u0007' + $Script:BgSeq + $Script:UsageSeq + '"}')
+    $b = ''
+    if ($Script:BgVal -ceq 'bg_clear') { $b = '\u001b]9;simpleterm:state=bg_clear\u0007' }
+    elseif ($Script:BgVal) { $b = '\u001b]9;simpleterm:state=' + $Script:BgVal + $m + '\u0007' }
+    Write-Out ('{"terminalSequence":"' + $p + '\u001b]9;simpleterm:state=' + $state + $m + '\u0007' + $b + $Script:UsageSeq + '"}')
 }
 
 function Write-UsageOnly {
@@ -4861,9 +4870,7 @@ function Add-Note([string]$kind, [string]$fp) {
             $bg = Join-Path $RunDir ($Sid + '.bg')
             if ([IO.File]::Exists($bg)) {
                 $lines = [IO.File]::ReadAllLines($bg, $Latin1)
-                if ($lines.Count -gt 1 -and $lines[1] -eq '7501') {
-                    $Script:BgSeq = '\u001b]7501;state=clear:id=' + $BgId + '\u0007'
-                }
+                if ($lines.Count -gt 1 -and $lines[1] -ceq 'screen') { $Script:BgVal = 'bg_clear' }
                 [IO.File]::Delete($bg)
             }
         }
@@ -4876,10 +4883,10 @@ function Add-Note([string]$kind, [string]$fp) {
 # workflows). It takes the turn up again when that work reports back, so the
 # session is not done: no `done` event, a `background` state instead, and no
 # idle question until the next turn note. $RunDir\$Sid.bg holds the state's
-# message meanwhile, and `7501` on its second line when the hook wrote an
-# OSC 7501 `working` record (as agent-hook.sh explains: Claude Code 2.1.295+
-# reports `done` for its own turn through OSC 7501).
-$BgId = 'simpleterm-bg'
+# message meanwhile, and `screen` on its second line when the hook wrote the
+# screen value bg_working or bg_question after the state (as agent-hook.sh
+# explains: Claude Code 2.1.295+ reports `done` for its own turn through
+# OSC 7501 and drops a hook's OSC 7501; SimpleTerm if/terminal-signals-bg).
 function Test-TurnDone { return [IO.File]::Exists((Join-Path $RunDir ($Sid + '.done'))) }
 function Test-BgPaused { return [IO.File]::Exists((Join-Path $RunDir ($Sid + '.bg'))) }
 
@@ -5729,47 +5736,22 @@ function Get-DoneMsg([string]$what) {
     return $dm
 }
 
-# Text (JSON-escaped) as standard base64 for an OSC 7501 field; nothing for
-# escapes other than \" \\ \/.
-function ConvertTo-B64Text([string]$text) {
-    $sb = New-Object System.Text.StringBuilder
-    for ($i = 0; $i -lt $text.Length; $i++) {
-        $c = $text[$i]
-        if ([int]$c -eq 92) {
-            if ($i + 1 -ge $text.Length) { return '' }
-            $e = [int]$text[$i + 1]
-            if ($e -ne 92 -and $e -ne 47 -and $e -ne 34) { return '' }
-            $c = $text[$i + 1]
-            $i++
-        }
-        [void]$sb.Append($c)
-    }
-    return [Convert]::ToBase64String($Latin1.GetBytes($sb.ToString()))
-}
-
 # The turn ended and the agent waits for background work or a schedule. Not
 # done: the badge says background (note in $Sid.bg), unless the last message
-# asks the user something ($ask): then the user is told, as question, the badge
-# says waiting, and Claude Code 2.1.295+ gets a blocked OSC 7501 record (kind
-# question) instead of the working one.
+# asks the user something ($ask): then the user is told, as question, and the
+# badge says waiting. Where Claude Code 2.1.295+ speaks OSC 7501 the state is
+# followed by bg_working, or bg_question when asking.
 function Invoke-BgPause([bool]$ask) {
     Get-BgSummary
     $flag = ''
     if ($Script:Agent -ceq 'claude' -and $env:SIMPLETERM -eq '1' -and (Test-Claude7501)) {
-        $flag = '7501'
-        if ($ask) {
-            $e = ConvertTo-B64Text (Limit-Json $Script:Last 200 800)
-            $Script:BgSeq = '\u001b]7501;state=blocked:id=' + $BgId + ':kind=question'
-        } else {
-            $e = ConvertTo-B64Text $Script:BgM
-            $Script:BgSeq = '\u001b]7501;state=working:id=' + $BgId
-        }
-        if ($e) { $Script:BgSeq += ':msg=' + $e }
-        $Script:BgSeq += '\u0007'
+        $flag = 'screen'
+        if ($ask) { $Script:BgVal = 'bg_question' } else { $Script:BgVal = 'bg_working' }
     }
     $bgFile = Join-Path $RunDir ($Script:Sid + '.bg')
-    # Line 1: the badge's message (the question when asking), 2: the OSC 7501
-    # flag, 3: the pause's token, 4: `ask` while the badge says waiting.
+    # Line 1: the badge's message (the question when asking), 2: `screen` when
+    # the screen value went out, 3: the pause's token, 4: `ask` while the badge
+    # says waiting.
     $bm = $Script:BgM
     $askMark = ''
     if ($ask) { $bm = Limit-Json $Script:Last 80 320; $askMark = 'ask' }
@@ -6397,7 +6379,7 @@ try {
     if ($Mode -eq '__send') {
         $Script:Rid = ''
         $Script:Ts = '0'
-        $Script:BgSeq = ''
+        $Script:BgVal = ''
         $Script:UsageSeq = ''
         if ($ScriptArgs.Count -gt 2) { Invoke-Child ([string]$ScriptArgs[2]) }
         Trim-Log
@@ -6419,7 +6401,7 @@ try {
         default { exit 0 }
     }
     $Script:UsageSeq = ''
-    $Script:BgSeq = ''
+    $Script:BgVal = ''
     $Script:UsageJson = ''
     $Script:UsageV2 = ''
     $Script:Title = ''

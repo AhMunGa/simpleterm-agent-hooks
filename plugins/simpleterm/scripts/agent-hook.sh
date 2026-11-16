@@ -1876,10 +1876,16 @@ sess_keep() {
 # --- terminal sequence (Claude Code only, SimpleTerm sessions only) ---------
 
 # USAGE_SEQ is the JSON-escaped usage OSC to append, if any (usage_report);
-# BG_SEQ the hook's OSC 7501 record for background work (bg_pause, note).
+# BG_VAL the background pause's screen value to write after the state
+# (bg_working, bg_question or bg_clear; bg_pause, note), with the state's
+# message but for bg_clear (SimpleTerm if/terminal-signals-bg#plugin).
 # [first] is a value written just before the state, in the same output: an app
 # that does not know the state drops it and is left with that one
 # (SimpleTerm if/terminal-signals#structured).
+# Claude Code passes terminalSequence on only when every sequence in it is
+# OSC 0, 1, 2, 9, 99, 777 or BEL and the whole is 4096 bytes at most, and an
+# OSC 9 starts with a digit only as 9;4; anything else drops the whole field
+# (SimpleTerm hist/hook-events#e28). OSC 9 alone is written here.
 print_state() { # running|waiting|done|done_scheduled|background|idle|error [message [first]]
   [ "$AGENT" = claude ] || return 0
   [ "${SIMPLETERM:-}" = 1 ] || return 0
@@ -1887,7 +1893,12 @@ print_state() { # running|waiting|done|done_scheduled|background|idle|error [mes
   [ -n "${2:-}" ] && m=' '$(json_trim "$2" 80 320)
   p=''
   [ -n "${3:-}" ] && p='\u001b]9;simpleterm:state='$3'\u0007'
-  printf '{"terminalSequence":"%s\\u001b]9;simpleterm:state=%s%s\\u0007%s%s"}\n' "$p" "$1" "$m" "$BG_SEQ" "$USAGE_SEQ"
+  psb=''
+  case $BG_VAL in
+    bg_clear) psb='\u001b]9;simpleterm:state=bg_clear\u0007' ;;
+    ?*) psb='\u001b]9;simpleterm:state='$BG_VAL$m'\u0007' ;;
+  esac
+  printf '{"terminalSequence":"%s\\u001b]9;simpleterm:state=%s%s\\u0007%s%s"}\n' "$p" "$1" "$m" "$psb" "$USAGE_SEQ"
 }
 
 print_usage() {
@@ -4568,7 +4579,7 @@ HB_KIND='' HB_APID='' HB_RESBASE=''
 TPATH='' CTXTOK='' MODEL='' GTYPE='' FULLYIDLE='' TERMREASON='' EXTRA='' GKEY='' REASON=''
 PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS='' REQIDIN='' TOOLUSEID=''
 OCTITLE='' OCBY='' OCCOST='' OCTIN='' OCTOUT='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX=''
-BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_SEQ=''
+BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_VAL=''
 BG_SVC=0 BG_IDMAP='' BG_KEEP='' BG_SHELLS='' BG_IDS='' BG_NOID=0 BG_M=''
 CRON_N=0 CRON_SCHED='' CRON_SUMS='' CRON_IDS='' PROMPT_SCHED='' COPILOT_SRC='' COPILOT_REP='' COPILOT_DET='' REPORT_ID=''
 
@@ -5215,14 +5226,15 @@ esac
 
 # Lets a waiting permission hook see that the agent moved on. A new turn
 # starts the file over, so it holds at most one turn of tool calls, and ends
-# a background pause (bg_pause), taking back its OSC 7501 record.
+# a background pause (bg_pause): the turn's output says bg_clear after its
+# state when the pause wrote its screen value (a pause the same output opens
+# replaces it with its own).
 note() { # turn | tool fingerprint
   if [ "$1" = turn ]; then
     printf '%s turn -\n' "$(date +%s)" >"$RUN_DIR/$SID.res" 2>/dev/null
     rm -f "$RUN_DIR/$SID.goal" "$RUN_DIR/$SID.done" 2>/dev/null
     if [ -f "$RUN_DIR/$SID.bg" ]; then
-      [ "$(sed -n 2p "$RUN_DIR/$SID.bg" 2>/dev/null)" = 7501 ] &&
-        BG_SEQ="\\u001b]7501;state=clear:id=$BG_ID\\u0007"
+      [ "$(sed -n 2p "$RUN_DIR/$SID.bg" 2>/dev/null)" = screen ] && BG_VAL=bg_clear
       rm -f "$RUN_DIR/$SID.bg" 2>/dev/null
     fi
   else
@@ -5235,18 +5247,21 @@ note() { # turn | tool fingerprint
 # workflows). It takes the turn up again when that work reports back, so the
 # session is not done: no `done` event, a `background` state instead, and no
 # idle question until the next turn note. $RUN_DIR/$SID.bg holds the state's
-# message meanwhile, and `7501` on its second line when the hook wrote the
-# OSC 7501 record below.
+# message meanwhile, and `screen` on its second line when the hook wrote the
+# screen value below.
 #
-# Claude Code 2.1.295+ reports itself through OSC 7501 and SimpleTerm then
+# Claude Code 2.1.295+ reports itself through OSC 7501, and SimpleTerm then
 # follows that, not `simpleterm:state`. For its own turn it reports `done`
-# (it counts background subagents as working, shells and monitors not), so
-# the hook adds a `working` record of its own, id $BG_ID: SimpleTerm shows the
-# most urgent record of a terminal. Claude Code runs Stop hooks before it
-# reports the turn's end, so the record is there first. Only where Claude
-# Code speaks OSC 7501 itself: elsewhere a record of the hook's would make
-# SimpleTerm stop reading `simpleterm:state`.
-BG_ID=simpleterm-bg
+# (it counts background subagents as working, shells and monitors not) right
+# after the Stop hooks' output (8 to 14 ms, measured). Claude Code drops a
+# hook's OSC 7501 (print_state), so the hook writes the pause as one more
+# OSC 9 value after the state: bg_working, or bg_question when the turn ended
+# asking, and bg_clear at the next turn. SimpleTerm reads them as the 7501
+# record simpleterm-bg of that terminal; an app that does not know them drops
+# them and keeps the state written first (SimpleTerm if/terminal-signals-bg).
+# Only where Claude Code speaks OSC 7501 itself (claude_speaks_7501: a
+# guess from the environment and the transcript's version): elsewhere the
+# state alone already reaches SimpleTerm, or nothing does.
 bg_paused() { [ -f "$RUN_DIR/$SID.bg" ]; }
 
 claude_speaks_7501() {
@@ -5258,26 +5273,6 @@ claude_speaks_7501() {
   tail -c 65536 "$f" 2>/dev/null | awk '
     { s = $0; while (match(s, /"version"[ ]*:[ ]*"[0-9][0-9.]*"/)) { v = substr(s, RSTART, RLENGTH - 1); s = substr(s, RSTART + RLENGTH); sub(/.*"/, "", v) } }
     END { n = split(v, x, "."); exit !(n >= 3 && (x[1] > 2 || (x[1] == 2 && (x[2] > 1 || (x[2] == 1 && x[3] >= 295))))) }'
-}
-
-# Text (JSON-escaped) as standard base64 for an OSC 7501 field; nothing for
-# escapes other than \" \\ \/ or without openssl.
-b64_text() {
-  t=$(printf '%s\n' "$1" | awk '{
-    s = $0; out = ""
-    for (i = 1; i <= length(s); i++) {
-      c = substr(s, i, 1)
-      if (c == "\\") {
-        e = substr(s, i + 1, 1)
-        if (e != "\\" && e != "/" && e != "\"") exit 1
-        c = e; i++
-      }
-      out = out c
-    }
-    print out
-  }' 2>/dev/null) || return 0
-  command -v openssl >/dev/null 2>&1 || return 0
-  printf '%s' "$t" | openssl base64 -A 2>/dev/null
 }
 
 # The first counted task (or, with only scheduled wake-ups, the first
@@ -5302,25 +5297,18 @@ bg_summary() {
 # The turn ended and the agent waits for background work or a schedule. Not
 # done: the badge says `background` (note in $SID.bg), unless the last
 # message asks the user something (pause ask): then the user is told, as
-# `question`, the badge says `waiting`, and Claude Code 2.1.295+ gets a
-# `blocked` OSC 7501 record (kind question) instead of the `working` one.
+# `question`, and the badge says `waiting`. Where Claude Code 2.1.295+ speaks
+# OSC 7501 the state is followed by bg_working, or bg_question when asking.
 bg_pause() {
   bg_summary
   flag=''
   if [ "$AGENT" = claude ] && [ "${SIMPLETERM:-}" = 1 ] && claude_speaks_7501; then
-    flag=7501
-    if [ "${1:-}" = ask ]; then
-      e=$(b64_text "$(json_trim "$LAST" 200 800)")
-      case $e in *[!A-Za-z0-9+/=]*) e='' ;; esac
-      BG_SEQ="\\u001b]7501;state=blocked:id=$BG_ID:kind=question${e:+:msg=$e}\\u0007"
-    else
-      e=$(b64_text "$BG_M")
-      case $e in *[!A-Za-z0-9+/=]*) e='' ;; esac
-      BG_SEQ="\\u001b]7501;state=working:id=$BG_ID${e:+:msg=$e}\\u0007"
-    fi
+    flag=screen
+    if [ "${1:-}" = ask ]; then BG_VAL=bg_question; else BG_VAL=bg_working; fi
   fi
-  # Line 1: the badge's message (the question when asking), 2: the OSC 7501
-  # flag, 3: the pause's token, 4: `ask` while the badge says `waiting`.
+  # Line 1: the badge's message (the question when asking), 2: `screen` when
+  # the screen value went out, 3: the pause's token, 4: `ask` while the badge
+  # says `waiting`.
   if [ "${1:-}" = ask ]; then bm=$(json_trim "$LAST" 80 320); else bm=$BG_M; fi
   printf '%s\n%s\n%s\n%s\n' "$bm" "$flag" "$RID" "${1:-}" >"$RUN_DIR/$SID.bg" 2>/dev/null
   pend=background

@@ -996,13 +996,29 @@ def t_background_work_kinds(s):
     s.check("kinds: a new turn before the limit -> no late done", not ingests(s), str(ingests(s))[:200])
 
 
-def t_background_work_7501(s):
-    """Claude Code 2.1.295+ reports `done` for its own turn through OSC 7501 even
-    while a background shell runs (measured on 2.1.316: the Stop hook's output
-    lands 12 ms before that `done`). The hook adds an OSC 7501 `working` record
-    of its own, only where Claude Code speaks OSC 7501, and takes it back at the
-    next turn."""
+def bg_payload(body):
+    """A structured payload as the app reads it (SimpleTerm if/terminal-signals#structured, if/terminal-signals-bg#fields):
+    `simpleterm:state=<value>[<sep><message>]`, the prefix without regard to case and only at the start, the value
+    a-z and _ in lower case, <sep> a run of white space or `;`. (value, message or None); None when not a payload."""
+    m = re.match(r"(?i)simpleterm:state=([a-z_]+)(?:([\s;]+)(.*))?$", body, re.S)
+    if not m:
+        return None
+    return m.group(1).lower(), (m.group(3) or None)
+
+
+def screen_values(seq):
+    """The OSC 9 payloads of a terminalSequence, in order: [(value, message)]."""
+    return [bg_payload(b) for b in re.findall(r"\x1b\]9;(.*?)\x07", seq, re.S)]
+
+
+def t_background_screen_values(s):
+    """The background pause on the screen (SimpleTerm if/terminal-signals-bg#plugin, #vectors; issue #804). Claude
+    Code 2.1.295+ reports `done` for its own turn through OSC 7501 even while a background shell runs, and drops a
+    hook's OSC 7501 from terminalSequence (hist/hook-events#e28). Where it speaks 7501 itself (claude_speaks_7501)
+    the hook writes the pause as one more OSC 9 value after the old one: bg_working, bg_question when the turn asks,
+    bg_clear in the first output of the next turn; elsewhere the old values only."""
     s.setup([(LINK_A, {})])
+    st = {"SIMPLETERM": "1"}
     shell = {"id": "bhk40d9z9", "type": "shell", "status": "running",
              "description": "Run the test suite", "command": "npm test"}
 
@@ -1011,39 +1027,93 @@ def t_background_work_7501(s):
             json.dumps({"type": t, "version": version, "message": {"role": t, "content": "x"}})
             for t in ("user", "assistant")) + "\n")
 
-    def stop(sid, tr, extra=None, tasks=(shell,)):
+    def stop(sid, tr, extra=None, tasks=(shell,), last="x"):
         ev = {"session_id": sid, "cwd": "/w/proj", "hook_event_name": "Stop", "stop_hook_active": False,
-              "last_assistant_message": "x", "transcript_path": str(tr), "background_tasks": list(tasks)}
-        return s.run("claude", json.dumps(ev), dict({"SIMPLETERM": "1"}, **(extra or {})))[1]
+              "last_assistant_message": last, "transcript_path": str(tr), "background_tasks": list(tasks)}
+        return s.run("claude", json.dumps(ev), dict(st, **(extra or {})))[1]
 
-    working = ("\x1b]7501;state=working:id=simpleterm-bg:msg=%s\x07"
-               % base64.b64encode(b"shell: Run the test suite").decode())
-    out = stop("b75", transcript("2.1.316"))
-    s.check("7501: Claude Code 2.1.316 -> a working record after the background state",
-            seqs(out) == "\x1b]9;simpleterm:state=background shell: Run the test suite\x07" + working, repr(out))
-    _, out2, _, _ = s.run("claude", json.dumps({"session_id": "b75", "hook_event_name": "UserPromptSubmit", "prompt": "x"}),
-                          {"SIMPLETERM": "1"})
-    s.check("7501: the next turn takes the record back",
-            seqs(out2) == "\x1b]9;simpleterm:state=running\x07\x1b]7501;state=clear:id=simpleterm-bg\x07", repr(out2))
-    _, out3, _, _ = s.run("claude", json.dumps({"session_id": "b75", "hook_event_name": "UserPromptSubmit", "prompt": "y"}),
-                          {"SIMPLETERM": "1"})
-    s.check("7501: taken back once", seqs(out3) == "\x1b]9;simpleterm:state=running\x07", repr(out3))
+    def prompt(sid, extra=None):
+        return s.run("claude", json.dumps({"session_id": sid, "hook_event_name": "UserPromptSubmit", "prompt": "x"}),
+                     dict(st, **(extra or {})))[1]
 
-    for label, tr, extra in (("2.1.294 (no OSC 7501 of its own)", transcript("2.1.294"), None),
-                             ("inside tmux", transcript("2.1.316"), {"TMUX": "/tmp/tmux-1/default,1,0"}),
-                             ("terminal title writes off", transcript("2.1.316"), {"CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"}),
-                             ("no transcript", s.tmp / "missing.jsonl", None)):
-        out = stop("b75-" + label.split()[0], tr, extra)
-        s.check("7501: none for %s" % label, "7501" not in seqs(out) and "state=background" in seqs(out), repr(out))
-        _, out4, _, _ = s.run("claude", json.dumps({"session_id": "b75-" + label.split()[0], "hook_event_name": "Stop",
+    tr = transcript("2.1.316")
+    # The plugin output vectors of SimpleTerm if/terminal-signals-bg#vectors, byte for byte as the hook prints them.
+    sleep20 = {"id": "b20", "type": "shell", "status": "running", "command": "sleep 20"}
+    out = stop("bv1", tr, tasks=[sleep20])
+    s.check("screen: vector Stop, pause",
+            out.strip() == r'{"terminalSequence":"\u001b]9;simpleterm:state=background shell: sleep 20\u0007\u001b]9;simpleterm:state=bg_working shell: sleep 20\u0007"}',
+            repr(out))
+    out = prompt("bv1")
+    s.check("screen: vector UserPromptSubmit",
+            out.strip() == r'{"terminalSequence":"\u001b]9;simpleterm:state=running\u0007\u001b]9;simpleterm:state=bg_clear\u0007"}', repr(out))
+    out = stop("bv2", tr, tasks=[SUBAGENT], last="Use option A or B?")
+    s.check("screen: vector Stop, pause ask",
+            out.strip() == r'{"terminalSequence":"\u001b]9;simpleterm:state=waiting Use option A or B?\u0007\u001b]9;simpleterm:state=bg_question Use option A or B?\u0007"}',
+            repr(out))
+    s.check("screen: the outputs parse to the rows of #vectors",
+            screen_values(seqs(out)) == [("waiting", "Use option A or B?"), ("bg_question", "Use option A or B?")], str(screen_values(seqs(out))))
+    out = prompt("bv2")
+    s.check("screen: bg_clear parses as bg_clear, no message", screen_values(seqs(out)) == [("running", None), ("bg_clear", None)],
+            str(screen_values(seqs(out))))
+    wait_for(lambda: ingests(s, "question"), 20)  # the pause ask's send lands before the next case
+
+    out = stop("b75", tr)
+    s.check("screen: Claude Code 2.1.316 -> bg_working after the background state",
+            seqs(out) == "\x1b]9;simpleterm:state=background shell: Run the test suite\x07"
+            "\x1b]9;simpleterm:state=bg_working shell: Run the test suite\x07", repr(out))
+    out2 = prompt("b75")
+    s.check("screen: the next turn says bg_clear",
+            seqs(out2) == "\x1b]9;simpleterm:state=running\x07\x1b]9;simpleterm:state=bg_clear\x07", repr(out2))
+    out3 = prompt("b75")
+    s.check("screen: bg_clear once", seqs(out3) == "\x1b]9;simpleterm:state=running\x07", repr(out3))
+
+    # The first output of the next turn may be a Stop: done then bg_clear; or a Stop that pauses again: the new value
+    # replaces the record (no bg_clear); or a StopFailure: idle, error, then bg_clear.
+    stop("b76", tr)
+    out = stop("b76", tr, tasks=[])
+    s.check("screen: a Stop first -> done, bg_clear", seqs(out) == "\x1b]9;simpleterm:state=done\x07\x1b]9;simpleterm:state=bg_clear\x07", repr(out))
+    stop("b77", tr)
+    out = stop("b77", tr, tasks=[dict(shell, id="b77b", description="Build the docs")])
+    s.check("screen: a Stop that pauses again -> its bg_working, no bg_clear",
+            seqs(out) == "\x1b]9;simpleterm:state=background shell: Build the docs\x07\x1b]9;simpleterm:state=bg_working shell: Build the docs\x07",
+            repr(out))
+    stop("b78", tr)
+    _, out, _, _ = s.run("claude", cc_event("b78", "StopFailure", error="server_error", last_assistant_message="API Error"), st)
+    s.check("screen: a StopFailure first -> idle, error, bg_clear",
+            seqs(out) == "\x1b]9;simpleterm:state=idle\x07\x1b]9;simpleterm:state=error\x07\x1b]9;simpleterm:state=bg_clear\x07", repr(out))
+    # A pause written by 0.3.1-0.6.0 (`7501` on the note's second line): its record never reached the screen
+    # (hist/hook-events#e28), so there is nothing to clear.
+    run = s.home / ".simpleterm" / "run"
+    write(run / "b79.bg", "shell: x\n7501\n%s\n\n" % ("a" * 16))
+    out = prompt("b79")
+    s.check("screen: a 0.6.0 pause -> no bg_clear", seqs(out) == "\x1b]9;simpleterm:state=running\x07", repr(out))
+
+    for label, trx, extra in (("2.1.294 (no OSC 7501 of its own)", transcript("2.1.294"), None),
+                              ("inside tmux", tr, {"TMUX": "/tmp/tmux-1/default,1,0"}),
+                              ("inside screen", tr, {"STY": "123.pts-1.host"}),
+                              ("terminal title writes off", tr, {"CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"}),
+                              ("no transcript", s.tmp / "missing.jsonl", None)):
+        sid = "b75-" + label.split()[0] + label.split()[-1]
+        out = stop(sid, trx, extra)
+        s.check("screen: none for %s" % label, "bg_" not in seqs(out) and "state=background" in seqs(out), repr(out))
+        _, out4, _, _ = s.run("claude", json.dumps({"session_id": sid, "hook_event_name": "Stop",
                                                     "last_assistant_message": "x", "background_tasks": []}),
-                              dict({"SIMPLETERM": "1"}, **(extra or {})))
-        s.check("7501: nothing to take back for %s" % label, seqs(out4) == "\x1b]9;simpleterm:state=done\x07", repr(out4))
+                              dict(st, **(extra or {})))
+        s.check("screen: nothing to clear for %s" % label, seqs(out4) == "\x1b]9;simpleterm:state=done\x07", repr(out4))
+    # herdr: TMUX and STY are not set there, so the check holds and the value goes out (it changes nothing there:
+    # SimpleTerm if/terminal-signals-bg#plugin).
+    out = stop("b75-herdr", tr, {"HERDR_ENV": "1", "HERDR_PANE_ID": "w2:p1"})
+    s.check("screen: inside herdr the value goes out", seqs(out).endswith("\x1b]9;simpleterm:state=bg_working shell: Run the test suite\x07"), repr(out))
 
-    out = stop("b75-esc", transcript("2.1.316"),
-               tasks=[dict(shell, description='Run "npm test" \u2014 all')])  # JSON: \" and \u2014
-    s.check("7501: a message with other escapes goes without msg",
-            seqs(out).endswith("\x1b]7501;state=working:id=simpleterm-bg\x07"), repr(out))
+    # The message is the old value's, cut the same way: JSON escapes and a long text.
+    out = stop("b75-esc", tr, tasks=[dict(shell, description='Run "npm test" — all')])  # JSON: \" and —
+    s.check("screen: a message with escapes is the old value's",
+            seqs(out) == '\x1b]9;simpleterm:state=background shell: Run "npm test" — all\x07'
+            '\x1b]9;simpleterm:state=bg_working shell: Run "npm test" — all\x07', repr(out))
+    out = stop("b75-long", tr, tasks=[dict(shell, description="한" * 120)])
+    v = screen_values(seqs(out))
+    s.check("screen: a long message is cut as the old value (80 characters)",
+            len(v) == 2 and v[1][0] == "bg_working" and v[1][1] == v[0][1] and len(v[0][1]) <= 80, str(v)[:200])
 
 
 def t_codex_goal(s):
@@ -1125,18 +1195,17 @@ def t_question_while_background(s):
     s.settle("the hooks' background work")
     s.check("question while waiting: no done and no second question", len(ingests(s)) == 1, str(ingests(s))[:300])
 
-    # Claude Code 2.1.295+: a blocked (question) record of the hook instead of the working one; taken back at the next turn.
+    # Claude Code 2.1.295+: bg_question instead of bg_working; bg_clear at the next turn.
     s.ctl("/_ctl/reset", {})
     tr = cc_transcript(s)
     out = s.run("claude", cc_event("qb2", "Stop", stop_hook_active=False, last_assistant_message=q, background_tasks=[SUBAGENT],
                                    session_crons=[], transcript_path=str(tr)), st)[1]
-    s.check("question while waiting: OSC 7501 blocked/question record, no working record",
-            seqs(out) == "\x1b]9;simpleterm:state=waiting " + q + "\x07\x1b]7501;state=blocked:id=simpleterm-bg:kind=question:msg="
-            + b64(q) + "\x07", repr(out))
+    s.check("question while waiting: bg_question after waiting, no bg_working",
+            seqs(out) == "\x1b]9;simpleterm:state=waiting " + q + "\x07\x1b]9;simpleterm:state=bg_question " + q + "\x07", repr(out))
     wait_for(lambda: ingests(s, "question"), 20)  # its send must land before the reset below
     _, out3, _, _ = s.run("claude", cc_event("qb2", "UserPromptSubmit", prompt="yes, fix them"), st)
-    s.check("question while waiting: the next turn takes the record back",
-            seqs(out3) == "\x1b]9;simpleterm:state=running\x07\x1b]7501;state=clear:id=simpleterm-bg\x07", repr(out3))
+    s.check("question while waiting: the next turn says bg_clear",
+            seqs(out3) == "\x1b]9;simpleterm:state=running\x07\x1b]9;simpleterm:state=bg_clear\x07", repr(out3))
 
     # Not a question: silent as before, whatever else is in the message.
     s.ctl("/_ctl/reset", {})
@@ -1358,7 +1427,7 @@ def t_service_shells(s):
     s.check("service shell: another shell beside a service -> waits", seqs(out).startswith("\x1b]9;simpleterm:state=background"), repr(out))
     # No hook record of its own where the service is not waited for (Claude Code reports done itself).
     out = stop("sv8", [shell("npm run dev")], extra={"transcript_path": str(cc_transcript(s))})
-    s.check("service shell: no OSC 7501 working record", seqs(out) == "\x1b]9;simpleterm:state=done\x07", repr(out))
+    s.check("service shell: no bg_working", seqs(out) == "\x1b]9;simpleterm:state=done\x07", repr(out))
     # Grok Build.
     s.settle("the sends of the cases above")
     s.ctl("/_ctl/reset", {})
@@ -1494,12 +1563,12 @@ def t_schedules(s):
     s.check("schedule: a prompt equal to a schedule's -> background", seqs(out).startswith("\x1b]9;simpleterm:state=background scheduled:"), repr(out))
     s.settle("the hooks' background work")
     s.check("schedule: no event from the scheduled turns", not ingests(s), str(ingests(s))[:300])
-    # Claude Code 2.1.295+: a working record, with the schedule as its text; taken back at the next turn.
+    # Claude Code 2.1.295+: bg_working, with the schedule as its text.
     tr = cc_transcript(s)
     s.run("claude", cc_event("sc2", "UserPromptSubmit", prompt="x", source="loop_wakeup"), st)
     out = stop("sc2", cron[:1], "Check.", extra={"transcript_path": str(tr)})
-    s.check("schedule: OSC 7501 working record", seqs(out) == "\x1b]9;simpleterm:state=background scheduled: */5 * * * *\x07"
-            "\x1b]7501;state=working:id=simpleterm-bg:msg=" + b64("scheduled: */5 * * * *") + "\x07", repr(out))
+    s.check("schedule: bg_working", seqs(out) == "\x1b]9;simpleterm:state=background scheduled: */5 * * * *\x07"
+            "\x1b]9;simpleterm:state=bg_working scheduled: */5 * * * *\x07", repr(out))
     # A question in a scheduled turn is still told.
     s.ctl("/_ctl/reset", {})
     s.run("claude", cc_event("sc3", "UserPromptSubmit", prompt="x", source="schedule_wakeup"), st)
@@ -2004,7 +2073,7 @@ def t_small_audit_fixes(s):
                              session_crons=[], transcript_path=str(tr)), st)
     _, out, _, _ = s.run("claude", cc_event("ei2", "PostToolUseFailure", tool_name="Bash", tool_input={"command": "sleep 100"},
                                             error="Interrupted", is_interrupt=True), st)
-    s.check("interrupt: takes the background record back", seqs(out) == "\x1b]9;simpleterm:state=idle\x07\x1b]7501;state=clear:id=simpleterm-bg\x07", repr(out))
+    s.check("interrupt: ends the pause with bg_clear", seqs(out) == "\x1b]9;simpleterm:state=idle\x07\x1b]9;simpleterm:state=bg_clear\x07", repr(out))
 
 
 AGENT_PY = (
@@ -6479,7 +6548,7 @@ def copies_check():
 
 
 TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t_timeout, t_multi_link,
-         t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_work_7501, t_question_while_background, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_schedule_end, t_done_delay, t_background_events_and_badges, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
+         t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_screen_values, t_question_while_background, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_schedule_end, t_done_delay, t_background_events_and_badges, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_schedule, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js, t_opencode_schedule,
@@ -6491,7 +6560,7 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
 # by awk, the HMAC whose key blocks printf writes, the AES-256-CBC envelope and dext, base64 both ways),
 # the byte-exact events and terminal sequences, and the shell's own reading of input, settings and argv.
 COMPAT = {"t_vectors", "t_allow_deny", "t_invalid_dmac", "t_missing_deps", "t_hostile_input", "t_argv", "t_external_printf",
-          "t_background_work_7501", "t_v2_fixtures", "t_v2_dext_vector", "t_v2_decisions", "t_usage_ask_refresh_vectors",
+          "t_background_screen_values", "t_v2_fixtures", "t_v2_dext_vector", "t_v2_decisions", "t_usage_ask_refresh_vectors",
           "t_conf_vectors"}
 
 # Tests of the sh hook only (scripts and behaviour the PowerShell hook does not have).
