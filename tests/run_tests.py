@@ -252,6 +252,11 @@ class Suite:
         self.kind = kind
         self.cases = cases  # full: every case; compat: COMPAT only
         self.results = []
+        # Every terminalSequence a hook printed (screen_check): how many, and what Claude Code would refuse.
+        self.case = None
+        self.seq_n = 0
+        self.seq_bad = {}
+        self.seq_lock = threading.Lock()
         self.tmp = Path(tempfile.mkdtemp(prefix="st-hooktest-"))
         self.home = self.tmp / "home"
         self.bin = self.tmp / "bin"
@@ -374,10 +379,38 @@ class Suite:
     def popen(self, argv, **kw):
         """subprocess.Popen in a session (and process group) of its own, kept for reap(): what a
         hook leaves running in the background (a send, a done that waits up to 600 s, an ask) is
-        in that group."""
+        in that group. What it prints goes through screen_check() when read with communicate()."""
         p = subprocess.Popen(argv, start_new_session=True, **kw)
         track(p.pid, self)
+        talk = p.communicate
+
+        def communicate(*a, **k):
+            out, err = talk(*a, **k)
+            self.screen_check(out)
+            return out, err
+        p.communicate = communicate
         return p
+
+    def screen_check(self, out):
+        """Every terminalSequence in a hook's output against what Claude Code passes on (allowlist_problems);
+        what it would refuse becomes a failed check of the case (run_suite)."""
+        if not out:
+            return
+        text = out.decode("utf-8", "replace") if isinstance(out, bytes) else out
+        for seq in term_seqs(text):
+            bad = allowlist_problems(seq) if isinstance(seq, str) else ["terminalSequence that is not a JSON string on one line"]
+            with self.seq_lock:
+                self.seq_n += 1
+                for why in bad:
+                    self.seq_bad.setdefault((self.case, why), []).append(seq)
+
+    def screen_report(self):
+        """The case's refused terminalSequences as failed checks, one per case and reason."""
+        with self.seq_lock:
+            bad, self.seq_bad = self.seq_bad, {}
+        for (case, why), seqs_ in sorted(bad.items(), key=lambda kv: (str(kv[0][0]), kv[0][1])):
+            self.check("terminalSequence allowlist (%s): %s" % (case, why), False,
+                       "%d output(s); first %r" % (len(seqs_), seqs_[0]))
 
     def proc_run(self, argv, input=None, timeout=60, **kw):
         """subprocess.run with capture_output, by popen()."""
@@ -458,6 +491,70 @@ class Suite:
 
     def check(self, name, cond, detail=""):
         self.results.append((name, bool(cond), detail))
+
+
+# What Claude Code passes on in a hook's terminalSequence (SimpleTerm hist/hook-events#e28, if/terminal-signals-bg#bytes):
+# only OSC 0, 1, 2, 9, 99 and 777 and BEL, the whole field 4096 bytes at most, and (2.1.295+) no OSC 9 whose body starts
+# with a digit but 9;4 (progress). One sequence outside drops the whole field, the hook's OSC 9 with it.
+ALLOWED_OSC = {"0", "1", "2", "9", "99", "777"}
+
+
+def allowlist_problems(seq):
+    """Why Claude Code would drop terminalSequence `seq` ([] when it passes it on)."""
+    bad = []
+    if len(seq.encode("utf-8")) > 4096:
+        bad.append("over 4096 bytes")
+    i = 0
+    while i < len(seq):
+        if seq[i] == "\x07":
+            i += 1
+            continue
+        m = re.match(r"\x1b\]([0-9]*)", seq[i:])
+        if not m:
+            bad.append("something other than OSC or BEL")
+            break
+        num, k = m.group(1), i + m.end()
+        ends = [e for e in (seq.find("\x07", k), seq.find("\x1b\\", k)) if e >= 0]
+        if not ends:
+            bad.append("an OSC without its end")
+            break
+        e = min(ends)
+        body = seq[k:e]
+        if num not in ALLOWED_OSC:
+            bad.append("OSC %s (not on the allowlist)" % (num or "without a number"))
+        elif body and not body.startswith(";"):
+            bad.append("OSC %s%s (not on the allowlist)" % (num, body[:4]))
+        elif num == "9" and body[1:2].isdigit() and not (body == ";4" or body.startswith(";4;")):
+            bad.append("OSC 9 body that starts with a digit")
+        i = e + (1 if seq[e] == "\x07" else 2)
+    return bad
+
+
+def term_seqs(text):
+    """The terminalSequence values in a hook's output (a JSON object per line; the key at any depth). A line that
+    names the key but is no JSON gives None."""
+    found = []
+    if "terminalSequence" not in text:
+        return found
+
+    def walk(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k == "terminalSequence":
+                    found.append(v if isinstance(v, str) else None)
+                else:
+                    walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    for line in text.splitlines():
+        if "terminalSequence" not in line:
+            continue
+        try:
+            walk(json.loads(line))
+        except ValueError:
+            found.append(None)
+    return found
 
 
 def wait_for(fn, timeout=10, step=0.1):
@@ -6501,14 +6598,20 @@ def run_suite(suite, only):
         sem = HEAVY.get(t.__name__)
         if sem:
             sem.acquire()
+        suite.case = t.__name__
         try:
             t(suite)
         except Exception as e:  # report and continue with the next case
             suite.check("%s raised" % t.__name__, False, repr(e))
         finally:
             suite.reap()
+            suite.screen_report()
             if sem:
                 sem.release()
+    # Every hook output of every case, not one case's: Claude Code drops a whole terminalSequence for one sequence
+    # outside its allowlist, and an output check alone never sees that (SimpleTerm hist/hook-events#e28).
+    if suite.seq_n:
+        suite.check("terminalSequence allowlist: %d hook outputs checked" % suite.seq_n, True)
 
 
 def run_in_own_group(run):
