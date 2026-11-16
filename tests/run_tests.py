@@ -4,6 +4,7 @@
   python3 -I tests/run_tests.py                 # ubuntu, macos, windows (every case) and compat
   python3 -I tests/run_tests.py --suite full    # or --suite compat
   python3 -I tests/run_tests.py --pwsh /path/to/pwsh   # the PowerShell 7 to use (default: pwsh in PATH)
+  python3 -I tests/run_tests.py --openssl /path/to/openssl   # the OpenSSL 3 to use (default: Homebrew's)
   python3 -I tests/run_tests.py --shell /path/to/bash --suite compat   # another shell
   python3 -I tests/run_tests.py --hook old/agent-hook.sh # another sh hook (baseline)
 
@@ -54,7 +55,8 @@ GROUPS = {}  # group id -> (Suite, time.monotonic() when added)
 GROUPS_LOCK = threading.Lock()
 SUITES = []  # every suite of the run: a process whose command names a suite's folder is the run's
 # A `sleep` this long or longer is a timer no case waits out (bg_done_after's 600 s, the 15 s watchdog of
-# a version measurement), and so is a PowerShell hook's background process (`__send`) this old.
+# a version measurement), and so is a PowerShell hook's background process (`__send`) this old that a
+# pause's file accounts for (busy()).
 LONG_TIMER = 15
 
 
@@ -145,25 +147,35 @@ def etime_s(text):
     return total + int(days or 0) * 86400
 
 
-def busy(procs):
+def busy(procs, home=None):
     """`procs` ({pid: row}) without the timers no case waits out (LONG_TIMER) and the shells that only
-    wait for such."""
+    wait for such. The sh hook's pause is a `sleep 600`. The PowerShell hook's is a background process
+    (`__send`) like every send, so one is taken for a pause only when it is LONG_TIMER old and the HOME
+    `home` holds a pause's file (<sid>.bg, written before the pause starts, gone once a turn ends it):
+    no more of them, the oldest first, than there are such files. A send that is merely slow is waited
+    for."""
     if not procs:
         return procs
     out = subprocess.run(["ps", "-o", "pid=,etime=,command=", "-p", ",".join(map(str, procs))],
                          capture_output=True).stdout.decode("utf-8", "replace")
     parked = set()
+    sends = []
     for line in out.splitlines():
         f = line.split(None, 2)
         if len(f) < 3 or not f[0].isdigit() or int(f[0]) not in procs:
             continue
         m = re.match(r"(?:\S*/)?sleep (\d+)$", f[2].strip())
         try:
-            old = etime_s(f[1]) >= LONG_TIMER
+            age = etime_s(f[1])
         except ValueError:
-            old = False
-        if (m and int(m.group(1)) >= LONG_TIMER) or (" __send " in f[2] and old):
+            age = 0
+        if m and int(m.group(1)) >= LONG_TIMER:
             parked.add(int(f[0]))
+        elif " __send " in f[2] and age >= LONG_TIMER:
+            sends.append((age, int(f[0])))
+    if sends and home is not None:
+        pauses = len(list((Path(home) / ".simpleterm" / "run").glob("*.bg")))
+        parked.update(pid for _, pid in sorted(sends, reverse=True)[:pauses])
     grew = True
     while grew:
         grew = False
@@ -412,7 +424,7 @@ class Suite:
         while True:
             left = self.running(skip)
             if left is not None:
-                left = busy(left)
+                left = busy(left, self.home)
                 if not left:
                     return True
             if time.time() >= end:
@@ -6420,11 +6432,38 @@ def ps51_static_check():
     return problems
 
 
+def pwsh_out(pwsh, script):
+    """What `pwsh -Command script` prints, run in a HOME of its own (pwsh writes caches there); '' when it
+    does not run."""
+    home = tempfile.mkdtemp(prefix="st-pwsh-")
+    env = {"HOME": home, "PATH": "/usr/bin:/bin", "POWERSHELL_TELEMETRY_OPTOUT": "1", "POWERSHELL_UPDATECHECK": "Off"}
+    try:
+        return subprocess.run([pwsh, "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True,
+                              timeout=60, env=env).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def ps_parse_check(pwsh):
     script = ("$e=$null;$t=$null;[void][System.Management.Automation.Language.Parser]::ParseFile('%s',[ref]$t,[ref]$e);"
               "$e | ForEach-Object { $_.Extent.StartLineNumber.ToString() + ': ' + $_.Message }") % HOOK_PS1
-    out = subprocess.run([pwsh, "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True, timeout=60)
-    return [l for l in out.stdout.splitlines() if l.strip()]
+    return [l for l in pwsh_out(pwsh, script).splitlines() if l.strip()]
+
+
+def pwsh_major(pwsh):
+    """PowerShell's major version, 0 when `pwsh` is not PowerShell (a parse check alone passes anything that
+    prints nothing)."""
+    out = pwsh_out(pwsh, "'PS ' + $PSVersionTable.PSVersion.Major").strip()
+    return int(out[3:]) if re.fullmatch(r"PS \d+", out) else 0
+
+
+def shell_works(sh):
+    try:
+        return subprocess.run([sh, "-c", "echo ok"], capture_output=True, text=True, timeout=10).stdout == "ok\n"
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 # Tests that keep the CPU busy (t_service_shells: some 200 Stop hooks, about 40 s of CPU a suite):
@@ -6547,19 +6586,75 @@ def openssl_kind(path):
 # `--shell PATH --suite compat`.
 ENVIRONMENTS = [("ubuntu", "/bin/dash", "openssl3", "full"), ("macos", "/bin/sh", "libressl", "full"),
                 ("compat", "/bin/sh", "openssl3", "compat")]
+LIBRESSL = "/usr/bin/openssl"  # macOS's
+OPENSSL3 = ("/opt/homebrew/bin/openssl", "/usr/local/bin/openssl", "/usr/bin/openssl")  # Homebrew's, or a Linux's own
+
+
+def select_environments(args):
+    """(suites, missing, pwsh) for the arguments. Only what the asked suites need is looked for, and an
+    environment that cannot run is one failure (`missing`), not a quiet gap. windows (pwsh) is part of
+    the full suite and runs the plugin's PowerShell hook: --suite compat, --no-pwsh, --shell and --hook
+    (both about the sh hook) leave it out, whatever --pwsh says or PATH holds."""
+    sets = args.suite or ["full", "compat"]
+    missing = []
+    found = {}
+
+    def openssl(kind):
+        if kind not in found:
+            cands = [LIBRESSL] if kind == "libressl" else [args.openssl] if args.openssl else list(OPENSSL3)
+            found[kind] = next((p for p in cands if openssl_kind(p) == kind), None)
+        return found[kind]
+
+    def wanted(kind):
+        if kind == "libressl":
+            return "LibreSSL at " + LIBRESSL
+        return "OpenSSL 3 at " + (args.openssl or " or ".join(OPENSSL3)) + " (--openssl PATH)"
+
+    suites = []
+    hook_ok = not args.hook or os.path.isfile(args.hook)
+    if not hook_ok:
+        missing.append("--hook %s: no such file" % args.hook)
+    if not args.no_sh and hook_ok:
+        if args.shell:
+            # Another shell: every case, or the compat set when only that was asked; OpenSSL 3 (LibreSSL when
+            # there is none and none was named).
+            cases = "compat" if sets == ["compat"] else "full"
+            kind = "openssl3" if args.openssl or openssl("openssl3") else "libressl"
+            envs = [(cases, sh, kind, cases) for sh in args.shell]
+        else:
+            envs = [e for e in ENVIRONMENTS if e[3] in sets]
+        for name, sh, kind, cases in envs:
+            why = ([] if shell_works(sh) else ["%s does not run `sh -c`" % sh]) + ([] if openssl(kind) else ["no " + wanted(kind)])
+            if why:
+                missing.append("%s: cannot run (%s)" % (name, "; ".join(why)))
+            else:
+                suites.append(Suite("%s %s+%s" % (name, sh, kind), [sh, str(HOOK_SH)], openssl(kind), cases=cases))
+    pwsh = None
+    if "full" in sets and not (args.no_pwsh or args.shell or args.hook):
+        cand = args.pwsh or shutil.which("pwsh")
+        if not cand:
+            missing.append("windows: no pwsh in PATH (--pwsh PATH, or --no-pwsh to leave it out)")
+        elif pwsh_major(cand) < 7:
+            missing.append("windows: %s is not PowerShell 7 (--pwsh PATH, or --no-pwsh to leave it out)" % cand)
+        else:
+            pwsh = cand
+            suites.append(Suite("windows pwsh", [pwsh, "-NoProfile", "-NonInteractive", "-File", str(HOOK_PS1)], None, "ps1"))
+    if not suites and not missing:
+        missing.append("nothing to run (--no-sh leaves windows only, and --suite compat, --no-pwsh, --shell or --hook leave it out)")
+    return suites, missing, pwsh
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--suite", action="append", choices=("full", "compat"),
                     help="full: ubuntu, macos and windows, every case; compat: the compat set (default: both)")
-    ap.add_argument("--shell", action="append", help="run the sh hook with this shell instead of the environments' (repeatable)")
-    ap.add_argument("--openssl", help="the OpenSSL 3 to use (default: Homebrew's)")
-    ap.add_argument("--pwsh", help="pwsh executable to run agent-hook.ps1 with (default: pwsh in PATH)")
+    ap.add_argument("--shell", action="append", help="run the sh hook with this shell instead of the environments' (repeatable; no windows)")
+    ap.add_argument("--openssl", help="the OpenSSL 3 to use (default: Homebrew's, else /usr/bin/openssl if it is OpenSSL 3)")
+    ap.add_argument("--pwsh", help="the PowerShell 7 for the windows environment (default: pwsh in PATH)")
     ap.add_argument("--no-pwsh", action="store_true", help="leave the windows environment out")
     ap.add_argument("--only", action="append", help="test function name (repeatable)")
     ap.add_argument("--no-sh", action="store_true", help="leave the sh environments out")
-    ap.add_argument("--hook", help="sh hook to test instead of the plugin's (e.g. an older release)")
+    ap.add_argument("--hook", help="sh hook to test instead of the plugin's (e.g. an older release; no windows)")
     ap.add_argument("--regen-v2", action="store_true", help="write tests/fixtures/v2/expected.json from the sh hook and exit")
     args = ap.parse_args()
     global HOOK_SH, SCRIPTS
@@ -6570,40 +6665,10 @@ def main():
         regen_v2((args.shell or ["/bin/dash"])[0])
         sys.exit(0)
 
-    sets = args.suite or ["full", "compat"]
-    ossl = {"libressl": "/usr/bin/openssl",
-            "openssl3": args.openssl or next((p for p in ("/opt/homebrew/bin/openssl", "/usr/local/bin/openssl") if os.path.exists(p)), None)}
-    # An environment that cannot run is a failure, not a quiet gap (say how to give it, or to leave it out).
-    missing = []
-    for kind, path in list(ossl.items()):
-        if not path or openssl_kind(path) != kind:
-            missing.append("%s not found at %s (--openssl PATH)" % (kind, path or "/opt/homebrew/bin/openssl or /usr/local/bin/openssl"))
-            ossl[kind] = None
-    suites = []
-    if not args.no_sh:
-        if args.shell:
-            cases = "compat" if sets == ["compat"] else "full"
-            for sh in args.shell:
-                kind = "openssl3" if ossl["openssl3"] else "libressl"
-                suites.append(Suite("%s %s+%s" % (cases, sh, kind), [sh, str(HOOK_SH)], ossl[kind], cases=cases))
-        else:
-            for name, sh, kind, cases in ENVIRONMENTS:
-                if cases not in sets:
-                    continue
-                if not os.path.exists(sh) or not ossl[kind]:
-                    missing.append("%s: cannot run (%s, %s)" % (name, sh if os.path.exists(sh) else sh + " missing", kind))
-                    continue
-                suites.append(Suite("%s %s+%s" % (name, sh, kind), [sh, str(HOOK_SH)], ossl[kind], cases=cases))
-    pwsh = args.pwsh or (None if args.shell else shutil.which("pwsh"))
-    if pwsh:
-        suites.append(Suite("windows pwsh", [pwsh, "-NoProfile", "-NonInteractive", "-File", str(HOOK_PS1)], None, "ps1"))
-    elif "full" in sets and not args.no_pwsh and not args.shell:
-        missing.append("windows: no pwsh in PATH (--pwsh PATH, or --no-pwsh to leave it out)")
-    if args.no_sh:
-        missing = [m for m in missing if m.startswith("windows")]
+    suites, missing, pwsh = select_environments(args)
 
     failed = 0
-    print("== environments: %s" % ", ".join(s.name for s in suites))
+    print("== environments: %s" % (", ".join(s.name for s in suites) or "none"))
     for m in missing:
         print("   FAIL " + m)
     failed += len(missing)
