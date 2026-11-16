@@ -4824,7 +4824,8 @@ def t_v2_link_waits(s):
         # An older app's tunnel answers sent: the hook waits for it (even for Codex), the relay gets an alert.
         setup({"push": "sent", "decision": "allow", "after": 1}, {"push": "sent"}, tunnel_fmt=None)
         rc, out, err, el = s.run("codex", codex)
-        rel = s.records("/v1/ingest")
+        # (The relay's alert goes from the background: it may land after the hook ended.)
+        rel = wait_for(lambda: s.records("/v1/ingest"), 15) or []
         s.check("waits: an older tunnel's sent is waited for (codex)", behavior(out).get("behavior") == "allow", out + s.log_text()[-300:])
         s.check("waits: hidden: the relay gets a question without nonce, same rid", rel and rel[0]["body"]["ev"] == "question"
                 and "nh" not in rel[0]["body"] and "nonce" not in (rel[0].get("plain_json") or {})
