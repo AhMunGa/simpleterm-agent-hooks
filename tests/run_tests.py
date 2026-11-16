@@ -6957,13 +6957,32 @@ def run_suite(suite, only):
         suite.check("terminalSequence allowlist: %d hook outputs checked" % suite.seq_n, True)
 
 
+def end_ours():
+    """Ends every process of this run but this one (ours(): the suites' groups and folders, and this run's group):
+    TERM, then KILL to what is left a second later. The hooks a case starts lead sessions of their own
+    (Suite.popen), so a TERM to the run's group does not reach them."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        rows = observe()
+        pids = ours(rows, groups={os.getpgrp()}) if rows is not None else {}
+        for p in pids:
+            try:
+                os.kill(p, sig)
+            except OSError:
+                pass
+        if not pids or sig == signal.SIGKILL:
+            break
+        wait_for(lambda: not ours(observe() or [], groups={os.getpgrp()}), 1, 0.1)
+
+
 def run_in_own_group(run):
     """Runs `run()` (the suites) in a child that leads its own process group, then stops that
-    group: every hook the suites start, and the background sends they leave sleeping
-    (bg_done_after waits up to 600 s), belong to it, so a finished run leaves nothing behind.
-    Only the child's group is touched: this process may share its group with others (a
-    `python run_tests.py | tail` under job control), and it stays in the terminal's group
-    (Ctrl+C reaches it). Returns the child's exit code."""
+    group. The child's processes, and the hooks the suites start in sessions of their own with
+    the background sends they leave sleeping (bg_done_after waits up to 600 s), end with the run:
+    each case reaps its own, and a TERM to the child (from here, when this process is ended or
+    interrupted) ends them all (end_ours) before the child exits. Only the child's group is
+    signalled from here: this process may share its group with others (a `python run_tests.py |
+    tail` under job control), and it stays in the terminal's group (Ctrl+C reaches it). Returns
+    the child's exit code."""
     sys.stdout.flush()
     sys.stderr.flush()
     pid = os.fork()
@@ -6973,10 +6992,18 @@ def run_in_own_group(run):
         except OSError:
             pass
         code = 1
+
+        def child_term(signum, frame):
+            raise KeyboardInterrupt
+        signal.signal(signal.SIGTERM, child_term)
         try:
             run()
         except SystemExit as e:
             code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+        except KeyboardInterrupt:
+            code = 143
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            end_ours()
         except BaseException:
             import traceback
             traceback.print_exc()
@@ -7004,7 +7031,7 @@ def run_in_own_group(run):
         old = signal.signal(signal.SIGTERM, signal.SIG_IGN)
         try:
             os.killpg(pid, signal.SIGTERM)
-            # (What does not take TERM within 2 seconds gets KILL.)
+            # (What does not take TERM within 5 seconds gets KILL: the child ends the hooks first, end_ours.)
 
             def gone():
                 try:
@@ -7012,7 +7039,7 @@ def run_in_own_group(run):
                     return False
                 except OSError:
                     return True
-            if not wait_for(gone, 2, 0.1):
+            if not wait_for(gone, 5, 0.1):
                 os.killpg(pid, signal.SIGKILL)
         except OSError:
             pass
