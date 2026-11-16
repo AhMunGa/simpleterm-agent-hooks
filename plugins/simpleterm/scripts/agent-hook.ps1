@@ -3583,13 +3583,24 @@ function Get-AskHead($st) {
     return $st.text
 }
 
+# The seconds an ask waits for its answer: 60 (Invoke-AskPipe); tests only
+# (SIMPLETERM_HOOK_TEST=1) may set fewer in SIMPLETERM_HOOK_TEST_ASK_WAIT.
+function Get-AskWait {
+    $w = [string]$env:SIMPLETERM_HOOK_TEST_ASK_WAIT
+    if ($env:SIMPLETERM_HOOK_TEST -eq '1' -and (Test-UInt $w) -and [int64]$w -ge 1 -and [int64]$w -le 60) { return [int]$w }
+    return 60
+}
+
 # Runs agent $exe ($argLine) in ~/.simpleterm/probe with SIMPLETERM_PROBE=1,
 # its standard input the lines $inLines, then the lines $moreLines once its
 # output holds $w1 (or at once without $w1), then open until the output
 # matches regular expression $w2 or 60 seconds passed (longer than the agents'
 # own sign-in refresh, SimpleTerm if/usage-ask#run, if/usage-ask-refresh#no-cut); then closed, and the agent
 # stopped 3 seconds later (ask_pipe). Returns @{ res: ok (got $w2), gone
-# (ended without it) or timeout; text: its output }.
+# (ended without it) or timeout; text: its output }. One loop reads, writes
+# and judges against one deadline, and the input is closed only after it: an
+# agent cannot end for want of input before its time is judged (the race of
+# SimpleTerm issue #811 in agent-hook.sh).
 function Invoke-AskPipe([string]$exe, [string]$argLine, [string[]]$inLines, [string[]]$moreLines, [string]$w1, [string]$w2) {
     $st = @{ res = 'gone'; text = ''; eof = $false; task = $null; so = $null; buf = (New-Object byte[] 65536) }
     $p = $null
@@ -3608,7 +3619,7 @@ function Invoke-AskPipe([string]$exe, [string]$argLine, [string[]]$inLines, [str
         $si = $p.StandardInput.BaseStream
         Write-AskLines $si $inLines
         $sent = ($w1.Length -eq 0)
-        $until = [DateTime]::UtcNow.AddSeconds(60)
+        $until = [DateTime]::UtcNow.AddSeconds((Get-AskWait))
         $st.res = 'timeout'
         while ($true) {
             Step-AskOut $st

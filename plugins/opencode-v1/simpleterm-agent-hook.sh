@@ -4113,33 +4113,36 @@ ask_seen() { # ere [ere-not]
 # if/usage-ask-refresh#no-cut); its output in
 # $AQ.out. Sets AQ_RES: ok (got $AQ_WAIT2), gone (ended without it) or
 # timeout.
+# One deadline (the clock, not a count of rounds: a round takes longer than
+# its second on a loaded machine) decides the timeout, and the watcher alone
+# judges it: the input stays open until the watcher is done ($AQ.done), so
+# the agent cannot end for want of input before its time is judged (a
+# timeout read as gone, then `failed`: SimpleTerm issue #811). The input's
+# own limit, 30 seconds later, is for a watcher that is gone.
 ask_pipe() { # command...
   : >"$AQ.out"
   rm -f "$AQ.done"
   ask_group_how
+  aq_end=$(($(date +%s) + $(ask_wait)))
   (
     ask_env
     {
       cat "$AQ.in"
       if [ -n "$AQ_WAIT1" ]; then
-        aw=0
-        while [ "$aw" -lt 60 ] && [ ! -f "$AQ.done" ]; do
+        while [ "$(date +%s)" -lt "$aq_end" ] && [ ! -f "$AQ.done" ]; do
           case $(head -c 1048576 "$AQ.out" 2>/dev/null) in *"$AQ_WAIT1"*) break ;; esac
           sleep 1
-          aw=$((aw + 1))
         done
         cat "$AQ.more" 2>/dev/null
       fi
-      aw=0
-      while [ "$aw" -lt 60 ] && [ ! -f "$AQ.done" ]; do sleep 1; aw=$((aw + 1)); done
+      while [ "$(date +%s)" -lt $((aq_end + 30)) ] && [ ! -f "$AQ.done" ]; do sleep 1; done
     } | ask_exec "$@" >"$AQ.out" 2>/dev/null &
     apid=$!
-    aw=0 res=timeout
-    while [ "$aw" -lt 60 ]; do
+    res=timeout
+    while [ "$(date +%s)" -lt "$aq_end" ]; do
       ask_seen "$AQ_WAIT2" "$AQ_NOT2" && { res=ok; break; }
       kill -0 "$apid" 2>/dev/null || { res=gone; break; }
       sleep 1
-      aw=$((aw + 1))
     done
     ask_seen "$AQ_WAIT2" "$AQ_NOT2" && res=ok
     printf '%s\n' "$res" >"$AQ.res"
@@ -4152,6 +4155,17 @@ ask_pipe() { # command...
     fi
   ) </dev/null >/dev/null 2>&1
   AQ_RES=$(cat "$AQ.res" 2>/dev/null)
+}
+
+# The seconds an ask waits for its answer: 60 (ask_pipe); tests only
+# (SIMPLETERM_HOOK_TEST=1) may set fewer in SIMPLETERM_HOOK_TEST_ASK_WAIT.
+ask_wait() {
+  if [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && is_uint "${SIMPLETERM_HOOK_TEST_ASK_WAIT:-}" &&
+    [ "$SIMPLETERM_HOOK_TEST_ASK_WAIT" -ge 1 ] && [ "$SIMPLETERM_HOOK_TEST_ASK_WAIT" -le 60 ]; then
+    printf '%s' "$SIMPLETERM_HOOK_TEST_ASK_WAIT"
+  else
+    printf 60
+  fi
 }
 
 # The first line of $AQ.out matching extended regular expression $1 and not

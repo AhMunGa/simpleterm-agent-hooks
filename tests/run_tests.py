@@ -4197,6 +4197,48 @@ def t_conf_vectors(s):
                     "got %r rc=%s %s" % (out, rc, err[-200:]))
 
 
+def t_usage_ask_deadline(s):
+    """An ask that gets no answer is a timeout, also when the hook's watching is slow (a loaded machine): the input
+    stays open until the watcher has judged the time, so the agent does not end for want of input first and get
+    read as gone (`failed`). SimpleTerm if/usage-ask#run; issue #811. The watcher is made slow by an awk that sleeps
+    2 seconds in the hook's look at the ask's output (sh); the PowerShell hook has one loop (no such race)."""
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})])
+        tctl("/_ctl/reset", {})
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown")}})
+        for f in ("asks", "ask.env", "reply", "reply2", "delay", "linger", "stubborn"):
+            (s.tmp / f).unlink() if (s.tmp / f).exists() else None
+        (s.tmp / "reply").write_text("")  # no answer; the stand-in ends when its input closes
+        run = s.home / ".simpleterm" / "run"
+        run.mkdir(parents=True, exist_ok=True)
+        (run / ("tun.%s.last" % LINK_T["id"][:8])).write_text("%d 200\n" % int(time.time()))
+        fake = s.bin / "claude"
+        if fake.is_symlink() or fake.exists():
+            fake.unlink()
+        fake.write_text(FAKE_ASKER)
+        fake.chmod(0o755)
+        write(run / "ver.claude", "%s\n2.1.316\n" % fake)
+        tr = write(s.tmp / "trd.jsonl", json.dumps({"type": "user", "version": "2.1.316", "message": {"role": "user", "content": "x"}}) + "\n")
+        env = {"SIMPLETERM": "1", "SIMPLETERM_HOOK_TEST": "1", "SIMPLETERM_HOOK_TEST_ASK_WAIT": "6"}
+        if s.kind == "sh":
+            slow = s.tmp / "slow-awk"
+            slow.mkdir(exist_ok=True)
+            write(slow / "awk", "#!/bin/sh\ncase \"$*\" in *'$0 ~ r && (x'*) sleep 2 ;; esac\nexec %s \"$@\"\n"
+                  % os.path.realpath(s.bin / "awk")).chmod(0o755)
+            env["PATH"] = "%s:%s" % (slow, s.bin)
+        s.run("claude", cc_event("sd1", "Stop", stop_hook_active=False, last_assistant_message="Done.", background_tasks=[],
+                                 session_crons=[], transcript_path=str(tr)), env)
+        usage = lambda: [json.loads(r["plain"]) for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and r["body"]["ev"] == "usage"]
+        u = wait_for(usage, 120, 0.5)
+        s.check("ask deadline: no answer, a slow watcher -> timeout, not failed",
+                len(u) == 1 and u[0].get("uq", {}).get("err") == "timeout", str([x.get("uq") for x in u]))
+        s.settle("the ask")
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+
 def t_v2_usage_ask_gate(s):
     """SimpleTerm if/usage-ask#conditions, hist/usage-ask#d21, hist/usage-ask#d22: every version is asked, by the version of the executable that the ask runs (a native
     install links it to versions/<v> and the ask runs that file; else the file's --version, cached, `unknown` if it
@@ -6686,7 +6728,7 @@ def copies_check():
 
 
 TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t_timeout, t_multi_link,
-         t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_screen_values, t_question_while_background, t_copilot_session_end, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_schedule_end, t_done_delay, t_background_events_and_badges, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
+         t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_screen_values, t_question_while_background, t_copilot_session_end, t_usage_ask_deadline, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_schedule_end, t_done_delay, t_background_events_and_badges, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_schedule, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js, t_opencode_schedule,
