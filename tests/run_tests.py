@@ -6923,11 +6923,11 @@ HEAVY = {"t_service_shells": threading.Semaphore(2), "t_v2_held": threading.Sema
 
 def leftovers():
     """What the run left running: this run's processes (ours(): the suites' groups and folders, and
-    this run's own group but for this process and its `ps`)."""
+    this run's own group, if it has one, but for this process and its `ps`)."""
     rows = observe(command=True)
     if rows is None:
         return ["(ps failed: cannot tell)"]
-    return ["%d %s" % (pid, r[4][:140]) for pid, r in sorted(ours(rows, groups={os.getpgrp()}).items())]
+    return ["%d %s" % (pid, r[4][:140]) for pid, r in sorted(ours(rows, groups=own_group()).items())]
 
 
 def run_suite(suite, only):
@@ -6957,13 +6957,22 @@ def run_suite(suite, only):
         suite.check("terminalSequence allowlist: %d hook outputs checked" % suite.seq_n, True)
 
 
+def own_group():
+    """This run's process group, {pgid}, when this process leads it (run_in_own_group); else empty: a
+    child whose setpgid failed is still in its parent's group, which may be the user's shell's or a
+    pipeline's, and that group is not this run's."""
+    g = os.getpgrp()
+    return {g} if g == os.getpid() else set()
+
+
 def end_ours():
-    """Ends every process of this run but this one (ours(): the suites' groups and folders, and this run's group):
-    TERM, then KILL to what is left a second later. The hooks a case starts lead sessions of their own
-    (Suite.popen), so a TERM to the run's group does not reach them."""
+    """Ends every process of this run but this one (ours(): the suites' groups and folders, and this run's group
+    if it has one, own_group): TERM, then KILL to what is left a second later. The hooks a case starts lead
+    sessions of their own (Suite.popen), so a TERM to the run's group does not reach them."""
+    groups = own_group()
     for sig in (signal.SIGTERM, signal.SIGKILL):
         rows = observe()
-        pids = ours(rows, groups={os.getpgrp()}) if rows is not None else {}
+        pids = ours(rows, groups=groups) if rows is not None else {}
         for p in pids:
             try:
                 os.kill(p, sig)
@@ -6971,7 +6980,7 @@ def end_ours():
                 pass
         if not pids or sig == signal.SIGKILL:
             break
-        wait_for(lambda: not ours(observe() or [], groups={os.getpgrp()}), 1, 0.1)
+        wait_for(lambda: not ours(observe() or [], groups=groups), 1, 0.1)
 
 
 def run_in_own_group(run):
