@@ -1116,6 +1116,95 @@ def t_background_screen_values(s):
             len(v) == 2 and v[1][0] == "bg_working" and v[1][1] == v[0][1] and len(v[0][1]) <= 80, str(v)[:200])
 
 
+def t_background_screen_clear(s):
+    """A pause whose screen value went out stays on the screen until an output writes bg_clear, however the pause
+    ended meanwhile, without an output (SimpleTerm if/terminal-signals-bg#plugin; review of plugin PR #15): the next
+    turn's first output writes it also after bg_done_after's late done, after the hook's path for a Stop whose last
+    message is a session title (it prints nothing; no evidence that Claude Code sends one, the path is there), in the
+    new session of /clear, /resume or /branch (a new session id in the same process: SessionEnd reason clear or
+    resume, then SessionStart source clear, resume or fork, Claude Code hooks reference; hist/agent-sessions#e7), and
+    for a pause older than the day the run files are kept."""
+    s.setup([(LINK_A, {})], conf={"bg_done_after": 2})
+    st = {"SIMPLETERM": "1"}
+    tr = write(s.tmp / "tc.jsonl", "\n".join(json.dumps({"type": t, "version": "2.1.316", "message": {"role": t, "content": "x"}})
+                                             for t in ("user", "assistant")) + "\n")
+    shell = {"id": "bc1", "type": "shell", "status": "running", "description": "Start the dev server", "command": "node worker.js"}
+    run = s.home / ".simpleterm" / "run"
+    clear = "\x1b]9;simpleterm:state=running\x07\x1b]9;simpleterm:state=bg_clear\x07"
+    running = "\x1b]9;simpleterm:state=running\x07"
+
+    def ev(sid, name, cwd="/w/proj", **kw):
+        return json.dumps(dict({"session_id": sid, "cwd": cwd, "hook_event_name": name, "transcript_path": str(tr)}, **kw))
+
+    def stop(sid, tasks=(shell,), last="x", cwd="/w/proj"):
+        return s.run("claude", ev(sid, "Stop", cwd, stop_hook_active=False, last_assistant_message=last,
+                                  background_tasks=list(tasks)), st)[1]
+
+    def prompt(sid, cwd="/w/proj"):
+        return seqs(s.run("claude", ev(sid, "UserPromptSubmit", cwd, prompt="x"), st)[1])
+
+    def paused(sid):
+        out = stop(sid)
+        s.check("clear paths: %s pauses with bg_working" % sid, "simpleterm:state=bg_working shell: Start the dev server" in seqs(out), repr(out))
+
+    # bg_done_after's late done (a shell alone may run for good): the pause file goes, the screen still shows it.
+    s.ctl("/_ctl/reset", {})
+    paused("bc-late")
+    s.check("clear paths: the late done comes", wait_for(lambda: ingests(s, "done"), 20), str(ingests(s))[:200])
+    s.settle("the late done's send")
+    s.check("clear paths: ... and the pause file is gone", not (run / "bc-late.bg").exists())
+    out = prompt("bc-late")
+    s.check("clear paths: after the late done the next turn says running, bg_clear", out == clear, repr(out))
+    out = prompt("bc-late")
+    s.check("clear paths: ... once", out == running, repr(out))
+    # The hook's path for a Stop whose last message is a session title prints nothing (no evidence that Claude Code
+    # sends such a Stop); the next output clears.
+    paused("bc-title")
+    _, out, _, _ = s.run("claude", ev("bc-title", "Stop", stop_hook_active=False, last_assistant_message='{"title":"Fix the build"}',
+                                      background_tasks=[]), st)
+    s.check("clear paths: a title Stop prints nothing", out == "", repr(out))
+    out = prompt("bc-title")
+    s.check("clear paths: after a title Stop the next turn says running, bg_clear", out == clear, repr(out))
+    # /clear and /resume: the new session's first turn clears the old one's pause.
+    for reason, source in (("clear", "clear"), ("resume", "resume"), ("resume", "fork")):
+        old, new = "bc-%s-%s-a" % (reason, source), "bc-%s-%s-b" % (reason, source)
+        paused(old)
+        s.run("claude", ev(old, "SessionEnd", reason=reason), st)
+        s.run("claude", ev(new, "SessionStart", source=source), st)
+        out = prompt(new)
+        s.check("clear paths: SessionEnd %s, SessionStart %s -> the new session's turn says running, bg_clear" % (reason, source),
+                out == clear, repr(out))
+    # Not handed over: a session that ends for good (another one starts later), another folder, an old hand-over.
+    paused("bc-exit-a")
+    s.run("claude", ev("bc-exit-a", "SessionEnd", reason="prompt_input_exit"), st)
+    s.run("claude", ev("bc-exit-b", "SessionStart", source="startup"), st)
+    out = prompt("bc-exit-b")
+    s.check("clear paths: a session that ends for good hands nothing to the next one", out == running, repr(out))
+    paused("bc-dir-a")
+    s.run("claude", ev("bc-dir-a", "SessionEnd", reason="clear"), st)
+    s.run("claude", ev("bc-dir-b", "SessionStart", cwd="/w/other", source="clear"), st)
+    out = prompt("bc-dir-b", cwd="/w/other")
+    s.check("clear paths: /clear in another folder takes nothing", out == running, repr(out))
+    old = time.time() - 300
+    for f in run.glob("bgclr.*"):
+        os.utime(f, (old, old))
+    s.run("claude", ev("bc-dir-c", "SessionStart", source="clear"), st)
+    out = prompt("bc-dir-c")
+    s.check("clear paths: a hand-over five minutes old is not taken", out == running, repr(out))
+    # The run files are kept a day; a pause on the screen is cleared however late its next turn comes.
+    for sid, days, want in (("bc-old2", 2, clear), ("bc-old31", 31, running)):
+        paused(sid)
+        t = time.time() - days * 86400
+        for f in run.glob(sid + ".*"):
+            os.utime(f, (t, t))
+        stop("bc-other-%d" % days, tasks=[])  # another session's turn end keeps house
+        s.settle("the other session's done")
+        out = prompt(sid)
+        s.check("clear paths: a pause %d days old -> %s" % (days, "running, bg_clear" if want == clear else "running only (gone after 30 days)"),
+                out == want, repr(out))
+    s.settle("the pauses' waits (bg_done_after, 2 s)")
+
+
 def t_codex_goal(s):
     """Codex `/goal`: while a goal is active Codex starts the next turn itself; each
     turn's Stop is not done (measured on Codex 0.165.0 with a local model stub)."""
@@ -6733,7 +6822,7 @@ def copies_check():
 
 
 TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t_timeout, t_multi_link,
-         t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_screen_values, t_question_while_background, t_copilot_session_end, t_usage_ask_deadline, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_schedule_end, t_done_delay, t_background_events_and_badges, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
+         t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_screen_values, t_background_screen_clear, t_question_while_background, t_copilot_session_end, t_usage_ask_deadline, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_schedule_end, t_done_delay, t_background_events_and_badges, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_schedule, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js, t_opencode_schedule,

@@ -11,9 +11,12 @@
   `background`, `waiting` or `running` went with it. The hook now writes no OSC 7501 there: where Claude Code
   speaks OSC 7501 itself (the same check as before) it writes, after the old value, the OSC 9 value `bg_working`
   (a pause, with the pause's summary), `bg_question` (a pause that asks, with the question) or `bg_clear` (in the
-  first output of the next turn while a pause is open: `UserPromptSubmit`, or a `Stop`, `StopFailure` or Esc
-  interrupt that comes first; a `Stop` that pauses again writes its own value instead). The message is the old
-  value's, cut the same way. An app that does not know the values drops them and keeps the old one. The sh and the
+  first output of the next turn while the screen shows a pause: `UserPromptSubmit`, or a `Stop`, `StopFailure` or
+  Esc interrupt that comes first; a `Stop` that pauses again writes its own value instead). A pause stays on the
+  screen until an output says `bg_clear`: the late `done` after `bg_done_after`, a turn whose hook writes nothing
+  and the run files' one-day clean-up leave it for the next turn (a mark, `<session>.bgclr`, kept 30 days), and
+  `/clear`, `/resume` or `/branch` hand it to the new session of the same folder. The message is the old value's,
+  cut the same way. An app that does not know the values drops them and keeps the old one. The sh and the
   PowerShell hook.
 - **Copilot CLI session end** (SimpleTerm `if/hook-events#session-end`, `hist/hook-events#d10`, `#e27`): on
   `sessionEnd` the hook writes `ESC ] 7501 ; state=clear BEL` to `/dev/tty`, before anything else and once, in a

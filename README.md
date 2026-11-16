@@ -306,7 +306,10 @@ usual. The badge says `background`. Claude Code 2.1.295+ also reports its own tu
 on only OSC 0, 1, 2, 9, 99, 777 and BEL in `terminalSequence`, and drops the whole field for one
 sequence outside them). So the hook writes the pause as one more OSC 9 value after the badge's:
 `simpleterm:state=bg_working <what runs>`, and `simpleterm:state=bg_clear` in the first output of
-the next turn; SimpleTerm reads them as a record of the terminal (`simpleterm-bg`), and an older
+the next turn, also when the pause ended without an output meanwhile (the late `done` below) and
+in the new session of `/clear`, `/resume` or `/branch` in the same folder (a mark,
+`~/.simpleterm/run/<session>.bgclr`, says the screen still shows the pause; it is kept 30 days);
+SimpleTerm reads them as a record of the terminal (`simpleterm-bg`), and an older
 app drops them and keeps the badge's value. It writes them only when the transcript names 2.1.295
 or later, outside tmux and screen, and without `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` (0.3.1 to 0.6.0
 put an OSC 7501 record there instead, which Claude Code dropped together with the badge's value).

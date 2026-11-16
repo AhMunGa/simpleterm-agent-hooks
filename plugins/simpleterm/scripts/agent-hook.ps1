@@ -2481,7 +2481,9 @@ function Write-SessTurn([string]$state, [string]$prompt) {
 # $Script:UsageSeq is the JSON-escaped usage OSC to append, if any;
 # $Script:BgVal the background pause's screen value to write after the state
 # (bg_working, bg_question or bg_clear), with the state's message but for
-# bg_clear (SimpleTerm if/terminal-signals-bg#plugin).
+# bg_clear (SimpleTerm if/terminal-signals-bg#plugin). A written bg_clear takes
+# the screen's mark away ($Sid.bgclr, Invoke-BgPause): the pause is off the
+# screen only once an output said so.
 # $first is a value written just before the state, in the same output: an app
 # that does not know the state drops it and is left with that one
 # (SimpleTerm if/terminal-signals#structured).
@@ -2496,7 +2498,11 @@ function Write-State([string]$state, [string]$message, [string]$first = '') {
     $p = ''
     if ($first) { $p = '\u001b]9;simpleterm:state=' + $first + '\u0007' }
     $b = ''
-    if ($Script:BgVal -ceq 'bg_clear') { $b = '\u001b]9;simpleterm:state=bg_clear\u0007' }
+    if ($Script:BgVal -ceq 'bg_clear') {
+        $b = '\u001b]9;simpleterm:state=bg_clear\u0007'
+        Remove-FileQ (Join-Path $RunDir ($Script:Sid + '.bgclr'))
+        $Script:BgVal = ''
+    }
     elseif ($Script:BgVal) { $b = '\u001b]9;simpleterm:state=' + $Script:BgVal + $m + '\u0007' }
     Write-Out ('{"terminalSequence":"' + $p + '\u001b]9;simpleterm:state=' + $state + $m + '\u0007' + $b + $Script:UsageSeq + '"}')
 }
@@ -4878,12 +4884,11 @@ function Add-Note([string]$kind, [string]$fp) {
             [IO.File]::WriteAllText($path, ([string](Now-Epoch) + " turn -`n"), $Utf8)
             [IO.File]::Delete((Join-Path $RunDir ($Sid + '.goal')))
             [IO.File]::Delete((Join-Path $RunDir ($Sid + '.done')))
-            $bg = Join-Path $RunDir ($Sid + '.bg')
-            if ([IO.File]::Exists($bg)) {
-                $lines = [IO.File]::ReadAllLines($bg, $Latin1)
-                if ($lines.Count -gt 1 -and $lines[1] -ceq 'screen') { $Script:BgVal = 'bg_clear' }
-                [IO.File]::Delete($bg)
-            }
+            [IO.File]::Delete((Join-Path $RunDir ($Sid + '.bg')))
+            # A pause still on the screen ($Sid.bgclr: its value went out and no
+            # bg_clear since, however the pause ended meanwhile): the turn's output
+            # says bg_clear; the mark stays until an output does (Write-State).
+            if ([IO.File]::Exists((Join-Path $RunDir ($Sid + '.bgclr')))) { $Script:BgVal = 'bg_clear' }
         }
         else { [IO.File]::AppendAllText($path, ([string](Now-Epoch) + ' tool ' + $fp + "`n"), $Utf8) }
     } catch { }
@@ -4898,6 +4903,30 @@ function Add-Note([string]$kind, [string]$fp) {
 # screen value bg_working or bg_question after the state (as agent-hook.sh
 # explains: Claude Code 2.1.295+ reports `done` for its own turn through
 # OSC 7501 and drops a hook's OSC 7501; SimpleTerm if/terminal-signals-bg).
+# Claude Code's /clear, /resume and /branch go on in the same process, on the
+# same screen, under a new session id: SessionEnd with reason clear or resume,
+# then SessionStart with source clear, resume or fork (Claude Code hooks
+# reference; the new id: SimpleTerm hist/agent-sessions#e7). A pause still on
+# the screen ($Sid.bgclr) goes to the new session, whose first turn then says
+# bg_clear (Add-Note). The hand-over is named by the folder and taken within
+# two minutes; a session that ends for good hands nothing on.
+function Move-BgClear([string]$dir) {
+    if ($Script:Agent -cne 'claude') { return }
+    $hf = Join-Path $RunDir ('bgclr.' + (Get-Sha256Hex $Script:Cwd).Substring(0, 16))
+    $mark = Join-Path $RunDir ($Script:Sid + '.bgclr')
+    try {
+        if ($dir -ceq 'out') {
+            if (@('clear', 'resume') -cnotcontains $Script:Reason -or -not [IO.File]::Exists($mark)) { return }
+            if (Write-FileB $hf '') { Remove-FileQ $mark }
+        }
+        else {
+            if (@('clear', 'resume', 'fork') -cnotcontains $Script:Src -or -not [IO.File]::Exists($hf)) { return }
+            if (([DateTime]::UtcNow - [IO.File]::GetLastWriteTimeUtc($hf)).TotalMinutes -lt 2) { [void](Write-FileB $mark '') }
+            Remove-FileQ $hf
+        }
+    } catch { }
+}
+
 function Test-TurnDone { return [IO.File]::Exists((Join-Path $RunDir ($Sid + '.done'))) }
 function Test-BgPaused { return [IO.File]::Exists((Join-Path $RunDir ($Sid + '.bg'))) }
 
@@ -5762,11 +5791,13 @@ function Invoke-BgPause([bool]$ask) {
     $bgFile = Join-Path $RunDir ($Script:Sid + '.bg')
     # Line 1: the badge's message (the question when asking), 2: `screen` when
     # the screen value went out, 3: the pause's token, 4: `ask` while the badge
-    # says waiting.
+    # says waiting. The screen's mark ($Sid.bgclr) outlives this file: it goes
+    # only with an output that says bg_clear (Add-Note, Write-State).
     $bm = $Script:BgM
     $askMark = ''
     if ($ask) { $bm = Limit-Json $Script:Last 80 320; $askMark = 'ask' }
     [void](Write-FileB $bgFile ($bm + "`n" + $flag + "`n" + $Script:Rid + "`n" + $askMark + "`n"))
+    if ($flag) { [void](Write-FileB (Join-Path $RunDir ($Script:Sid + '.bgclr')) '') }
     $pend = 'background'
     if ($Script:BgN -eq 0 -and $Script:CronN -gt 0) { $pend = 'scheduled' }
     if ($ask) {
@@ -5787,7 +5818,9 @@ function Invoke-BgPause([bool]$ask) {
 # Only work that may run for good is left (a dev server, a monitor, an idle
 # teammate): it may never wake the agent, and then nothing else would come.
 # After bg_done_after seconds (default 600) of the same pause, `done` goes once,
-# saying what still runs. A new turn or another pause ends the wait.
+# saying what still runs. A new turn or another pause ends the wait. The pause
+# file goes with it (Test-LaterGate); the screen's mark ($Sid.bgclr) stays, so
+# the next turn still says bg_clear (the wait has no output to write it in).
 function Invoke-BgLater([string]$token, [string]$what) {
     if ($Script:LinkFiles.Count -eq 0) { return }
     $w = Get-ConfInt 'bg_done_after' 600
@@ -5819,9 +5852,14 @@ function Invoke-TurnEnd {
         $now = [DateTime]::UtcNow
         foreach ($f in [IO.Directory]::GetFiles($RunDir)) {
             # (Kept: the hold after an ask got auth or not-subscriber, until the
-            # credentials change, the stopped versions and the count of failed asks.)
-            if ([IO.Path]::GetFileName($f) -cmatch '\Aask\..*\.(auth|off|fail)\z') { continue }
-            if (($now - [IO.File]::GetLastWriteTimeUtc($f)).TotalDays -ge 1) { Remove-FileQ $f }
+            # credentials change, the stopped versions and the count of failed asks;
+            # and 30 days, the mark of a pause still on the screen, which the
+            # session's next turn clears however late it comes: Add-Note.)
+            $name = [IO.Path]::GetFileName($f)
+            if ($name -cmatch '\Aask\..*\.(auth|off|fail)\z') { continue }
+            $keep = 1
+            if ($name.EndsWith('.bgclr', $Ord)) { $keep = 30 }
+            if (($now - [IO.File]::GetLastWriteTimeUtc($f)).TotalDays -ge $keep) { Remove-FileQ $f }
         }
     } catch { }
 }
@@ -6162,6 +6200,7 @@ function Invoke-Event {
         Invoke-UsageReport
         Write-UsageOnly
         if ($Script:HookEvent -ceq 'SessionStart') {
+            Move-BgClear 'in'
             Update-Cli
             Start-Sess
             if ((Test-SessOk) -and -not [IO.File]::Exists($Script:Sess + '.json')) { Write-SessTurn 'idle' '' }
@@ -6172,6 +6211,7 @@ function Invoke-Event {
         $since = [DateTime]::UtcNow
         Remove-FileQ (Join-Path $RunDir ($Script:Sid + '.schedtasks'))
         Remove-FileQ (Join-Path $RunDir ($Script:Sid + '.cronids'))
+        Move-BgClear 'out'
         # The record first: Codex gives this hook 3 seconds at most and then
         # ends it (0.165.0, measured).
         Stop-Sess $since
@@ -6192,6 +6232,9 @@ function Invoke-Event {
     }
     if ($ev -ceq 'claude:Stop' -or $ev -ceq 'codex:Stop') {
         Add-Note 'turn' ''
+        # A session title, not a turn's end (Codex's title generation; for Claude
+        # Code no evidence that it comes): nothing is written, and a pause still
+        # on the screen keeps its mark for the next output (Add-Note).
         if ($Script:Last.StartsWith('{\"title\":', $Ord)) { return }
         $gf = ''
         if ($Script:Agent -ceq 'codex') { $gf = Get-InputFile $Script:TPath }

@@ -1878,7 +1878,9 @@ sess_keep() {
 # USAGE_SEQ is the JSON-escaped usage OSC to append, if any (usage_report);
 # BG_VAL the background pause's screen value to write after the state
 # (bg_working, bg_question or bg_clear; bg_pause, note), with the state's
-# message but for bg_clear (SimpleTerm if/terminal-signals-bg#plugin).
+# message but for bg_clear (SimpleTerm if/terminal-signals-bg#plugin). A
+# written bg_clear takes the screen's mark away ($SID.bgclr, bg_pause): the
+# pause is off the screen only once an output said so.
 # [first] is a value written just before the state, in the same output: an app
 # that does not know the state drops it and is left with that one
 # (SimpleTerm if/terminal-signals#structured).
@@ -1895,7 +1897,11 @@ print_state() { # running|waiting|done|done_scheduled|background|idle|error [mes
   [ -n "${3:-}" ] && p='\u001b]9;simpleterm:state='$3'\u0007'
   psb=''
   case $BG_VAL in
-    bg_clear) psb='\u001b]9;simpleterm:state=bg_clear\u0007' ;;
+    bg_clear)
+      psb='\u001b]9;simpleterm:state=bg_clear\u0007'
+      rm -f "$RUN_DIR/$SID.bgclr" 2>/dev/null
+      BG_VAL=''
+      ;;
     ?*) psb='\u001b]9;simpleterm:state='$BG_VAL$m'\u0007' ;;
   esac
   printf '{"terminalSequence":"%s\\u001b]9;simpleterm:state=%s%s\\u0007%s%s"}\n' "$p" "$1" "$m" "$psb" "$USAGE_SEQ"
@@ -5259,17 +5265,17 @@ esac
 
 # Lets a waiting permission hook see that the agent moved on. A new turn
 # starts the file over, so it holds at most one turn of tool calls, and ends
-# a background pause (bg_pause): the turn's output says bg_clear after its
-# state when the pause wrote its screen value (a pause the same output opens
-# replaces it with its own).
+# a background pause (bg_pause). While the screen still shows a pause
+# ($SID.bgclr: its value went out and no bg_clear since, however the pause
+# ended meanwhile: bg_later's done, a turn whose hook wrote nothing) the
+# turn's output says bg_clear after its state (a pause the same output opens
+# replaces it with its own); the mark stays until an output does
+# (print_state).
 note() { # turn | tool fingerprint
   if [ "$1" = turn ]; then
     printf '%s turn -\n' "$(date +%s)" >"$RUN_DIR/$SID.res" 2>/dev/null
-    rm -f "$RUN_DIR/$SID.goal" "$RUN_DIR/$SID.done" 2>/dev/null
-    if [ -f "$RUN_DIR/$SID.bg" ]; then
-      [ "$(sed -n 2p "$RUN_DIR/$SID.bg" 2>/dev/null)" = screen ] && BG_VAL=bg_clear
-      rm -f "$RUN_DIR/$SID.bg" 2>/dev/null
-    fi
+    rm -f "$RUN_DIR/$SID.goal" "$RUN_DIR/$SID.done" "$RUN_DIR/$SID.bg" 2>/dev/null
+    [ -f "$RUN_DIR/$SID.bgclr" ] && BG_VAL=bg_clear
   else
     printf '%s tool %s\n' "$(date +%s)" "$2" >>"$RUN_DIR/$SID.res" 2>/dev/null
   fi
@@ -5341,9 +5347,11 @@ bg_pause() {
   fi
   # Line 1: the badge's message (the question when asking), 2: `screen` when
   # the screen value went out, 3: the pause's token, 4: `ask` while the badge
-  # says `waiting`.
+  # says `waiting`. The screen's mark ($SID.bgclr) outlives this file: it goes
+  # only with an output that says bg_clear (note, print_state).
   if [ "${1:-}" = ask ]; then bm=$(json_trim "$LAST" 80 320); else bm=$BG_M; fi
   printf '%s\n%s\n%s\n%s\n' "$bm" "$flag" "$RID" "${1:-}" >"$RUN_DIR/$SID.bg" 2>/dev/null
+  [ -n "$flag" ] && printf '' 2>/dev/null >"$RUN_DIR/$SID.bgclr"
   pend=background
   [ "$BG_N" -eq 0 ] && [ "$CRON_N" -gt 0 ] && pend=scheduled
   if [ "${1:-}" = ask ]; then
@@ -5367,7 +5375,9 @@ bg_pause() {
 # and then nothing else would come. After bg_done_after seconds (default
 # 600) of the same pause, `done` goes once, saying what still runs. A new
 # turn or another pause ends the wait. The event is made then (fresh rid and
-# time: a link refuses events more than 5 minutes old).
+# time: a link refuses events more than 5 minutes old). The pause file goes
+# with it; the screen's mark ($SID.bgclr) stays, so the next turn still says
+# bg_clear (this wait has no output to write it in).
 bg_later() { # token what
   [ -n "$LINKS" ] || return 0
   w=$(conf_int bg_done_after 600)
@@ -5485,8 +5495,34 @@ print_running() {
 turn_end() {
   ensure_cli
   # (Kept: the hold after an ask got auth or not-subscriber, until the
-  # credentials change, the stopped versions and the count of failed asks.)
-  find "$RUN_DIR" -type f -mtime +0 ! -name 'ask.*.auth' ! -name 'ask.*.off' ! -name 'ask.*.fail' -exec rm -f {} + 2>/dev/null
+  # credentials change, the stopped versions and the count of failed asks;
+  # and 30 days, the mark of a pause still on the screen, which the session's
+  # next turn clears however late it comes: note.)
+  find "$RUN_DIR" -type f -mtime +0 ! -name 'ask.*.auth' ! -name 'ask.*.off' ! -name 'ask.*.fail' ! -name '*.bgclr' -exec rm -f {} + 2>/dev/null
+  find "$RUN_DIR" -type f -name '*.bgclr' -mtime +29 -exec rm -f {} + 2>/dev/null
+}
+
+# Claude Code's /clear, /resume and /branch go on in the same process, on
+# the same screen, under a new session id: SessionEnd with reason clear or
+# resume, then SessionStart with source clear, resume or fork (Claude Code
+# hooks reference; the new id: SimpleTerm hist/agent-sessions#e7). A pause
+# still on the screen ($SID.bgclr) goes to the new session, whose first turn
+# then says bg_clear (note). The hand-over is named by the folder and taken
+# within two minutes; a session that ends for good hands nothing on.
+bg_handoff() { # out | in
+  [ "$AGENT" = claude ] || return 0
+  hf=$RUN_DIR/bgclr.$(printf '%s' "$CWD" | cksum | awk '{ print $1 }')
+  if [ "$1" = out ]; then
+    case $REASON in clear | resume) ;; *) return 0 ;; esac
+    [ -f "$RUN_DIR/$SID.bgclr" ] || return 0
+    printf '' 2>/dev/null >"$hf" && rm -f "$RUN_DIR/$SID.bgclr" 2>/dev/null
+  else
+    case $SRC in clear | resume | fork) ;; *) return 0 ;; esac
+    [ -f "$hf" ] || return 0
+    [ -n "$(find "$hf" -mmin -2 2>/dev/null)" ] && printf '' 2>/dev/null >"$RUN_DIR/$SID.bgclr"
+    rm -f "$hf" 2>/dev/null
+  fi
+  return 0
 }
 
 # --- who started a turn, and what ran before it ------------------------------
@@ -6226,6 +6262,7 @@ case $AGENT:$EVENT in
     usage_report
     print_usage
     if [ "$EVENT" = SessionStart ]; then
+      bg_handoff in
       ensure_cli
       sess_start
       sess_ok && [ ! -f "$SESS.json" ] && sess_turn idle
@@ -6242,6 +6279,7 @@ case $AGENT:$EVENT in
       send_bg error
     fi
     rm -f "$RUN_DIR/$SID.cerr" "$RUN_DIR/$SID.schedtasks" "$RUN_DIR/$SID.cronids" 2>/dev/null
+    bg_handoff out
     printf '' 2>/dev/null >"$RUN_DIR/t0.$$"
     # The record first: Codex gives this hook 3 seconds at most and then
     # ends its process group (0.165.0, measured).
@@ -6259,6 +6297,9 @@ case $AGENT:$EVENT in
     ;;
   claude:Stop | codex:Stop)
     note turn
+    # A session title, not a turn's end (Codex's title generation; for Claude
+    # Code no evidence that it comes): nothing is written, and a pause still
+    # on the screen keeps its mark for the next output (note).
     case $LAST in '{\"title\":'*) finish ;; esac
     gf=''
     [ "$AGENT" = codex ] && gf=$(input_file "$TPATH")
