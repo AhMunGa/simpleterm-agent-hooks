@@ -1,6 +1,6 @@
 // SimpleTerm agent hooks for OpenCode 2.x: permission approvals from a
 // SimpleTerm device, and done / error alerts. Install with
-//   opencode plugin add 'github:AhMunGa/simpleterm-agent-hooks#main::path:plugins/opencode'
+//   opencode plugin add 'github:AhMunGa/simpleterm-agent-hooks#release::path:plugins/opencode'
 // or copy this directory to ~/.config/opencode/plugins/simpleterm/.
 //
 // The work is done by agent-hook.sh next to this file (the same script as the
