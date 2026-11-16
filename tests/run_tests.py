@@ -3218,22 +3218,38 @@ def t_grok(s):
         s.run("claude", rep, renv)
         s.check("grok: StopCancelled (%s) closes the turn; the next report is a turn of its own" % reason,
                 m1[3:4] == ["open"] and m2[3:4] in ([], [""]) and gmark()[0] == "task", repr((m1, m2, gmark())))
-    # A cancelled turn's report can come after the next turn's UserPromptSubmit, and some turns report none (docs of
-    # 1.0.77, SimpleTerm hist/hook-events#e24): a report that finds a turn of another promptId open starts a turn of
-    # its own, and the late StopCancelled leaves that turn alone (hist/turn-state#d18, AhMunGa/simple-term#685).
+    # A report while a Grok turn is open joins that turn (SimpleTerm hist/turn-state#d16): Grok's report ids
+    # (task-completed-, subagent-completed-) are never the running turn's id, so they are not compared with it
+    # (hist/turn-state#d18) ...
     ups, uenv = grok_input("UserPromptSubmit", promptId="p95", prompt="Run the long check", timestamp="2026-10-29T10:13:00.000Z")
     s.run("claude", ups, uenv)
     rep, renv = grok_input("UserPromptSubmit", promptId="task-completed-gbash95", prompt="npm test finished",
                            timestamp="2026-10-29T10:13:20.000Z")
     s.run("claude", rep, renv)
-    m3 = gmark()
+    s.check("grok: a report while a turn is open joins it (the mark keeps who started it and its promptId)",
+            gmark()[0] == "user" and gmark()[3:5] == ["open", "p95"], repr(gmark()))
+    # ... and a scheduled run keeps its schedule (line 3) when a command it started reports inside it.
+    stop, stenv = grok_input("Stop", reason="end_turn", promptId="p95", lastAssistantMessage="Checked.",
+                             backgroundTasks=[], sessionCrons=[], timestamp="2026-10-29T10:13:25.000Z")
+    s.run("claude", stop, stenv)
+    srun, senv = grok_input("UserPromptSubmit", promptId="subagent-completed-gsch96",
+                            prompt="<system-reminder>\nscheduler_delete(\"cron96\")\n</system-reminder>",
+                            timestamp="2026-10-29T10:13:30.000Z")
+    s.run("claude", srun, senv)
+    rep, renv = grok_input("UserPromptSubmit", promptId="task-completed-gbash96", prompt="npm test finished",
+                           timestamp="2026-10-29T10:13:40.000Z")
+    s.run("claude", rep, renv)
+    s.check("grok: a report inside a scheduled run keeps that run's mark and schedule",
+            gmark()[0] == "task" and gmark()[2:5] == ["cron96", "open", "subagent-completed-gsch96"], repr(gmark()))
+    # The promptId still tells a cancelled turn's StopCancelled that comes after the next turn started (docs of
+    # 1.0.77, hist/hook-events#e24): it leaves the running turn open (turn_other, AhMunGa/simple-term#685).
+    ups, uenv = grok_input("UserPromptSubmit", promptId="p97", prompt="Run it again", timestamp="2026-10-29T10:14:00.000Z")
+    s.run("claude", ups, uenv)
     cancel, cenv = grok_input("StopCancelled", promptId="p95", reason="user_interrupt", cancelledBy="user",
-                              cancelTrigger="ctrl_c", timestamp="2026-10-29T10:13:21.000Z")
+                              cancelTrigger="ctrl_c", timestamp="2026-10-29T10:14:01.000Z")
     s.run("claude", cancel, cenv)
-    s.check("grok: a report with another promptId while a turn is open starts a turn of its own (task)",
-            m3[0] == "task" and m3[3:5] == ["open", "task-completed-gbash95"], repr(m3))
-    s.check("grok: ... and the late StopCancelled of the turn before leaves it open",
-            gmark()[3:5] == ["open", "task-completed-gbash95"], repr(gmark()))
+    s.check("grok: a late StopCancelled of the turn before leaves the running turn open",
+            gmark()[3:5] == ["open", "p97"], repr(gmark()))
     s.ctl("/_ctl/reset", {})
     only_camel = json.dumps({"hookEventName": "stop", "sessionId": "gk-2", "cwd": "/w/g", "timestamp": "t9", "reason": "end_turn",
                              "lastAssistantMessage": "camel only"})
@@ -5380,12 +5396,14 @@ def t_opencode_schedule(s):
             return [{"id": sch, "sessionID": sid, "name": "twice", "when": {"type": "every", "every": "15 seconds"},
                      "action": {"type": "prompt", "prompt": "say tick"}, "status": status, "remainingRuns": left}]
 
-        def run(steps, sched):
+        def run(steps, sched, instances=None):
             s.ctl("/_ctl/reset", {})
             tctl("/_ctl/reset", {})
             tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T)}})
-            return node_plugin(s, "v2", {"directory": d, "sessions": {sid: {"title": "Ticks"}}, "schedules": {sid: sched},
-                                         "steps": steps, "wait": 3000})
+            sc = {"directory": d, "sessions": {sid: {"title": "Ticks"}}, "schedules": {sid: sched}, "steps": steps, "wait": 3000}
+            if instances:
+                sc["instances"] = instances
+            return node_plugin(s, "v2", sc)
 
         def tunnel(ev_):
             return [r for r in ingests(s, ctl=tctl) if (r.get("body") or {}).get("ev") == ev_]
@@ -5436,6 +5454,22 @@ def t_opencode_schedule(s):
             info("active", 1))
         s.check("opencode schedule: a person's turn without its delivered event -> done (by user)",
                 by(wait_for(lambda: ingests(s, "done"), 20)) == ["user"], str(ingests(s))[:300])
+        # Two project directories, two plugin instances, each sees every event (the other one first): the execution
+        # and inbox bookkeeping runs once per event, so the judgement is the same as with one instance.
+        two = [str(s.tmp / "other-project"), d]
+        run(scheduled(2)[:2] + [ev("session.execution.succeeded", sessionID=sid)], info("done", 0), two)
+        dn = wait_for(lambda: tunnel("done"), 10)
+        time.sleep(1.5)
+        s.check("opencode schedule, two instances: the last run without its delivered event -> done by schedule, tunnel only",
+                by(dn) == ["schedule"] and not ingests(s, "done"), str(dn)[:300] + str(ingests(s))[:300])
+        steps = turn(human("msg_1e29c1412001cccccccccccccccc"))
+        steps += [ev("session.inbox.enqueued", sessionID=sid, inboxID="msg_%s_1" % sch,
+                     item={"type": "user", "payload": {"text": "say tick", "metadata": {"schedule": {"id": sch, "run": 1}}},
+                           "delivery": "steer"}),
+                  ev("session.inbox.delivered", sessionID=sid, inboxID="msg_%s_1" % sch), succeeded]
+        run(steps, info("active", 1), two)
+        s.check("opencode schedule, two instances: a schedule's prompt inside a person's turn -> the person's done",
+                by(wait_for(lambda: ingests(s, "done"), 20)) == ["user"], str(ingests(s))[:300] + str(tunnel("state"))[:200])
         # A schedule's prompt that comes during a person's turn joins it: the person's done.
         steps = turn(human("msg_1e29c1412001aaaaaaaaaaaaaaaa"))
         steps += [ev("session.inbox.enqueued", sessionID=sid, inboxID="msg_%s_1" % sch,

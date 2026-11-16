@@ -220,9 +220,19 @@ function remember(set, value, max) {
   if (set.size > max) set.delete(set.values().next().value);
 }
 
+// Every instance calls track() with every event, before the directory check
+// and firstSeen, but the state it keeps is shared by all of them and some of
+// it is not idempotent (an execution starts afresh, an inbox item is taken
+// once): it runs once per event id, in whichever instance sees it first.
+const tracked = (globalThis.__simpletermTracked ??= new Set());
+
 // Session state from execution and status events (the OpenCode TUI counts a
 // session as running from session.execution.started until it ends).
 function track(event) {
+  if (event.id) {
+    if (tracked.has(event.id)) return;
+    remember(tracked, event.id, 500);
+  }
   const d = event.data || {};
   if (event.type === "shell.created") {
     const info = d.info || {};

@@ -5475,14 +5475,17 @@ sched_tasks() {
 # Build's promptId), empty when the hook input has none.
 # A report prompt (PROMPT_REPORT: Claude Code's <task-notification>, Grok
 # Build's task-completed- and subagent-completed-) that comes while the turn
-# is open does not start a turn when it belongs to that turn: Claude Code
-# hands work that ended inside a running turn to that turn this way, between
-# its tool calls, with the turn's own prompt_id (measured on 2.1.325). The mark
-# stays. A report with another id starts a turn: the open turn ended without a
-# hook (Claude Code runs none when Esc stops a turn, measured on 2.1.319 and
-# 2.1.325; Grok may report a cancelled turn late or not at all). Without an id
-# on either side the mark stays (SimpleTerm hist/turn-state#d16, #d18,
-# if/hook-events-scheduled#report-turn).
+# is open does not start a turn (SimpleTerm hist/turn-state#d16): the mark
+# stays. Claude Code only: a report belongs to the open turn when it carries
+# that turn's prompt_id, as Claude Code hands work that ended inside a running
+# turn to it between its tool calls (measured on 2.1.325); a report with
+# another id starts a turn, because the open turn ended without a hook (Esc
+# runs none, measured on 2.1.319 and 2.1.325), and without an id on either
+# side the mark stays (hist/turn-state#d18,
+# if/hook-events-scheduled#report-turn). Grok's report ids are never the id of
+# the turn that runs, and how Grok hands a report to a running turn is not
+# measured, so its reports keep the open mark; Grok's promptId only tells a
+# late StopCancelled (turn_other).
 turn_mark() {
   tm_id=''
   is_id "$TID" && tm_id=$TID
@@ -5490,6 +5493,7 @@ turn_mark() {
     claude | grok)
       if [ "$PROMPT_REPORT" = 1 ] && [ -f "$RUN_DIR/$SID.turn" ] &&
         [ "$(sed -n 4p "$RUN_DIR/$SID.turn" 2>/dev/null)" = open ]; then
+        [ "$AGENT" = claude ] || return 0
         tm_open=$(sed -n 5p "$RUN_DIR/$SID.turn" 2>/dev/null)
         if [ -z "$tm_id" ] || [ -z "$tm_open" ] || [ "$tm_id" = "$tm_open" ]; then
           return 0

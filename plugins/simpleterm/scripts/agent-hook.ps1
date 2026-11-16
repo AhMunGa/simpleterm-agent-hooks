@@ -5437,16 +5437,18 @@ function Update-SchedTasks {
 # prompt that started it (Tid: Claude Code's prompt_id, Grok Build's promptId).
 # A report prompt (Claude Code's <task-notification>, Grok Build's
 # task-completed- and subagent-completed-) that comes while the turn is open
-# does not start a turn when it belongs to that turn (the same id, or no id on
-# either side): the mark stays. One with another id starts a turn: the open
-# turn ended without a hook (SimpleTerm hist/turn-state#d16, #d18). The same as
-# turn_mark in agent-hook.sh.
+# does not start a turn: the mark stays (SimpleTerm hist/turn-state#d16).
+# Claude Code only: one with another id (neither side empty) starts a turn,
+# because the open turn ended without a hook (#d18). Grok's reports keep the
+# open mark; its promptId only tells a late StopCancelled (Test-TurnOther).
+# The same as turn_mark in agent-hook.sh.
 function Write-TurnMark {
     $turnFile = Join-Path $RunDir ($Script:Sid + '.turn')
     $id = ''
     if (Test-Id $Script:Tid) { $id = $Script:Tid }
     if ($Script:PromptReport -and ($Script:Agent -ceq 'claude' -or $Script:Agent -ceq 'grok') -and
         (Read-LineB $turnFile 3) -ceq 'open') {
+        if ($Script:Agent -cne 'claude') { return }
         $open = Read-LineB $turnFile 4
         if ($id -ceq '' -or $open -ceq '' -or $id -ceq $open) { return }
     }
