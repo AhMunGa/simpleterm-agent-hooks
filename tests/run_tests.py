@@ -252,6 +252,11 @@ class Suite:
         self.kind = kind
         self.cases = cases  # full: every case; compat: COMPAT only
         self.results = []
+        # Every terminalSequence a hook printed (screen_check): how many, and what Claude Code would refuse.
+        self.case = None
+        self.seq_n = 0
+        self.seq_bad = {}
+        self.seq_lock = threading.Lock()
         self.tmp = Path(tempfile.mkdtemp(prefix="st-hooktest-"))
         self.home = self.tmp / "home"
         self.bin = self.tmp / "bin"
@@ -374,10 +379,38 @@ class Suite:
     def popen(self, argv, **kw):
         """subprocess.Popen in a session (and process group) of its own, kept for reap(): what a
         hook leaves running in the background (a send, a done that waits up to 600 s, an ask) is
-        in that group."""
+        in that group. What it prints goes through screen_check() when read with communicate()."""
         p = subprocess.Popen(argv, start_new_session=True, **kw)
         track(p.pid, self)
+        talk = p.communicate
+
+        def communicate(*a, **k):
+            out, err = talk(*a, **k)
+            self.screen_check(out)
+            return out, err
+        p.communicate = communicate
         return p
+
+    def screen_check(self, out):
+        """Every terminalSequence in a hook's output against what Claude Code passes on (allowlist_problems);
+        what it would refuse becomes a failed check of the case (run_suite)."""
+        if not out:
+            return
+        text = out.decode("utf-8", "replace") if isinstance(out, bytes) else out
+        for seq in term_seqs(text):
+            bad = allowlist_problems(seq) if isinstance(seq, str) else ["terminalSequence that is not a JSON string on one line"]
+            with self.seq_lock:
+                self.seq_n += 1
+                for why in bad:
+                    self.seq_bad.setdefault((self.case, why), []).append(seq)
+
+    def screen_report(self):
+        """The case's refused terminalSequences as failed checks, one per case and reason."""
+        with self.seq_lock:
+            bad, self.seq_bad = self.seq_bad, {}
+        for (case, why), seqs_ in sorted(bad.items(), key=lambda kv: (str(kv[0][0]), kv[0][1])):
+            self.check("terminalSequence allowlist (%s): %s" % (case, why), False,
+                       "%d output(s); first %r" % (len(seqs_), seqs_[0]))
 
     def proc_run(self, argv, input=None, timeout=60, **kw):
         """subprocess.run with capture_output, by popen()."""
@@ -458,6 +491,70 @@ class Suite:
 
     def check(self, name, cond, detail=""):
         self.results.append((name, bool(cond), detail))
+
+
+# What Claude Code passes on in a hook's terminalSequence (SimpleTerm hist/hook-events#e28, if/terminal-signals-bg#bytes):
+# only OSC 0, 1, 2, 9, 99 and 777 and BEL, the whole field 4096 bytes at most, and (2.1.295+) no OSC 9 whose body starts
+# with a digit but 9;4 (progress). One sequence outside drops the whole field, the hook's OSC 9 with it.
+ALLOWED_OSC = {"0", "1", "2", "9", "99", "777"}
+
+
+def allowlist_problems(seq):
+    """Why Claude Code would drop terminalSequence `seq` ([] when it passes it on)."""
+    bad = []
+    if len(seq.encode("utf-8")) > 4096:
+        bad.append("over 4096 bytes")
+    i = 0
+    while i < len(seq):
+        if seq[i] == "\x07":
+            i += 1
+            continue
+        m = re.match(r"\x1b\]([0-9]*)", seq[i:])
+        if not m:
+            bad.append("something other than OSC or BEL")
+            break
+        num, k = m.group(1), i + m.end()
+        ends = [e for e in (seq.find("\x07", k), seq.find("\x1b\\", k)) if e >= 0]
+        if not ends:
+            bad.append("an OSC without its end")
+            break
+        e = min(ends)
+        body = seq[k:e]
+        if num not in ALLOWED_OSC:
+            bad.append("OSC %s (not on the allowlist)" % (num or "without a number"))
+        elif body and not body.startswith(";"):
+            bad.append("OSC %s%s (not on the allowlist)" % (num, body[:4]))
+        elif num == "9" and body[1:2].isdigit() and not (body == ";4" or body.startswith(";4;")):
+            bad.append("OSC 9 body that starts with a digit")
+        i = e + (1 if seq[e] == "\x07" else 2)
+    return bad
+
+
+def term_seqs(text):
+    """The terminalSequence values in a hook's output (a JSON object per line; the key at any depth). A line that
+    names the key but is no JSON gives None."""
+    found = []
+    if "terminalSequence" not in text:
+        return found
+
+    def walk(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k == "terminalSequence":
+                    found.append(v if isinstance(v, str) else None)
+                else:
+                    walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    for line in text.splitlines():
+        if "terminalSequence" not in line:
+            continue
+        try:
+            walk(json.loads(line))
+        except ValueError:
+            found.append(None)
+    return found
 
 
 def wait_for(fn, timeout=10, step=0.1):
@@ -899,13 +996,29 @@ def t_background_work_kinds(s):
     s.check("kinds: a new turn before the limit -> no late done", not ingests(s), str(ingests(s))[:200])
 
 
-def t_background_work_7501(s):
-    """Claude Code 2.1.295+ reports `done` for its own turn through OSC 7501 even
-    while a background shell runs (measured on 2.1.316: the Stop hook's output
-    lands 12 ms before that `done`). The hook adds an OSC 7501 `working` record
-    of its own, only where Claude Code speaks OSC 7501, and takes it back at the
-    next turn."""
+def bg_payload(body):
+    """A structured payload as the app reads it (SimpleTerm if/terminal-signals#structured, if/terminal-signals-bg#fields):
+    `simpleterm:state=<value>[<sep><message>]`, the prefix without regard to case and only at the start, the value
+    a-z and _ in lower case, <sep> a run of white space or `;`. (value, message or None); None when not a payload."""
+    m = re.match(r"(?i)simpleterm:state=([a-z_]+)(?:([\s;]+)(.*))?$", body, re.S)
+    if not m:
+        return None
+    return m.group(1).lower(), (m.group(3) or None)
+
+
+def screen_values(seq):
+    """The OSC 9 payloads of a terminalSequence, in order: [(value, message)]."""
+    return [bg_payload(b) for b in re.findall(r"\x1b\]9;(.*?)\x07", seq, re.S)]
+
+
+def t_background_screen_values(s):
+    """The background pause on the screen (SimpleTerm if/terminal-signals-bg#plugin, #vectors; issue #804). Claude
+    Code 2.1.295+ reports `done` for its own turn through OSC 7501 even while a background shell runs, and drops a
+    hook's OSC 7501 from terminalSequence (hist/hook-events#e28). Where it speaks 7501 itself (claude_speaks_7501)
+    the hook writes the pause as one more OSC 9 value after the old one: bg_working, bg_question when the turn asks,
+    bg_clear in the first output of the next turn; elsewhere the old values only."""
     s.setup([(LINK_A, {})])
+    st = {"SIMPLETERM": "1"}
     shell = {"id": "bhk40d9z9", "type": "shell", "status": "running",
              "description": "Run the test suite", "command": "npm test"}
 
@@ -914,39 +1027,182 @@ def t_background_work_7501(s):
             json.dumps({"type": t, "version": version, "message": {"role": t, "content": "x"}})
             for t in ("user", "assistant")) + "\n")
 
-    def stop(sid, tr, extra=None, tasks=(shell,)):
+    def stop(sid, tr, extra=None, tasks=(shell,), last="x"):
         ev = {"session_id": sid, "cwd": "/w/proj", "hook_event_name": "Stop", "stop_hook_active": False,
-              "last_assistant_message": "x", "transcript_path": str(tr), "background_tasks": list(tasks)}
-        return s.run("claude", json.dumps(ev), dict({"SIMPLETERM": "1"}, **(extra or {})))[1]
+              "last_assistant_message": last, "transcript_path": str(tr), "background_tasks": list(tasks)}
+        return s.run("claude", json.dumps(ev), dict(st, **(extra or {})))[1]
 
-    working = ("\x1b]7501;state=working:id=simpleterm-bg:msg=%s\x07"
-               % base64.b64encode(b"shell: Run the test suite").decode())
-    out = stop("b75", transcript("2.1.316"))
-    s.check("7501: Claude Code 2.1.316 -> a working record after the background state",
-            seqs(out) == "\x1b]9;simpleterm:state=background shell: Run the test suite\x07" + working, repr(out))
-    _, out2, _, _ = s.run("claude", json.dumps({"session_id": "b75", "hook_event_name": "UserPromptSubmit", "prompt": "x"}),
-                          {"SIMPLETERM": "1"})
-    s.check("7501: the next turn takes the record back",
-            seqs(out2) == "\x1b]9;simpleterm:state=running\x07\x1b]7501;state=clear:id=simpleterm-bg\x07", repr(out2))
-    _, out3, _, _ = s.run("claude", json.dumps({"session_id": "b75", "hook_event_name": "UserPromptSubmit", "prompt": "y"}),
-                          {"SIMPLETERM": "1"})
-    s.check("7501: taken back once", seqs(out3) == "\x1b]9;simpleterm:state=running\x07", repr(out3))
+    def prompt(sid, extra=None):
+        return s.run("claude", json.dumps({"session_id": sid, "hook_event_name": "UserPromptSubmit", "prompt": "x"}),
+                     dict(st, **(extra or {})))[1]
 
-    for label, tr, extra in (("2.1.294 (no OSC 7501 of its own)", transcript("2.1.294"), None),
-                             ("inside tmux", transcript("2.1.316"), {"TMUX": "/tmp/tmux-1/default,1,0"}),
-                             ("terminal title writes off", transcript("2.1.316"), {"CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"}),
-                             ("no transcript", s.tmp / "missing.jsonl", None)):
-        out = stop("b75-" + label.split()[0], tr, extra)
-        s.check("7501: none for %s" % label, "7501" not in seqs(out) and "state=background" in seqs(out), repr(out))
-        _, out4, _, _ = s.run("claude", json.dumps({"session_id": "b75-" + label.split()[0], "hook_event_name": "Stop",
+    tr = transcript("2.1.316")
+    # The plugin output vectors of SimpleTerm if/terminal-signals-bg#vectors, byte for byte as the hook prints them.
+    sleep20 = {"id": "b20", "type": "shell", "status": "running", "command": "sleep 20"}
+    out = stop("bv1", tr, tasks=[sleep20])
+    s.check("screen: vector Stop, pause",
+            out.strip() == r'{"terminalSequence":"\u001b]9;simpleterm:state=background shell: sleep 20\u0007\u001b]9;simpleterm:state=bg_working shell: sleep 20\u0007"}',
+            repr(out))
+    out = prompt("bv1")
+    s.check("screen: vector UserPromptSubmit",
+            out.strip() == r'{"terminalSequence":"\u001b]9;simpleterm:state=running\u0007\u001b]9;simpleterm:state=bg_clear\u0007"}', repr(out))
+    out = stop("bv2", tr, tasks=[SUBAGENT], last="Use option A or B?")
+    s.check("screen: vector Stop, pause ask",
+            out.strip() == r'{"terminalSequence":"\u001b]9;simpleterm:state=waiting Use option A or B?\u0007\u001b]9;simpleterm:state=bg_question Use option A or B?\u0007"}',
+            repr(out))
+    s.check("screen: the outputs parse to the rows of #vectors",
+            screen_values(seqs(out)) == [("waiting", "Use option A or B?"), ("bg_question", "Use option A or B?")], str(screen_values(seqs(out))))
+    out = prompt("bv2")
+    s.check("screen: bg_clear parses as bg_clear, no message", screen_values(seqs(out)) == [("running", None), ("bg_clear", None)],
+            str(screen_values(seqs(out))))
+    wait_for(lambda: ingests(s, "question"), 20)  # the pause ask's send lands before the next case
+
+    out = stop("b75", tr)
+    s.check("screen: Claude Code 2.1.316 -> bg_working after the background state",
+            seqs(out) == "\x1b]9;simpleterm:state=background shell: Run the test suite\x07"
+            "\x1b]9;simpleterm:state=bg_working shell: Run the test suite\x07", repr(out))
+    out2 = prompt("b75")
+    s.check("screen: the next turn says bg_clear",
+            seqs(out2) == "\x1b]9;simpleterm:state=running\x07\x1b]9;simpleterm:state=bg_clear\x07", repr(out2))
+    out3 = prompt("b75")
+    s.check("screen: bg_clear once", seqs(out3) == "\x1b]9;simpleterm:state=running\x07", repr(out3))
+
+    # The first output of the next turn may be a Stop: done then bg_clear; or a Stop that pauses again: the new value
+    # replaces the record (no bg_clear); or a StopFailure: idle, error, then bg_clear.
+    stop("b76", tr)
+    out = stop("b76", tr, tasks=[])
+    s.check("screen: a Stop first -> done, bg_clear", seqs(out) == "\x1b]9;simpleterm:state=done\x07\x1b]9;simpleterm:state=bg_clear\x07", repr(out))
+    stop("b77", tr)
+    out = stop("b77", tr, tasks=[dict(shell, id="b77b", description="Build the docs")])
+    s.check("screen: a Stop that pauses again -> its bg_working, no bg_clear",
+            seqs(out) == "\x1b]9;simpleterm:state=background shell: Build the docs\x07\x1b]9;simpleterm:state=bg_working shell: Build the docs\x07",
+            repr(out))
+    stop("b78", tr)
+    _, out, _, _ = s.run("claude", cc_event("b78", "StopFailure", error="server_error", last_assistant_message="API Error"), st)
+    s.check("screen: a StopFailure first -> idle, error, bg_clear",
+            seqs(out) == "\x1b]9;simpleterm:state=idle\x07\x1b]9;simpleterm:state=error\x07\x1b]9;simpleterm:state=bg_clear\x07", repr(out))
+    # A pause written by 0.3.1-0.6.0 (`7501` on the note's second line): its record never reached the screen
+    # (hist/hook-events#e28), so there is nothing to clear.
+    run = s.home / ".simpleterm" / "run"
+    write(run / "b79.bg", "shell: x\n7501\n%s\n\n" % ("a" * 16))
+    out = prompt("b79")
+    s.check("screen: a 0.6.0 pause -> no bg_clear", seqs(out) == "\x1b]9;simpleterm:state=running\x07", repr(out))
+
+    for label, trx, extra in (("2.1.294 (no OSC 7501 of its own)", transcript("2.1.294"), None),
+                              ("inside tmux", tr, {"TMUX": "/tmp/tmux-1/default,1,0"}),
+                              ("inside screen", tr, {"STY": "123.pts-1.host"}),
+                              ("terminal title writes off", tr, {"CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"}),
+                              ("no transcript", s.tmp / "missing.jsonl", None)):
+        sid = "b75-" + label.split()[0] + label.split()[-1]
+        out = stop(sid, trx, extra)
+        s.check("screen: none for %s" % label, "bg_" not in seqs(out) and "state=background" in seqs(out), repr(out))
+        _, out4, _, _ = s.run("claude", json.dumps({"session_id": sid, "hook_event_name": "Stop",
                                                     "last_assistant_message": "x", "background_tasks": []}),
-                              dict({"SIMPLETERM": "1"}, **(extra or {})))
-        s.check("7501: nothing to take back for %s" % label, seqs(out4) == "\x1b]9;simpleterm:state=done\x07", repr(out4))
+                              dict(st, **(extra or {})))
+        s.check("screen: nothing to clear for %s" % label, seqs(out4) == "\x1b]9;simpleterm:state=done\x07", repr(out4))
+    # herdr: TMUX and STY are not set there, so the check holds and the value goes out (it changes nothing there:
+    # SimpleTerm if/terminal-signals-bg#plugin).
+    out = stop("b75-herdr", tr, {"HERDR_ENV": "1", "HERDR_PANE_ID": "w2:p1"})
+    s.check("screen: inside herdr the value goes out", seqs(out).endswith("\x1b]9;simpleterm:state=bg_working shell: Run the test suite\x07"), repr(out))
 
-    out = stop("b75-esc", transcript("2.1.316"),
-               tasks=[dict(shell, description='Run "npm test" \u2014 all')])  # JSON: \" and \u2014
-    s.check("7501: a message with other escapes goes without msg",
-            seqs(out).endswith("\x1b]7501;state=working:id=simpleterm-bg\x07"), repr(out))
+    # The message is the old value's, cut the same way: JSON escapes and a long text.
+    out = stop("b75-esc", tr, tasks=[dict(shell, description='Run "npm test" — all')])  # JSON: \" and —
+    s.check("screen: a message with escapes is the old value's",
+            seqs(out) == '\x1b]9;simpleterm:state=background shell: Run "npm test" — all\x07'
+            '\x1b]9;simpleterm:state=bg_working shell: Run "npm test" — all\x07', repr(out))
+    out = stop("b75-long", tr, tasks=[dict(shell, description="한" * 120)])
+    v = screen_values(seqs(out))
+    s.check("screen: a long message is cut as the old value (80 characters)",
+            len(v) == 2 and v[1][0] == "bg_working" and v[1][1] == v[0][1] and len(v[0][1]) <= 80, str(v)[:200])
+
+
+def t_background_screen_clear(s):
+    """A pause whose screen value went out stays on the screen until an output writes bg_clear, however the pause
+    ended meanwhile, without an output (SimpleTerm if/terminal-signals-bg#plugin; review of plugin PR #15): the next
+    turn's first output writes it also after bg_done_after's late done, after the hook's path for a Stop whose last
+    message is a session title (it prints nothing; no evidence that Claude Code sends one, the path is there), in the
+    new session of /clear, /resume or /branch (a new session id in the same process: SessionEnd reason clear or
+    resume, then SessionStart source clear, resume or fork, Claude Code hooks reference; hist/agent-sessions#e7), and
+    for a pause older than the day the run files are kept."""
+    s.setup([(LINK_A, {})], conf={"bg_done_after": 2})
+    st = {"SIMPLETERM": "1"}
+    tr = write(s.tmp / "tc.jsonl", "\n".join(json.dumps({"type": t, "version": "2.1.316", "message": {"role": t, "content": "x"}})
+                                             for t in ("user", "assistant")) + "\n")
+    shell = {"id": "bc1", "type": "shell", "status": "running", "description": "Start the dev server", "command": "node worker.js"}
+    run = s.home / ".simpleterm" / "run"
+    clear = "\x1b]9;simpleterm:state=running\x07\x1b]9;simpleterm:state=bg_clear\x07"
+    running = "\x1b]9;simpleterm:state=running\x07"
+
+    def ev(sid, name, cwd="/w/proj", **kw):
+        return json.dumps(dict({"session_id": sid, "cwd": cwd, "hook_event_name": name, "transcript_path": str(tr)}, **kw))
+
+    def stop(sid, tasks=(shell,), last="x", cwd="/w/proj"):
+        return s.run("claude", ev(sid, "Stop", cwd, stop_hook_active=False, last_assistant_message=last,
+                                  background_tasks=list(tasks)), st)[1]
+
+    def prompt(sid, cwd="/w/proj"):
+        return seqs(s.run("claude", ev(sid, "UserPromptSubmit", cwd, prompt="x"), st)[1])
+
+    def paused(sid):
+        out = stop(sid)
+        s.check("clear paths: %s pauses with bg_working" % sid, "simpleterm:state=bg_working shell: Start the dev server" in seqs(out), repr(out))
+
+    # bg_done_after's late done (a shell alone may run for good): the pause file goes, the screen still shows it.
+    s.ctl("/_ctl/reset", {})
+    paused("bc-late")
+    s.check("clear paths: the late done comes", wait_for(lambda: ingests(s, "done"), 20), str(ingests(s))[:200])
+    s.settle("the late done's send")
+    s.check("clear paths: ... and the pause file is gone", not (run / "bc-late.bg").exists())
+    out = prompt("bc-late")
+    s.check("clear paths: after the late done the next turn says running, bg_clear", out == clear, repr(out))
+    out = prompt("bc-late")
+    s.check("clear paths: ... once", out == running, repr(out))
+    # The hook's path for a Stop whose last message is a session title prints nothing (no evidence that Claude Code
+    # sends such a Stop); the next output clears.
+    paused("bc-title")
+    _, out, _, _ = s.run("claude", ev("bc-title", "Stop", stop_hook_active=False, last_assistant_message='{"title":"Fix the build"}',
+                                      background_tasks=[]), st)
+    s.check("clear paths: a title Stop prints nothing", out == "", repr(out))
+    out = prompt("bc-title")
+    s.check("clear paths: after a title Stop the next turn says running, bg_clear", out == clear, repr(out))
+    # /clear and /resume: the new session's first turn clears the old one's pause.
+    for reason, source in (("clear", "clear"), ("resume", "resume"), ("resume", "fork")):
+        old, new = "bc-%s-%s-a" % (reason, source), "bc-%s-%s-b" % (reason, source)
+        paused(old)
+        s.run("claude", ev(old, "SessionEnd", reason=reason), st)
+        s.run("claude", ev(new, "SessionStart", source=source), st)
+        out = prompt(new)
+        s.check("clear paths: SessionEnd %s, SessionStart %s -> the new session's turn says running, bg_clear" % (reason, source),
+                out == clear, repr(out))
+    # Not handed over: a session that ends for good (another one starts later), another folder, an old hand-over.
+    paused("bc-exit-a")
+    s.run("claude", ev("bc-exit-a", "SessionEnd", reason="prompt_input_exit"), st)
+    s.run("claude", ev("bc-exit-b", "SessionStart", source="startup"), st)
+    out = prompt("bc-exit-b")
+    s.check("clear paths: a session that ends for good hands nothing to the next one", out == running, repr(out))
+    paused("bc-dir-a")
+    s.run("claude", ev("bc-dir-a", "SessionEnd", reason="clear"), st)
+    s.run("claude", ev("bc-dir-b", "SessionStart", cwd="/w/other", source="clear"), st)
+    out = prompt("bc-dir-b", cwd="/w/other")
+    s.check("clear paths: /clear in another folder takes nothing", out == running, repr(out))
+    old = time.time() - 300
+    for f in run.glob("bgclr.*"):
+        os.utime(f, (old, old))
+    s.run("claude", ev("bc-dir-c", "SessionStart", source="clear"), st)
+    out = prompt("bc-dir-c")
+    s.check("clear paths: a hand-over five minutes old is not taken", out == running, repr(out))
+    # The run files are kept a day; a pause on the screen is cleared however late its next turn comes.
+    for sid, days, want in (("bc-old2", 2, clear), ("bc-old31", 31, running)):
+        paused(sid)
+        t = time.time() - days * 86400
+        for f in run.glob(sid + ".*"):
+            os.utime(f, (t, t))
+        stop("bc-other-%d" % days, tasks=[])  # another session's turn end keeps house
+        s.settle("the other session's done")
+        out = prompt(sid)
+        s.check("clear paths: a pause %d days old -> %s" % (days, "running, bg_clear" if want == clear else "running only (gone after 30 days)"),
+                out == want, repr(out))
+    s.settle("the pauses' waits (bg_done_after, 2 s)")
 
 
 def t_codex_goal(s):
@@ -1028,18 +1284,17 @@ def t_question_while_background(s):
     s.settle("the hooks' background work")
     s.check("question while waiting: no done and no second question", len(ingests(s)) == 1, str(ingests(s))[:300])
 
-    # Claude Code 2.1.295+: a blocked (question) record of the hook instead of the working one; taken back at the next turn.
+    # Claude Code 2.1.295+: bg_question instead of bg_working; bg_clear at the next turn.
     s.ctl("/_ctl/reset", {})
     tr = cc_transcript(s)
     out = s.run("claude", cc_event("qb2", "Stop", stop_hook_active=False, last_assistant_message=q, background_tasks=[SUBAGENT],
                                    session_crons=[], transcript_path=str(tr)), st)[1]
-    s.check("question while waiting: OSC 7501 blocked/question record, no working record",
-            seqs(out) == "\x1b]9;simpleterm:state=waiting " + q + "\x07\x1b]7501;state=blocked:id=simpleterm-bg:kind=question:msg="
-            + b64(q) + "\x07", repr(out))
+    s.check("question while waiting: bg_question after waiting, no bg_working",
+            seqs(out) == "\x1b]9;simpleterm:state=waiting " + q + "\x07\x1b]9;simpleterm:state=bg_question " + q + "\x07", repr(out))
     wait_for(lambda: ingests(s, "question"), 20)  # its send must land before the reset below
     _, out3, _, _ = s.run("claude", cc_event("qb2", "UserPromptSubmit", prompt="yes, fix them"), st)
-    s.check("question while waiting: the next turn takes the record back",
-            seqs(out3) == "\x1b]9;simpleterm:state=running\x07\x1b]7501;state=clear:id=simpleterm-bg\x07", repr(out3))
+    s.check("question while waiting: the next turn says bg_clear",
+            seqs(out3) == "\x1b]9;simpleterm:state=running\x07\x1b]9;simpleterm:state=bg_clear\x07", repr(out3))
 
     # Not a question: silent as before, whatever else is in the message.
     s.ctl("/_ctl/reset", {})
@@ -1261,7 +1516,7 @@ def t_service_shells(s):
     s.check("service shell: another shell beside a service -> waits", seqs(out).startswith("\x1b]9;simpleterm:state=background"), repr(out))
     # No hook record of its own where the service is not waited for (Claude Code reports done itself).
     out = stop("sv8", [shell("npm run dev")], extra={"transcript_path": str(cc_transcript(s))})
-    s.check("service shell: no OSC 7501 working record", seqs(out) == "\x1b]9;simpleterm:state=done\x07", repr(out))
+    s.check("service shell: no bg_working", seqs(out) == "\x1b]9;simpleterm:state=done\x07", repr(out))
     # Grok Build.
     s.settle("the sends of the cases above")
     s.ctl("/_ctl/reset", {})
@@ -1397,12 +1652,12 @@ def t_schedules(s):
     s.check("schedule: a prompt equal to a schedule's -> background", seqs(out).startswith("\x1b]9;simpleterm:state=background scheduled:"), repr(out))
     s.settle("the hooks' background work")
     s.check("schedule: no event from the scheduled turns", not ingests(s), str(ingests(s))[:300])
-    # Claude Code 2.1.295+: a working record, with the schedule as its text; taken back at the next turn.
+    # Claude Code 2.1.295+: bg_working, with the schedule as its text.
     tr = cc_transcript(s)
     s.run("claude", cc_event("sc2", "UserPromptSubmit", prompt="x", source="loop_wakeup"), st)
     out = stop("sc2", cron[:1], "Check.", extra={"transcript_path": str(tr)})
-    s.check("schedule: OSC 7501 working record", seqs(out) == "\x1b]9;simpleterm:state=background scheduled: */5 * * * *\x07"
-            "\x1b]7501;state=working:id=simpleterm-bg:msg=" + b64("scheduled: */5 * * * *") + "\x07", repr(out))
+    s.check("schedule: bg_working", seqs(out) == "\x1b]9;simpleterm:state=background scheduled: */5 * * * *\x07"
+            "\x1b]9;simpleterm:state=bg_working scheduled: */5 * * * *\x07", repr(out))
     # A question in a scheduled turn is still told.
     s.ctl("/_ctl/reset", {})
     s.run("claude", cc_event("sc3", "UserPromptSubmit", prompt="x", source="schedule_wakeup"), st)
@@ -1907,7 +2162,7 @@ def t_small_audit_fixes(s):
                              session_crons=[], transcript_path=str(tr)), st)
     _, out, _, _ = s.run("claude", cc_event("ei2", "PostToolUseFailure", tool_name="Bash", tool_input={"command": "sleep 100"},
                                             error="Interrupted", is_interrupt=True), st)
-    s.check("interrupt: takes the background record back", seqs(out) == "\x1b]9;simpleterm:state=idle\x07\x1b]7501;state=clear:id=simpleterm-bg\x07", repr(out))
+    s.check("interrupt: ends the pause with bg_clear", seqs(out) == "\x1b]9;simpleterm:state=idle\x07\x1b]9;simpleterm:state=bg_clear\x07", repr(out))
 
 
 AGENT_PY = (
@@ -2849,6 +3104,144 @@ def t_copilot_hooks(s):
     write(cop / "installed-plugins" / "simpleterm-agent-hooks" / "simpleterm-copilot" / "plugin.json", '{"name": "simpleterm-copilot"}')
     rc, out = run("preToolUse", {})
     s.check("copilot paths: a marketplace install first", rc == 0 and out.strip() == "market copilot preToolUse", "%d %r" % (rc, out))
+
+
+TTY_PY = (
+    # Makes the pty slave argv[1] this session's controlling terminal (the hook's /dev/tty), then runs argv[2:].
+    "import fcntl, os, sys, termios\n"
+    "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+    "try:\n"
+    "    fcntl.ioctl(fd, termios.TIOCSCTTY, 0)\n"
+    "except OSError:\n"
+    "    pass\n"
+    "os.close(fd)\n"
+    "os.execv(sys.argv[2], sys.argv[2:])\n"
+)
+
+
+def on_tty(s, agent, stdin, extra, args=(), hold=None):
+    """Runs the hook with a pty as its controlling terminal, as Copilot CLI runs its hooks (in the shell's
+    session: SimpleTerm hist/hook-events#e27). Returns (stdout, bytes the hook wrote to the terminal). With `hold`,
+    the input is held back until hold(read, process) returns: read() gives the terminal's bytes so far.
+    The master is read the whole time the hook lives, and the slave stays open here: a session leader whose terminal
+    has unread output does not finish exiting on macOS (it stays `?Es`, measured), and a pty whose slave is closed
+    loses what is written to it."""
+    master, slave = os.openpty()
+    got = bytearray()
+    lock = threading.Lock()
+    stop = threading.Event()
+
+    def drain(wait):
+        while select.select([master], [], [], wait)[0]:
+            try:
+                b = os.read(master, 4096)
+            except OSError:
+                return
+            if not b:
+                return
+            with lock:
+                got.extend(b)
+
+    def pump():
+        while not stop.is_set():
+            drain(0.05)
+            time.sleep(0.02)
+
+    def read():
+        with lock:
+            return bytes(got)
+    th = threading.Thread(target=pump, daemon=True)
+    th.start()
+    try:
+        cmd = [sys.executable, "-I", "-c", TTY_PY, os.ttyname(slave)] + list(s.argv) + [agent] + list(args)
+        p = s.popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=s.env(extra), cwd=str(s.tmp))
+        if hold:
+            hold(read, p)
+        try:
+            out, _ = p.communicate(stdin.encode(), timeout=60)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            try:
+                p.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+            s.check("on a terminal: %s %s ends within 60 s" % (agent, " ".join(args)), False, "env %s; tty %r" % (extra, read()))
+            return "", read()
+        stop.set()
+        th.join(2)
+        drain(0.2)
+        return out.decode("utf-8", "replace"), read()
+    finally:
+        stop.set()
+        th.join(2)
+        os.close(slave)
+        os.close(master)
+
+
+def t_copilot_session_end(s):
+    """Copilot CLI writes no OSC 7501 `clear` when it ends (1.0.109); on sessionEnd the hook writes exactly
+    ESC ] 7501 ; state=clear BEL to /dev/tty, once and before anything else (the record, the relay send), only with
+    SIMPLETERM=1, TMUX, STY and HERDR_ENV all empty and a terminal; else nothing and no log line (SimpleTerm
+    if/hook-events#session-end, #vectors, hist/hook-events#d10). No other agent's end writes it."""
+    clear = bytes.fromhex("1b5d373530313b73746174653d636c65617207")
+    tun, tctl = s.spawn_mock()
+    try:
+        session_end_cases(s, tctl, clear)
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+
+def session_end_cases(s, tctl, clear):
+    s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})])
+    tctl("/_ctl/reset", {})
+    tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown")}})
+    base = {"sessionId": "cse-1", "timestamp": 1793635914148, "cwd": "/w/proj", "reason": "user_exit"}
+    env = {"SIMPLETERM": "1", "COPILOT_CLI_BINARY_VERSION": "1.0.109"}
+    s.run("copilot", json.dumps(dict(base, source="new", initialPrompt="")), env, args=("sessionStart",))
+    s.settle("the sessionStart hook's background work")
+    ended = lambda: list((s.home / ".simpleterm" / "sessions").glob("*/*.ended"))
+    states = lambda: [r["plain_json"].get("st") for r in ingests(s, "state", ctl=tctl)]
+    sent0 = len(ingests(s, ctl=tctl))
+    seen = {}
+
+    def first(read, p):
+        # The clear is on the terminal while the hook still waits for its input: nothing else came first.
+        seen["tty"] = wait_for(read, 10)
+        seen["running"] = p.poll() is None
+        seen["ended"] = ended()
+        seen["sent"] = len(ingests(s, ctl=tctl)) - sent0
+    out, tty = on_tty(s, "copilot", json.dumps(base), env, ("sessionEnd",), hold=first)
+    s.check("session end: the bytes, once", tty == clear, repr(tty))
+    s.check("session end: before anything else (the input not read yet, no record, no send)",
+            seen.get("tty") == clear and seen.get("running") and seen.get("ended") == [] and seen.get("sent") == 0, str(seen))
+    st = wait_for(lambda: "ended" in states() and states(), 10)
+    s.check("session end: then the record and the tunnel send", ended() != [] and "ended" in (st or []), "%s %s" % (ended(), st))
+    s.check("session end: nothing on stdout", out == "", out)
+    s.settle("the sessionEnd hook's background work")
+
+    log0 = s.log_text()
+    for label, extra in (("SIMPLETERM unset", {"SIMPLETERM": ""}), ("TMUX set", {"TMUX": "/tmp/tmux-1/default,1,0"}),
+                         ("STY set", {"STY": "123.pts-1.host"}), ("HERDR_ENV=1", {"HERDR_ENV": "1"})):
+        out, tty = on_tty(s, "copilot", json.dumps(dict(base, sessionId="cse-" + label[:4])), dict(env, **extra), ("sessionEnd",))
+        s.check("session end: %s -> nothing on the terminal" % label, tty == b"", repr(tty))
+    _, out, _, _ = s.run("copilot", json.dumps(dict(base, sessionId="cse-notty")), env, args=("sessionEnd",))
+    s.settle("the sessionEnd hooks' background work")
+    new = s.log_text()[len(log0):]
+    s.check("session end: no terminal -> nothing, no log line about it (the sends log as always)",
+            out == "" and not re.search(r"tty|7501|clear", new), new[-300:])
+    # Other events and other agents' ends write nothing; a Claude-format hook in Copilot (COPILOT_CLI=1) writes it once.
+    _, tty = on_tty(s, "copilot", json.dumps(dict(base, stopReason="end_turn")), env, ("agentStop",))
+    s.check("session end: Copilot agentStop -> nothing on the terminal", tty == b"", repr(tty))
+    for agent, ev in (("claude", {"session_id": "cse-cc", "hook_event_name": "SessionEnd", "reason": "other"}),
+                      ("codex", {"session_id": "cse-cx", "hook_event_name": "SessionEnd"}),
+                      ("grok", {"sessionId": "cse-gk", "hook_event_name": "SessionEnd", "reason": "shutdown"})):
+        _, tty = on_tty(s, agent, json.dumps(ev), env)
+        s.check("session end: %s SessionEnd -> nothing on the terminal" % agent, tty == b"", repr(tty))
+    _, tty = on_tty(s, "claude", json.dumps({"sessionId": "cse-cf", "hook_event_name": "SessionEnd", "reason": "user_exit"}),
+                    dict(env, COPILOT_CLI="1"))
+    s.check("session end: Copilot through the Claude Code plugin -> the bytes, once", tty == clear, repr(tty))
+    s.settle("the hooks' background work")
 
 
 def t_copilot(s):
@@ -3891,6 +4284,53 @@ def t_conf_vectors(s):
             rc, out, err, el = s.run(agent, "", {"SIMPLETERM_HOOK_TEST": "1"}, args=("__conf", v["key"]))
             s.check("conf %s %s (%s, %s): %s" % (v["id"], v["key"], agent, v["what"], want), out.strip() == want,
                     "got %r rc=%s %s" % (out, rc, err[-200:]))
+
+
+def t_usage_ask_deadline(s):
+    """An ask that gets no answer is a timeout, also when the hook's watching is slow (a loaded machine): the input
+    stays open until the watcher has judged the time, so the agent does not end for want of input first and get
+    read as gone (`failed`). SimpleTerm if/usage-ask#run; issue #811. The watcher is made slow by an awk that sleeps
+    2 seconds in the hook's look at the ask's output (sh); the PowerShell hook has one loop (no such race)."""
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})])
+        tctl("/_ctl/reset", {})
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown")}})
+        for f in ("asks", "ask.env", "reply", "reply2", "delay", "linger", "stubborn"):
+            (s.tmp / f).unlink() if (s.tmp / f).exists() else None
+        (s.tmp / "reply").write_text("")  # no answer; the stand-in ends when its input closes
+        run = s.home / ".simpleterm" / "run"
+        run.mkdir(parents=True, exist_ok=True)
+        (run / ("tun.%s.last" % LINK_T["id"][:8])).write_text("%d 200\n" % int(time.time()))
+        fake = s.bin / "claude"
+        if fake.is_symlink() or fake.exists():
+            fake.unlink()
+        fake.write_text(FAKE_ASKER)
+        fake.chmod(0o755)
+        write(run / "ver.claude", "%s\n2.1.316\n" % fake)
+        tr = write(s.tmp / "trd.jsonl", json.dumps({"type": "user", "version": "2.1.316", "message": {"role": "user", "content": "x"}}) + "\n")
+        env = {"SIMPLETERM": "1", "SIMPLETERM_HOOK_TEST": "1", "SIMPLETERM_HOOK_TEST_ASK_WAIT": "6"}
+        if s.kind == "sh":
+            slow = s.tmp / "slow-awk"
+            slow.mkdir(exist_ok=True)
+            write(slow / "awk", "#!/bin/sh\ncase \"$*\" in *'$0 ~ r && (x'*) sleep 2 ;; esac\nexec %s \"$@\"\n"
+                  % os.path.realpath(s.bin / "awk")).chmod(0o755)
+            env["PATH"] = "%s:%s" % (slow, s.bin)
+        s.run("claude", cc_event("sd1", "Stop", stop_hook_active=False, last_assistant_message="Done.", background_tasks=[],
+                                 session_crons=[], transcript_path=str(tr)), env)
+        usage = lambda: [json.loads(r["plain"]) for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and r["body"]["ev"] == "usage"]
+        u = wait_for(usage, 120, 0.5)
+        s.check("ask deadline: no answer, a slow watcher -> timeout, not failed",
+                len(u) == 1 and u[0].get("uq", {}).get("err") == "timeout", str([x.get("uq") for x in u]))
+        s.settle("the ask")
+    finally:
+        # The stand-in never answers: left on the suite's PATH, every later Claude Code Stop with a tunnel would ask
+        # it and wait out the 60 seconds (the usage cases come after this one).
+        for f in (s.bin / "claude", s.home / ".simpleterm" / "run" / "ver.claude"):
+            if f.is_symlink() or f.exists():
+                f.unlink()
+        tun.terminate()
+        tun.wait(5)
 
 
 def t_v2_usage_ask_gate(s):
@@ -6382,7 +6822,7 @@ def copies_check():
 
 
 TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t_timeout, t_multi_link,
-         t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_work_7501, t_question_while_background, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_schedule_end, t_done_delay, t_background_events_and_badges, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
+         t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_screen_values, t_background_screen_clear, t_question_while_background, t_copilot_session_end, t_usage_ask_deadline, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_schedule_end, t_done_delay, t_background_events_and_badges, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_schedule, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js, t_opencode_schedule,
@@ -6394,11 +6834,11 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
 # by awk, the HMAC whose key blocks printf writes, the AES-256-CBC envelope and dext, base64 both ways),
 # the byte-exact events and terminal sequences, and the shell's own reading of input, settings and argv.
 COMPAT = {"t_vectors", "t_allow_deny", "t_invalid_dmac", "t_missing_deps", "t_hostile_input", "t_argv", "t_external_printf",
-          "t_background_work_7501", "t_v2_fixtures", "t_v2_dext_vector", "t_v2_decisions", "t_usage_ask_refresh_vectors",
+          "t_background_screen_values", "t_v2_fixtures", "t_v2_dext_vector", "t_v2_decisions", "t_usage_ask_refresh_vectors",
           "t_conf_vectors"}
 
 # Tests of the sh hook only (scripts and behaviour the PowerShell hook does not have).
-SH_ONLY = {"t_v2_versions", "t_v2_n10", "t_v2_opencode_js", "t_copilot_hooks", "t_copilot", "t_copilot_schedules", "t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_delivery", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_notify_no_tty", "t_cli_wrapper",
+SH_ONLY = {"t_copilot_session_end", "t_v2_versions", "t_v2_n10", "t_v2_opencode_js", "t_copilot_hooks", "t_copilot", "t_copilot_schedules", "t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_delivery", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_notify_no_tty", "t_cli_wrapper",
            "t_agy", "t_agy_schedule", "t_agy_paths", "t_opencode_sh", "t_opencode_js", "t_opencode_schedule"}
 
 
@@ -6483,11 +6923,11 @@ HEAVY = {"t_service_shells": threading.Semaphore(2), "t_v2_held": threading.Sema
 
 def leftovers():
     """What the run left running: this run's processes (ours(): the suites' groups and folders, and
-    this run's own group but for this process and its `ps`)."""
+    this run's own group, if it has one, but for this process and its `ps`)."""
     rows = observe(command=True)
     if rows is None:
         return ["(ps failed: cannot tell)"]
-    return ["%d %s" % (pid, r[4][:140]) for pid, r in sorted(ours(rows, groups={os.getpgrp()}).items())]
+    return ["%d %s" % (pid, r[4][:140]) for pid, r in sorted(ours(rows, groups=own_group()).items())]
 
 
 def run_suite(suite, only):
@@ -6501,23 +6941,57 @@ def run_suite(suite, only):
         sem = HEAVY.get(t.__name__)
         if sem:
             sem.acquire()
+        suite.case = t.__name__
         try:
             t(suite)
         except Exception as e:  # report and continue with the next case
             suite.check("%s raised" % t.__name__, False, repr(e))
         finally:
             suite.reap()
+            suite.screen_report()
             if sem:
                 sem.release()
+    # Every hook output of every case, not one case's: Claude Code drops a whole terminalSequence for one sequence
+    # outside its allowlist, and an output check alone never sees that (SimpleTerm hist/hook-events#e28).
+    if suite.seq_n:
+        suite.check("terminalSequence allowlist: %d hook outputs checked" % suite.seq_n, True)
+
+
+def own_group():
+    """This run's process group, {pgid}, when this process leads it (run_in_own_group); else empty: a
+    child whose setpgid failed is still in its parent's group, which may be the user's shell's or a
+    pipeline's, and that group is not this run's."""
+    g = os.getpgrp()
+    return {g} if g == os.getpid() else set()
+
+
+def end_ours():
+    """Ends every process of this run but this one (ours(): the suites' groups and folders, and this run's group
+    if it has one, own_group): TERM, then KILL to what is left a second later. The hooks a case starts lead
+    sessions of their own (Suite.popen), so a TERM to the run's group does not reach them."""
+    groups = own_group()
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        rows = observe()
+        pids = ours(rows, groups=groups) if rows is not None else {}
+        for p in pids:
+            try:
+                os.kill(p, sig)
+            except OSError:
+                pass
+        if not pids or sig == signal.SIGKILL:
+            break
+        wait_for(lambda: not ours(observe() or [], groups=groups), 1, 0.1)
 
 
 def run_in_own_group(run):
     """Runs `run()` (the suites) in a child that leads its own process group, then stops that
-    group: every hook the suites start, and the background sends they leave sleeping
-    (bg_done_after waits up to 600 s), belong to it, so a finished run leaves nothing behind.
-    Only the child's group is touched: this process may share its group with others (a
-    `python run_tests.py | tail` under job control), and it stays in the terminal's group
-    (Ctrl+C reaches it). Returns the child's exit code."""
+    group. The child's processes, and the hooks the suites start in sessions of their own with
+    the background sends they leave sleeping (bg_done_after waits up to 600 s), end with the run:
+    each case reaps its own, and a TERM to the child (from here, when this process is ended or
+    interrupted) ends them all (end_ours) before the child exits. Only the child's group is
+    signalled from here: this process may share its group with others (a `python run_tests.py |
+    tail` under job control), and it stays in the terminal's group (Ctrl+C reaches it). Returns
+    the child's exit code."""
     sys.stdout.flush()
     sys.stderr.flush()
     pid = os.fork()
@@ -6527,10 +7001,18 @@ def run_in_own_group(run):
         except OSError:
             pass
         code = 1
+
+        def child_term(signum, frame):
+            raise KeyboardInterrupt
+        signal.signal(signal.SIGTERM, child_term)
         try:
             run()
         except SystemExit as e:
             code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+        except KeyboardInterrupt:
+            code = 143
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            end_ours()
         except BaseException:
             import traceback
             traceback.print_exc()
@@ -6543,6 +7025,12 @@ def run_in_own_group(run):
     except OSError:
         pass
     code = 1
+
+    def term(signum, frame):
+        raise KeyboardInterrupt
+    # `timeout` (or any TERM) ends this process: the child's group goes with it (finally below), or it would run on
+    # with nothing reading its output.
+    signal.signal(signal.SIGTERM, term)
     try:
         _, status = os.waitpid(pid, 0)
         code = os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else (status >> 8)
@@ -6552,7 +7040,7 @@ def run_in_own_group(run):
         old = signal.signal(signal.SIGTERM, signal.SIG_IGN)
         try:
             os.killpg(pid, signal.SIGTERM)
-            # (What does not take TERM within 2 seconds gets KILL.)
+            # (What does not take TERM within 5 seconds gets KILL: the child ends the hooks first, end_ours.)
 
             def gone():
                 try:
@@ -6560,7 +7048,7 @@ def run_in_own_group(run):
                     return False
                 except OSError:
                     return True
-            if not wait_for(gone, 2, 0.1):
+            if not wait_for(gone, 5, 0.1):
                 os.killpg(pid, signal.SIGKILL)
         except OSError:
             pass

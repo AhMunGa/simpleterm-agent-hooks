@@ -265,7 +265,7 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | Claude `PreToolUse` `AskUserQuestion`, `Notification` (idle, elicitation, input needed) | `question` (one per question: the `PermissionRequest` of the same question goes first, the `PreToolUse` one only when none came within `ask_delay`; `idle_prompt` only when no `done` was sent or is pending for the turn) | waiting (idle keeps done; `agent_needs_input`, another session's, leaves the badge) |
 | Claude `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure` | none (context, see below) | running |
 | Claude `Stop` / `StopFailure` | `done` (sent 3 s later on Claude Code, see below) / `error` or `auth` | done / idle, then error (a login error too) |
-| Claude `Stop` with `background_tasks` in flight | none (and no idle question until the next turn), unless the last message asks you something (`question`), only services or tasks that ran before your prompt are left (`done`) | background (+ an OSC 7501 `working` record, see below); waiting (+ a `blocked` record) for a question |
+| Claude `Stop` with `background_tasks` in flight | none (and no idle question until the next turn), unless the last message asks you something (`question`), only services or tasks that ran before your prompt are left (`done`) | background (+ `bg_working`, see below); waiting (+ `bg_question`) for a question |
 | Claude `Stop` with `session_crons` set, turn started by a schedule | none (a question: `question`) | background, `scheduled: <schedule>` |
 | Claude `Stop` with no schedule left, turn started by a schedule | `done` to the SSH tunnel only, at once (the app lists it without an alert); one that ends asking you something is a plain `done` | `done_scheduled` (`done` when it asks) |
 | Claude `PostToolUseFailure` with `is_interrupt` (Esc; not for a subagent's tool, `agent_id` set) | none | idle |
@@ -293,7 +293,7 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | Copilot `notification` (permission prompt, question) | `question` (an alert) | none |
 | Copilot `preToolUse` `exit_plan_mode` | `question` (plan) | none |
 | Copilot `agentStop` | `done` (none while background shells or subagents run, as for Claude Code; after a turn a `/every` or `/after` schedule started, none while a schedule is left, and the last one to the SSH tunnel only); a subagent's own stop: `state` `sub_stop` | none |
-| Copilot `userPromptSubmitted`, `sessionEnd`, `subagentStart`/`Stop` | `state` (SSH tunnel only); `error` when a session ends on one | none |
+| Copilot `userPromptSubmitted`, `sessionEnd`, `subagentStart`/`Stop` | `state` (SSH tunnel only); `error` when a session ends on one | none; on `sessionEnd` an OSC 7501 `clear` on the terminal (see below) |
 | `simpleterm notify` | `notify` | OSC 777 notification instead |
 
 **Background work is not done.** Claude Code (2.1.145+), Grok Build and OpenCode end a turn while a
@@ -302,10 +302,18 @@ it reports back (OpenCode 2.x: `shell.created`/`shell.exited`, sent as `backgrou
 running child sessions; 1.x background subagents: busy child sessions). Such a `Stop` lists that work (`background_tasks`, Grok `backgroundTasks`), so the
 hook sends no `done` and no idle question then; the turn the agent takes up later sends `done` as
 usual. The badge says `background`. Claude Code 2.1.295+ also reports its own turns through OSC
-7501 and counts only background subagents as working, so the hook adds a `working` record of its
-own (`id=simpleterm-bg`) and takes it back when the next turn starts; it writes that record only
-when the transcript names 2.1.295 or later, outside tmux and screen, and without
-`CLAUDE_CODE_DISABLE_TERMINAL_TITLE`. Codex's background terminals and subagents do not wake it,
+7501 and counts only background subagents as working, and it drops a hook's OSC 7501 (it passes
+on only OSC 0, 1, 2, 9, 99, 777 and BEL in `terminalSequence`, and drops the whole field for one
+sequence outside them). So the hook writes the pause as one more OSC 9 value after the badge's:
+`simpleterm:state=bg_working <what runs>`, and `simpleterm:state=bg_clear` in the first output of
+the next turn, also when the pause ended without an output meanwhile (the late `done` below) and
+in the new session of `/clear`, `/resume` or `/branch` in the same folder (a mark,
+`~/.simpleterm/run/<session>.bgclr`, says the screen still shows the pause; it is kept 30 days);
+SimpleTerm reads them as a record of the terminal (`simpleterm-bg`), and an older
+app drops them and keeps the badge's value. It writes them only when the transcript names 2.1.295
+or later, outside tmux and screen, and without `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` (0.3.1 to 0.6.0
+put an OSC 7501 record there instead, which Claude Code dropped together with the badge's value).
+Codex's background terminals and subagents do not wake it,
 so its `Stop` is done then; a `/goal` does (Codex starts each next turn itself), so no `done` while
 the rollout's last `thread_goal_updated` is `active` and no `update_goal` call followed it, unless
 no next turn starts within `codex_goal_check` seconds (default 5: a goal can also end blocked, on
@@ -327,8 +335,8 @@ there):
   like), or an English ask (`Should I`, `Shall I`, `Would you like`, `Do you want`, `Let me know which` or `whether`,
   `Want me to`, `Please confirm`). It is a reading of text, not a protocol, so a wrong guess costs
   one extra alert. The word lists are one table (`ASK_AWK` in `agent-hook.sh`). Claude Code
-  2.1.295+ gets a `blocked` (kind `question`) OSC 7501 record `simpleterm-bg` instead of the
-  `working` one; the next turn takes it back. The idle question 60 s later stays suppressed.
+  2.1.295+ gets `simpleterm:state=bg_question <the question>` instead of `bg_working`; the next
+  turn writes `bg_clear`. The idle question 60 s later stays suppressed.
 - **Services are not waited for.** A background shell is a service when its command is a known
   one, at the command position. When in doubt it is not: a wrong "service" ends the turn early and
   sends a second `done` later, while a missed one only delays the `done` to `bg_done_after`. The
@@ -434,6 +442,16 @@ binary's schema, not yet captured from a background subagent's `PostToolUse`) ca
 session id too, but are no sign of the main thread going on, so a `done` that leaves background
 work running is not lost to them. A `done` whose `Stop` carried `stop_hook_active: true` also carries
 `"stop_hook_active":true` in its plaintext.
+
+**The end of a Copilot CLI session.** Copilot CLI writes no OSC 7501 `clear` when it exits
+(1.0.109), so SimpleTerm would keep it as the tab's agent until the next shell prompt. On
+`sessionEnd` the hook writes `ESC ] 7501 ; state=clear BEL` to its terminal, before anything else,
+once: only in a SimpleTerm session (`SIMPLETERM=1`), outside tmux, screen and herdr (`TMUX`, `STY`
+and `HERDR_ENV` all empty: there the bytes would reach the multiplexer, and a `clear` passed out of
+one pane could end another pane's agent), and when `/dev/tty` opens (`copilot -p` in a pipe has
+none). Otherwise it writes nothing. Copilot runs its hooks in the shell's session, so the write
+lands before Copilot puts the terminal back. The other agents clear their own (Claude Code, Codex,
+Grok Build) or have no end hook (OpenCode, Antigravity CLI).
 
 Codex runs a `PermissionRequest` hook before it shows its own approval prompt, so while the hook
 waits the terminal shows only `Waiting for approval in SimpleTerm`. The wait is 60 seconds by

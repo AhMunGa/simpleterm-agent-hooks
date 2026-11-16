@@ -51,7 +51,7 @@ LOGGED=0
 MAX_INPUT=262144
 MAX_LINKS=16
 # The plugin release of this script (the manifests carry the same).
-HOOK_VERSION=0.6.0
+HOOK_VERSION=0.7.0
 # Bumped when the ~/.simpleterm/bin/simpleterm wrapper must be rewritten.
 CLI_REV=2
 CR=$(printf '\r')
@@ -1876,10 +1876,18 @@ sess_keep() {
 # --- terminal sequence (Claude Code only, SimpleTerm sessions only) ---------
 
 # USAGE_SEQ is the JSON-escaped usage OSC to append, if any (usage_report);
-# BG_SEQ the hook's OSC 7501 record for background work (bg_pause, note).
+# BG_VAL the background pause's screen value to write after the state
+# (bg_working, bg_question or bg_clear; bg_pause, note), with the state's
+# message but for bg_clear (SimpleTerm if/terminal-signals-bg#plugin). A
+# written bg_clear takes the screen's mark away ($SID.bgclr, bg_pause): the
+# pause is off the screen only once an output said so.
 # [first] is a value written just before the state, in the same output: an app
 # that does not know the state drops it and is left with that one
 # (SimpleTerm if/terminal-signals#structured).
+# Claude Code passes terminalSequence on only when every sequence in it is
+# OSC 0, 1, 2, 9, 99, 777 or BEL and the whole is 4096 bytes at most, and an
+# OSC 9 starts with a digit only as 9;4; anything else drops the whole field
+# (SimpleTerm hist/hook-events#e28). OSC 9 alone is written here.
 print_state() { # running|waiting|done|done_scheduled|background|idle|error [message [first]]
   [ "$AGENT" = claude ] || return 0
   [ "${SIMPLETERM:-}" = 1 ] || return 0
@@ -1887,7 +1895,16 @@ print_state() { # running|waiting|done|done_scheduled|background|idle|error [mes
   [ -n "${2:-}" ] && m=' '$(json_trim "$2" 80 320)
   p=''
   [ -n "${3:-}" ] && p='\u001b]9;simpleterm:state='$3'\u0007'
-  printf '{"terminalSequence":"%s\\u001b]9;simpleterm:state=%s%s\\u0007%s%s"}\n' "$p" "$1" "$m" "$BG_SEQ" "$USAGE_SEQ"
+  psb=''
+  case $BG_VAL in
+    bg_clear)
+      psb='\u001b]9;simpleterm:state=bg_clear\u0007'
+      rm -f "$RUN_DIR/$SID.bgclr" 2>/dev/null
+      BG_VAL=''
+      ;;
+    ?*) psb='\u001b]9;simpleterm:state='$BG_VAL$m'\u0007' ;;
+  esac
+  printf '{"terminalSequence":"%s\\u001b]9;simpleterm:state=%s%s\\u0007%s%s"}\n' "$p" "$1" "$m" "$psb" "$USAGE_SEQ"
 }
 
 print_usage() {
@@ -4102,33 +4119,36 @@ ask_seen() { # ere [ere-not]
 # if/usage-ask-refresh#no-cut); its output in
 # $AQ.out. Sets AQ_RES: ok (got $AQ_WAIT2), gone (ended without it) or
 # timeout.
+# One deadline (the clock, not a count of rounds: a round takes longer than
+# its second on a loaded machine) decides the timeout, and the watcher alone
+# judges it: the input stays open until the watcher is done ($AQ.done), so
+# the agent cannot end for want of input before its time is judged (a
+# timeout read as gone, then `failed`: SimpleTerm issue #811). The input's
+# own limit, 30 seconds later, is for a watcher that is gone.
 ask_pipe() { # command...
   : >"$AQ.out"
   rm -f "$AQ.done"
   ask_group_how
+  aq_end=$(($(date +%s) + $(ask_wait)))
   (
     ask_env
     {
       cat "$AQ.in"
       if [ -n "$AQ_WAIT1" ]; then
-        aw=0
-        while [ "$aw" -lt 60 ] && [ ! -f "$AQ.done" ]; do
+        while [ "$(date +%s)" -lt "$aq_end" ] && [ ! -f "$AQ.done" ]; do
           case $(head -c 1048576 "$AQ.out" 2>/dev/null) in *"$AQ_WAIT1"*) break ;; esac
           sleep 1
-          aw=$((aw + 1))
         done
         cat "$AQ.more" 2>/dev/null
       fi
-      aw=0
-      while [ "$aw" -lt 60 ] && [ ! -f "$AQ.done" ]; do sleep 1; aw=$((aw + 1)); done
+      while [ "$(date +%s)" -lt $((aq_end + 30)) ] && [ ! -f "$AQ.done" ]; do sleep 1; done
     } | ask_exec "$@" >"$AQ.out" 2>/dev/null &
     apid=$!
-    aw=0 res=timeout
-    while [ "$aw" -lt 60 ]; do
+    res=timeout
+    while [ "$(date +%s)" -lt "$aq_end" ]; do
       ask_seen "$AQ_WAIT2" "$AQ_NOT2" && { res=ok; break; }
       kill -0 "$apid" 2>/dev/null || { res=gone; break; }
       sleep 1
-      aw=$((aw + 1))
     done
     ask_seen "$AQ_WAIT2" "$AQ_NOT2" && res=ok
     printf '%s\n' "$res" >"$AQ.res"
@@ -4141,6 +4161,17 @@ ask_pipe() { # command...
     fi
   ) </dev/null >/dev/null 2>&1
   AQ_RES=$(cat "$AQ.res" 2>/dev/null)
+}
+
+# The seconds an ask waits for its answer: 60 (ask_pipe); tests only
+# (SIMPLETERM_HOOK_TEST=1) may set fewer in SIMPLETERM_HOOK_TEST_ASK_WAIT.
+ask_wait() {
+  if [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && is_uint "${SIMPLETERM_HOOK_TEST_ASK_WAIT:-}" &&
+    [ "$SIMPLETERM_HOOK_TEST_ASK_WAIT" -ge 1 ] && [ "$SIMPLETERM_HOOK_TEST_ASK_WAIT" -le 60 ]; then
+    printf '%s' "$SIMPLETERM_HOOK_TEST_ASK_WAIT"
+  else
+    printf 60
+  fi
 }
 
 # The first line of $AQ.out matching extended regular expression $1 and not
@@ -4380,6 +4411,21 @@ ask_once() {
   once "q.$(printf '%s|%s' "$SID" "${QTEXT:-$DESC}" | cksum | awk '{ print $1 }')"
 }
 
+# Copilot CLI writes no OSC 7501 `clear` when it ends (1.0.109), and the app
+# would keep its agent session until a shell prompt: on sessionEnd the hook
+# writes that root `clear` to its terminal before anything else, once. Only
+# in a SimpleTerm session outside a multiplexer (tmux, screen, herdr: the
+# bytes would reach the multiplexer, and a `clear` passed out of one pane
+# could end another pane's agent on the tab) and when /dev/tty opens (no
+# terminal, nothing to clear); else nothing, silently. Copilot's hook runs in
+# the shell's session and its write lands before Copilot restores the
+# terminal (measured; SimpleTerm if/hook-events#session-end).
+copilot_end_clear() {
+  [ "${SIMPLETERM:-}" = 1 ] && [ -z "${TMUX:-}" ] && [ -z "${STY:-}" ] && [ -z "${HERDR_ENV:-}" ] || return 0
+  { printf '\033]7501;state=clear\007' >/dev/tty; } 2>/dev/null
+  return 0
+}
+
 # --- main ----------------------------------------------------------------
 
 case $AGENT in
@@ -4402,6 +4448,9 @@ case $AGENT in
   notify) APP=script ;;
   *) exit 0 ;;
 esac
+# Our Copilot hooks name the event on the command line; a Claude-format hook
+# (COPILOT_CLI=1) has it in the input (read below).
+[ "$AGENT" = copilot ] && [ "$MODE" = sessionEnd ] && copilot_end_clear
 
 if [ "$AGENT" = codex-notify ]; then
   INPUT=''
@@ -4568,7 +4617,7 @@ HB_KIND='' HB_APID='' HB_RESBASE=''
 TPATH='' CTXTOK='' MODEL='' GTYPE='' FULLYIDLE='' TERMREASON='' EXTRA='' GKEY='' REASON=''
 PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS='' REQIDIN='' TOOLUSEID=''
 OCTITLE='' OCBY='' OCCOST='' OCTIN='' OCTOUT='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX=''
-BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_SEQ=''
+BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_VAL=''
 BG_SVC=0 BG_IDMAP='' BG_KEEP='' BG_SHELLS='' BG_IDS='' BG_NOID=0 BG_M=''
 CRON_N=0 CRON_SCHED='' CRON_SUMS='' CRON_IDS='' PROMPT_SCHED='' COPILOT_SRC='' COPILOT_REP='' COPILOT_DET='' REPORT_ID=''
 
@@ -5186,6 +5235,7 @@ if [ "$AGENT" = copilot ]; then
     SubagentStart) EVENT=subagentStart ;;
     SubagentStop) EVENT=subagentStop ;;
   esac
+  [ -z "$MODE" ] && [ "$EVENT" = sessionEnd ] && copilot_end_clear
 fi
 RAWSID=$SID
 SID=$(printf '%s' "$SID" | tr -c 'A-Za-z0-9_-' '_' | cut -c1-80)
@@ -5215,16 +5265,17 @@ esac
 
 # Lets a waiting permission hook see that the agent moved on. A new turn
 # starts the file over, so it holds at most one turn of tool calls, and ends
-# a background pause (bg_pause), taking back its OSC 7501 record.
+# a background pause (bg_pause). While the screen still shows a pause
+# ($SID.bgclr: its value went out and no bg_clear since, however the pause
+# ended meanwhile: bg_later's done, a turn whose hook wrote nothing) the
+# turn's output says bg_clear after its state (a pause the same output opens
+# replaces it with its own); the mark stays until an output does
+# (print_state).
 note() { # turn | tool fingerprint
   if [ "$1" = turn ]; then
     printf '%s turn -\n' "$(date +%s)" >"$RUN_DIR/$SID.res" 2>/dev/null
-    rm -f "$RUN_DIR/$SID.goal" "$RUN_DIR/$SID.done" 2>/dev/null
-    if [ -f "$RUN_DIR/$SID.bg" ]; then
-      [ "$(sed -n 2p "$RUN_DIR/$SID.bg" 2>/dev/null)" = 7501 ] &&
-        BG_SEQ="\\u001b]7501;state=clear:id=$BG_ID\\u0007"
-      rm -f "$RUN_DIR/$SID.bg" 2>/dev/null
-    fi
+    rm -f "$RUN_DIR/$SID.goal" "$RUN_DIR/$SID.done" "$RUN_DIR/$SID.bg" 2>/dev/null
+    [ -f "$RUN_DIR/$SID.bgclr" ] && BG_VAL=bg_clear
   else
     printf '%s tool %s\n' "$(date +%s)" "$2" >>"$RUN_DIR/$SID.res" 2>/dev/null
   fi
@@ -5235,18 +5286,21 @@ note() { # turn | tool fingerprint
 # workflows). It takes the turn up again when that work reports back, so the
 # session is not done: no `done` event, a `background` state instead, and no
 # idle question until the next turn note. $RUN_DIR/$SID.bg holds the state's
-# message meanwhile, and `7501` on its second line when the hook wrote the
-# OSC 7501 record below.
+# message meanwhile, and `screen` on its second line when the hook wrote the
+# screen value below.
 #
-# Claude Code 2.1.295+ reports itself through OSC 7501 and SimpleTerm then
+# Claude Code 2.1.295+ reports itself through OSC 7501, and SimpleTerm then
 # follows that, not `simpleterm:state`. For its own turn it reports `done`
-# (it counts background subagents as working, shells and monitors not), so
-# the hook adds a `working` record of its own, id $BG_ID: SimpleTerm shows the
-# most urgent record of a terminal. Claude Code runs Stop hooks before it
-# reports the turn's end, so the record is there first. Only where Claude
-# Code speaks OSC 7501 itself: elsewhere a record of the hook's would make
-# SimpleTerm stop reading `simpleterm:state`.
-BG_ID=simpleterm-bg
+# (it counts background subagents as working, shells and monitors not) right
+# after the Stop hooks' output (8 to 14 ms, measured). Claude Code drops a
+# hook's OSC 7501 (print_state), so the hook writes the pause as one more
+# OSC 9 value after the state: bg_working, or bg_question when the turn ended
+# asking, and bg_clear at the next turn. SimpleTerm reads them as the 7501
+# record simpleterm-bg of that terminal; an app that does not know them drops
+# them and keeps the state written first (SimpleTerm if/terminal-signals-bg).
+# Only where Claude Code speaks OSC 7501 itself (claude_speaks_7501: a
+# guess from the environment and the transcript's version): elsewhere the
+# state alone already reaches SimpleTerm, or nothing does.
 bg_paused() { [ -f "$RUN_DIR/$SID.bg" ]; }
 
 claude_speaks_7501() {
@@ -5258,26 +5312,6 @@ claude_speaks_7501() {
   tail -c 65536 "$f" 2>/dev/null | awk '
     { s = $0; while (match(s, /"version"[ ]*:[ ]*"[0-9][0-9.]*"/)) { v = substr(s, RSTART, RLENGTH - 1); s = substr(s, RSTART + RLENGTH); sub(/.*"/, "", v) } }
     END { n = split(v, x, "."); exit !(n >= 3 && (x[1] > 2 || (x[1] == 2 && (x[2] > 1 || (x[2] == 1 && x[3] >= 295))))) }'
-}
-
-# Text (JSON-escaped) as standard base64 for an OSC 7501 field; nothing for
-# escapes other than \" \\ \/ or without openssl.
-b64_text() {
-  t=$(printf '%s\n' "$1" | awk '{
-    s = $0; out = ""
-    for (i = 1; i <= length(s); i++) {
-      c = substr(s, i, 1)
-      if (c == "\\") {
-        e = substr(s, i + 1, 1)
-        if (e != "\\" && e != "/" && e != "\"") exit 1
-        c = e; i++
-      }
-      out = out c
-    }
-    print out
-  }' 2>/dev/null) || return 0
-  command -v openssl >/dev/null 2>&1 || return 0
-  printf '%s' "$t" | openssl base64 -A 2>/dev/null
 }
 
 # The first counted task (or, with only scheduled wake-ups, the first
@@ -5302,27 +5336,22 @@ bg_summary() {
 # The turn ended and the agent waits for background work or a schedule. Not
 # done: the badge says `background` (note in $SID.bg), unless the last
 # message asks the user something (pause ask): then the user is told, as
-# `question`, the badge says `waiting`, and Claude Code 2.1.295+ gets a
-# `blocked` OSC 7501 record (kind question) instead of the `working` one.
+# `question`, and the badge says `waiting`. Where Claude Code 2.1.295+ speaks
+# OSC 7501 the state is followed by bg_working, or bg_question when asking.
 bg_pause() {
   bg_summary
   flag=''
   if [ "$AGENT" = claude ] && [ "${SIMPLETERM:-}" = 1 ] && claude_speaks_7501; then
-    flag=7501
-    if [ "${1:-}" = ask ]; then
-      e=$(b64_text "$(json_trim "$LAST" 200 800)")
-      case $e in *[!A-Za-z0-9+/=]*) e='' ;; esac
-      BG_SEQ="\\u001b]7501;state=blocked:id=$BG_ID:kind=question${e:+:msg=$e}\\u0007"
-    else
-      e=$(b64_text "$BG_M")
-      case $e in *[!A-Za-z0-9+/=]*) e='' ;; esac
-      BG_SEQ="\\u001b]7501;state=working:id=$BG_ID${e:+:msg=$e}\\u0007"
-    fi
+    flag=screen
+    if [ "${1:-}" = ask ]; then BG_VAL=bg_question; else BG_VAL=bg_working; fi
   fi
-  # Line 1: the badge's message (the question when asking), 2: the OSC 7501
-  # flag, 3: the pause's token, 4: `ask` while the badge says `waiting`.
+  # Line 1: the badge's message (the question when asking), 2: `screen` when
+  # the screen value went out, 3: the pause's token, 4: `ask` while the badge
+  # says `waiting`. The screen's mark ($SID.bgclr) outlives this file: it goes
+  # only with an output that says bg_clear (note, print_state).
   if [ "${1:-}" = ask ]; then bm=$(json_trim "$LAST" 80 320); else bm=$BG_M; fi
   printf '%s\n%s\n%s\n%s\n' "$bm" "$flag" "$RID" "${1:-}" >"$RUN_DIR/$SID.bg" 2>/dev/null
+  [ -n "$flag" ] && printf '' 2>/dev/null >"$RUN_DIR/$SID.bgclr"
   pend=background
   [ "$BG_N" -eq 0 ] && [ "$CRON_N" -gt 0 ] && pend=scheduled
   if [ "${1:-}" = ask ]; then
@@ -5346,7 +5375,9 @@ bg_pause() {
 # and then nothing else would come. After bg_done_after seconds (default
 # 600) of the same pause, `done` goes once, saying what still runs. A new
 # turn or another pause ends the wait. The event is made then (fresh rid and
-# time: a link refuses events more than 5 minutes old).
+# time: a link refuses events more than 5 minutes old). The pause file goes
+# with it; the screen's mark ($SID.bgclr) stays, so the next turn still says
+# bg_clear (this wait has no output to write it in).
 bg_later() { # token what
   [ -n "$LINKS" ] || return 0
   w=$(conf_int bg_done_after 600)
@@ -5464,8 +5495,34 @@ print_running() {
 turn_end() {
   ensure_cli
   # (Kept: the hold after an ask got auth or not-subscriber, until the
-  # credentials change, the stopped versions and the count of failed asks.)
-  find "$RUN_DIR" -type f -mtime +0 ! -name 'ask.*.auth' ! -name 'ask.*.off' ! -name 'ask.*.fail' -exec rm -f {} + 2>/dev/null
+  # credentials change, the stopped versions and the count of failed asks;
+  # and 30 days, the mark of a pause still on the screen, which the session's
+  # next turn clears however late it comes: note.)
+  find "$RUN_DIR" -type f -mtime +0 ! -name 'ask.*.auth' ! -name 'ask.*.off' ! -name 'ask.*.fail' ! -name '*.bgclr' -exec rm -f {} + 2>/dev/null
+  find "$RUN_DIR" -type f -name '*.bgclr' -mtime +29 -exec rm -f {} + 2>/dev/null
+}
+
+# Claude Code's /clear, /resume and /branch go on in the same process, on
+# the same screen, under a new session id: SessionEnd with reason clear or
+# resume, then SessionStart with source clear, resume or fork (Claude Code
+# hooks reference; the new id: SimpleTerm hist/agent-sessions#e7). A pause
+# still on the screen ($SID.bgclr) goes to the new session, whose first turn
+# then says bg_clear (note). The hand-over is named by the folder and taken
+# within two minutes; a session that ends for good hands nothing on.
+bg_handoff() { # out | in
+  [ "$AGENT" = claude ] || return 0
+  hf=$RUN_DIR/bgclr.$(printf '%s' "$CWD" | cksum | awk '{ print $1 }')
+  if [ "$1" = out ]; then
+    case $REASON in clear | resume) ;; *) return 0 ;; esac
+    [ -f "$RUN_DIR/$SID.bgclr" ] || return 0
+    printf '' 2>/dev/null >"$hf" && rm -f "$RUN_DIR/$SID.bgclr" 2>/dev/null
+  else
+    case $SRC in clear | resume | fork) ;; *) return 0 ;; esac
+    [ -f "$hf" ] || return 0
+    [ -n "$(find "$hf" -mmin -2 2>/dev/null)" ] && printf '' 2>/dev/null >"$RUN_DIR/$SID.bgclr"
+    rm -f "$hf" 2>/dev/null
+  fi
+  return 0
 }
 
 # --- who started a turn, and what ran before it ------------------------------
@@ -6205,6 +6262,7 @@ case $AGENT:$EVENT in
     usage_report
     print_usage
     if [ "$EVENT" = SessionStart ]; then
+      bg_handoff in
       ensure_cli
       sess_start
       sess_ok && [ ! -f "$SESS.json" ] && sess_turn idle
@@ -6221,6 +6279,7 @@ case $AGENT:$EVENT in
       send_bg error
     fi
     rm -f "$RUN_DIR/$SID.cerr" "$RUN_DIR/$SID.schedtasks" "$RUN_DIR/$SID.cronids" 2>/dev/null
+    bg_handoff out
     printf '' 2>/dev/null >"$RUN_DIR/t0.$$"
     # The record first: Codex gives this hook 3 seconds at most and then
     # ends its process group (0.165.0, measured).
@@ -6238,6 +6297,9 @@ case $AGENT:$EVENT in
     ;;
   claude:Stop | codex:Stop)
     note turn
+    # A session title, not a turn's end (Codex's title generation; for Claude
+    # Code no evidence that it comes): nothing is written, and a pause still
+    # on the screen keeps its mark for the next output (note).
     case $LAST in '{\"title\":'*) finish ;; esac
     gf=''
     [ "$AGENT" = codex ] && gf=$(input_file "$TPATH")
