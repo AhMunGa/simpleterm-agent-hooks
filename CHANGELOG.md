@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+## 0.7.0 - 2026-11-17
+
+- **Claude Code background pause on the screen** (SimpleTerm `if/terminal-signals-bg`, `hist/hook-events#e28`,
+  issue AhMunGa/simple-term#804): Claude Code passes a hook's `terminalSequence` on only when every sequence in it is
+  OSC 0, 1, 2, 9, 99, 777 or BEL, and drops the whole field for one OSC 7501 (2.1.141 to 2.1.325). The OSC 7501
+  record `simpleterm-bg` that 0.3.1 to 0.6.0 put there therefore never reached the terminal, and the badge's own
+  `background`, `waiting` or `running` went with it. The hook now writes no OSC 7501 there: where Claude Code
+  speaks OSC 7501 itself (the same check as before) it writes, after the old value, the OSC 9 value `bg_working`
+  (a pause, with the pause's summary), `bg_question` (a pause that asks, with the question) or `bg_clear` (in the
+  first output of the next turn while a pause is open: `UserPromptSubmit`, or a `Stop`, `StopFailure` or Esc
+  interrupt that comes first; a `Stop` that pauses again writes its own value instead). The message is the old
+  value's, cut the same way. An app that does not know the values drops them and keeps the old one. The sh and the
+  PowerShell hook.
+- **Copilot CLI session end** (SimpleTerm `if/hook-events#session-end`, `hist/hook-events#d10`, `#e27`): on
+  `sessionEnd` the hook writes `ESC ] 7501 ; state=clear BEL` to `/dev/tty`, before anything else and once, in a
+  SimpleTerm session outside tmux, screen and herdr, when the terminal opens; else nothing. Copilot CLI writes no
+  `clear` itself (1.0.109), so the app kept it as the tab's agent until a shell prompt. The sh hook (Copilot runs
+  no PowerShell hook).
+- **Usage ask timeout** (issue AhMunGa/simple-term#811): the sh hook's ask counted its 60 seconds in rounds in two
+  loops, and on a loaded machine the input side closed first; the agent then ended for want of input and the ask
+  was read as gone (`failed`, which counts toward stopping that version) instead of `timeout`. One deadline on the
+  clock now decides, the watcher alone judges it, and the input stays open until it has. The PowerShell hook had
+  one loop already.
+- **Tests**: the runner checks every `terminalSequence` any hook prints against what Claude Code passes on (the
+  allowlist above, 4096 bytes, no OSC 9 starting with a digit but `9;4`); the 0.6.0 hooks fail it. The runner has
+  environments per server OS (ubuntu: dash and OpenSSL 3; macos: `/bin/sh` and LibreSSL; windows: PowerShell 7;
+  compat: the cases another `sh` must pass), waits for conditions instead of fixed sleeps, and an environment that
+  cannot run counts as a failure (README "Development"). A test-only `SIMPLETERM_HOOK_TEST_ASK_WAIT` shortens the
+  ask's wait.
+
 ## 0.6.0 - 2026-11-16
 
 The install, update and move commands of the README take the branch `release` (SimpleTerm
