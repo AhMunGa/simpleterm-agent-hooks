@@ -6427,7 +6427,15 @@ def t_v2_tab(s):
         case("tb-cx-exact-noenv", stale, {"st": "c", "why": "daemon"}, "tmux",
              procs=daemon("tb-cx-exact-noenv", {510: other, 511: {"ppid": 80, "comm": "codex", "args": "codex resume tb-cx-exact-noenv"}}), **cx)
         case("tb-cx-exact-two", {}, {"st": "c", "why": "daemon"},
-             procs=daemon("tb-cx-exact-two", {511: tui({"LC_SIMPLETERM_TAB": MK_B}, "codex resume tb-cx-exact-two LC_SIMPLETERM_TAB=" + MK_C)}), **cx)
+             procs=daemon("tb-cx-exact-two", {511: resumed("tb-cx-exact-two", {"LC_SIMPLETERM_TAB": MK_B, "NOTE": "x LC_SIMPLETERM_TAB=" + MK_C})}), **cx)
+        # No word of an argument is read as a variable: a marker there is not the tab's, and a k=v there
+        # does not make a hidden environment "read, no marker".
+        case("tb-cx-exact-argmark", {}, {"st": "a", "tm": MK_B},
+             procs=daemon("tb-cx-exact-argmark", {511: tui({"LC_SIMPLETERM_TAB": MK_B}, "codex resume tb-cx-exact-argmark LC_SIMPLETERM_TAB=" + MK_C)}), **cx)
+        case("tb-cx-exact-argonly", {}, {"st": "b"},
+             procs=daemon("tb-cx-exact-argonly", {511: tui({}, "codex resume tb-cx-exact-argonly LC_SIMPLETERM_TAB=" + MK_C)}), **cx)
+        case("tb-cx-exact-hidden", stale, {"st": "c", "why": "daemon"}, "tmux",
+             procs=daemon("tb-cx-exact-hidden", {510: other, 511: {"ppid": 80, "comm": "codex", "args": "codex -c model_reasoning_effort=high resume tb-cx-exact-hidden"}}), **cx)
         # Its parent is gone: whether it runs inside a multiplexer cannot be told.
         case("tb-cx-exact-orphan", {}, {"st": "c", "why": "daemon"},
              procs=daemon("tb-cx-exact-orphan", {511: resumed("tb-cx-exact-orphan", {"LC_SIMPLETERM_TAB": MK_B}, ppid=999)}), **cx)
@@ -6461,6 +6469,10 @@ def t_v2_tab(s):
         case("tb-cx-nohost", stale, {"st": "c", "why": "daemon"}, "tmux",
              procs={80: {"ppid": 1, "comm": "-zsh"}, 500: {"ppid": 510, "comm": "sh"}, 510: {"ppid": 80, "comm": "node", "args": "node x.js"}}, **cx)
         case("tb-cx-noread", {"LC_SIMPLETERM_TAB": MK_A, "TMUX": "/x,1,0", "TMUX_PANE": "%2"}, {"st": "c", "why": "daemon"}, "tmux", agent="codex", off=True)
+        # Another app-server (an IDE's, not the managed daemon): its environment is not a tab's either.
+        case("tb-cx-appserver", stale, {"st": "c", "why": "daemon"}, "tmux",
+             procs={80: {"ppid": 1, "comm": "-zsh"}, 500: {"ppid": 501, "comm": "sh"},
+                    501: {"ppid": 80, "comm": "codex", "args": "codex app-server --listen stdio://"}, 510: other}, **cx)
         # The same from /proc: the candidates listed there, and a line feed inside another variable's
         # value does not make a marker.
         lcx = {80: {"ppid": 1, "comm": "bash"}, 500: {"ppid": 501, "comm": "sh"},
@@ -6541,6 +6553,20 @@ def t_v2_tab(s):
         r = json.loads((sd / "cx-rec-sole-tmux.json").read_text())
         s.check("tab cx-rec-again: a record that is there is kept up without a TUI to tie it to, with the multiplexer it had",
                 r.get("last_prompt") == "again" and r.get("mux") == "tmux", str(r)[:300])
+        # A late prompt-less event of a recorded session whose TUI has gone, the only TUI left being another
+        # tab's inside tmux: the record does not take that TUI's multiplexer. A TUI tied by its arguments does.
+        root = tab_bin(base / "cx-rec-late-other", procs=daemon("cx-rec-sole", merged(in_tmux, {510: tui(marked, ppid=86)})))
+        s.run("codex", json.dumps(dict(json.loads(cx_in("cx-rec-sole", "UserPromptSubmit")), prompt="late")),
+              dict(SIMPLETERM_HOOK_TEST="1", SIMPLETERM_HOOK_TEST_IDBIN=str(root), SIMPLETERM_HOOK_TEST_IDPPID="500"))
+        r = json.loads((sd / "cx-rec-sole.json").read_text())
+        s.check("tab cx-rec-late-other: the record of a session does not take the multiplexer of another tab's only TUI",
+                r.get("last_prompt") == "late" and "mux" not in r, str(r)[:300])
+        root = tab_bin(base / "cx-rec-late-tied", procs=daemon("cx-rec-sole", merged(in_tmux, {510: tui({}), 511: resumed("cx-rec-sole", marked, ppid=86)})))
+        s.run("codex", json.dumps(dict(json.loads(cx_in("cx-rec-sole", "UserPromptSubmit")), prompt="tied")),
+              dict(SIMPLETERM_HOOK_TEST="1", SIMPLETERM_HOOK_TEST_IDBIN=str(root), SIMPLETERM_HOOK_TEST_IDPPID="500"))
+        r = json.loads((sd / "cx-rec-sole.json").read_text())
+        s.check("tab cx-rec-late-tied: the record takes the multiplexer of the TUI tied to the session by its arguments",
+                r.get("last_prompt") == "tied" and r.get("mux") == "tmux", str(r)[:300])
         # The relay summary over budget: msess goes first (and is recorded in cut); mux and pane stay.
         tctl("/_ctl/reset", {})
         tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, push="suppressed", unknown_error="unknown", max_body=65536)}})

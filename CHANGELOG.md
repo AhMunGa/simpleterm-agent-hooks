@@ -18,8 +18,8 @@ Which terminal tab a hook runs for (SimpleTerm `if/hook-tab-identity` phase 1, `
   the one TUI started as `resume <session>` (TUIs started with `--no-daemon`, the daemon's own children and
   other app-servers are not candidates), and that TUI is judged: inside a multiplexer `c` `mux`, a marker `a`,
   none `b`, unreadable `c` `daemon`; no such TUI: `c` `daemon` with `n` and `cl` (the only TUI is a
-  candidate, not the session's: an event can come after the session's TUI has gone); a host that cannot be
-  read: `c` `daemon`. OpenCode 2.x is always `c` `daemon`;
+  candidate, not the session's: an event can come after the session's TUI has gone); another
+  `codex app-server` (an IDE's) or a host that cannot be read: `c` `daemon`. OpenCode 2.x is always `c` `daemon`;
   (2) a multiplexer: `TMUX`, `STY`, herdr, or an `abduco` or `dtach` master among the hook's ancestors up to
   the SSH or login process (they set no variable; `mux` is not sent for those two); (3) the marker (`a`, or `c`
   `form`); (4) a container signal,
@@ -28,7 +28,8 @@ Which terminal tab a hook runs for (SimpleTerm `if/hook-tab-identity` phase 1, `
   subcommand, of the pane's session). A client with a multiplexer server among its ancestors (told by command
   names), one whose ancestors cannot be read and one that has gone count in `n` only. From a client's or a
   TUI's environment only the value of `LC_SIMPLETERM_TAB` is taken (Linux `/proc/<pid>/environ` one entry at a
-  time, macOS `ps -E -p` cut out in the same pipeline; two different values: none is taken); nothing else is
+  time, macOS `ps -E -p` with the command line taken off the front and cut out in the same pipeline; two
+  different values: none is taken); nothing else is
   kept, written or sent. Windows reads none. The README's Privacy section states the rules.
 - **Scope fields**: `msess` (herdr's named session, tunnel and relay; the relay summary drops it first when it is
   over budget, recorded in `cut`) and `msock` (the tmux socket path, tunnel only; sent as it is or not at all:
@@ -37,7 +38,8 @@ Which terminal tab a hook runs for (SimpleTerm `if/hook-tab-identity` phase 1, `
 - **Session record of a Codex hook**: a record that is there is kept up without a look at any process; a new one
   is made at a prompt or a session's start only. In the daemon it is made only for a TUI whose own environment
   has the tab marker (the one tied by its arguments, else the only TUI), with the multiplexer that TUI runs in
-  (by its ancestors); before, the daemon's `SIMPLETERM` decided, which belonged to the TUI that started the
+  (by its ancestors; a record that is there changes its multiplexer only for a tied TUI); before, the
+  daemon's `SIMPLETERM` decided, which belonged to the TUI that started the
   daemon. A Codex that runs its hooks itself (`--no-daemon`) goes by `SIMPLETERM` as before, and so does
   Windows.
 - Codex sends no `pane`, as before, and the multiplexer fields of every agent are as before.

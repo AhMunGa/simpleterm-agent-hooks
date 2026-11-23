@@ -2263,7 +2263,8 @@ function Get-IdArgs([string]$id) {
     return $o
 }
 # The tab marker in the environment of process $id (id_mark): Linux environ, one entry at a time; macOS
-# ps -E, one word at a time. Only the value of LC_SIMPLETERM_TAB is taken; nothing else of that
+# ps -E, the command line taken off the front (no word of an argument is read as a variable) and the
+# rest one word at a time. Only the value of LC_SIMPLETERM_TAB is taken; nothing else of that
 # environment is kept, written or used. The marker, '' when the environment was read and has none, and
 # $null when it was not read or holds two different values. Windows reads none.
 function Get-IdMark([string]$id) {
@@ -2273,9 +2274,11 @@ function Get-IdMark([string]$id) {
         if (-not [IO.File]::Exists($f)) { return $null }
         try { $parts = $Latin1.GetString([IO.File]::ReadAllBytes($f)).Split([char]0) } catch { return $null }
     } else {
+        $a = Invoke-IdTool $Script:IdPs @('-ww', '-o', 'command=', '-p', $id)
+        if (-not $a) { return $null }
         $o = Invoke-IdTool $Script:IdPs @('-E', '-ww', '-o', 'command=', '-p', $id)
-        if ($null -eq $o) { return $null }
-        $parts = $o.Split([string[]]@(' ', "`n"), [StringSplitOptions]::RemoveEmptyEntries)
+        if ($null -eq $o -or -not $o.StartsWith($a, $Ord)) { return $null }
+        $parts = $o.Substring($a.Length).Split([string[]]@(' ', "`n"), [StringSplitOptions]::RemoveEmptyEntries)
     }
     $seen = $false
     $vals = New-Object 'System.Collections.Generic.List[string]'
@@ -2520,6 +2523,9 @@ function Get-Tab {
             else { $Script:IdSt = 'c'; $Script:IdWhy = 'form' }
             return
         }
+        # Another app-server (an IDE's): its environment is not a tab's either, and the TUIs of the
+        # daemon are not its clients.
+        if ($h[1].Contains(' app-server ')) { $Script:IdSt = 'c'; $Script:IdWhy = 'daemon'; $Script:MSess = ''; $Script:MSock = ''; return }
     }
     # Rule 2: a multiplexer. Its pane has the environment of the tab that started the server.
     if ($Script:MuxV) {
@@ -2790,8 +2796,9 @@ function Write-SessRecord([string]$state, [string]$prompt) {
     $smx = $Script:MuxV
     if ($Script:IdDaemon -and -not $IsWin) {
         # In Codex's daemon the hook's variables are another TUI's: the multiplexer of the session's TUI,
-        # and when none could be looked at the one the record had.
-        if ($Script:IdJudged) { $smx = $Script:IdBMux } elseif ($ow) { $smx = Get-Field $ow 'mux' } else { $smx = '' }
+        # the one tied by its arguments or, for a new record, the only TUI. Otherwise the one the record
+        # had: a late event of a session whose TUI has gone must not take another TUI's.
+        if ($Script:IdJudged -and ($Script:IdTui -or -not $old)) { $smx = $Script:IdBMux } elseif ($ow) { $smx = Get-Field $ow 'mux' } else { $smx = '' }
         if ($smx -cne 'tmux' -and $smx -cne 'screen' -and $smx -cne 'herdr' -and $smx -cne 'unknown') { $smx = '' }
     }
     if ($smx) { $j += ',"mux":"' + $smx + '"' }

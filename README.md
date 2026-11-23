@@ -794,9 +794,10 @@ it to go back to the default).
   the pane's session), one process at a time. From the environment of a tmux or herdr client, or of
   the Codex screen a daemon hook belongs to, it takes one value, `LC_SIMPLETERM_TAB`: Linux reads
   `/proc/<pid>/environ`, and macOS has only `ps -E`, which prints the whole environment, so the
-  hook cuts that value out in the same pipeline and drops the rest (on macOS a word of exactly
-  that form inside an argument or another variable's value cannot be told from the variable; when
-  two different values show, none is taken). Whether such a process runs inside a multiplexer is
+  hook cuts that value out in the same pipeline and drops the rest (on macOS the command line is
+  taken off the front first, so no word of an argument is read; a word of exactly that form inside
+  another variable's value cannot be told from the variable, and when two different values show,
+  none is taken). Whether such a process runs inside a multiplexer is
   told from its ancestors' command names, not from its variables. Nothing it read is written to a
   file or a log, kept after the hook ends, or sent, except those markers (random values the app
   made) in `tab`. A process it cannot read (gone, another user's, a macOS system binary) is only
@@ -921,7 +922,8 @@ Not tested on Windows yet.
   the terminal that started it, so `TMUX`/`STY`/`HERDR_*` (`mux`) may be another session's (the hook
   sends no `pane`, `msess` or `msock` from the daemon for that reason). From 0.8.0 the hook ties
   a daemon hook (the notify program too) to a Codex screen by arguments only: the one started as
-  `codex resume <this session>`. Tied, `tab` is that screen's. With no such screen it is `c`
+  `codex resume <this session>`. Tied, `tab` is that screen's. A hook under another
+  `codex app-server` (an IDE's) is `c` `daemon` too. With no such screen it is `c`
   `daemon` with the Codex screens as candidates; the only screen is not taken for the session's,
   because an event can come after the session's screen has gone (a turn that goes on in the
   daemon, the session's end half an hour later), when the only screen is another tab's. A session

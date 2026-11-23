@@ -1678,21 +1678,38 @@ id_tty() { # pid
 # The tab marker in the environment of process $1, a process of the same user found by its pid: Linux
 # /proc/<pid>/environ, one entry a line (a line feed inside a value is not a line's start); elsewhere
 # ps -E, which prints the command line and then the whole environment (macOS has no call for one
-# variable), one word a line. Only the value of LC_SIMPLETERM_TAB leaves the pipeline: nothing else of
-# that environment is kept, written or used. Prints "=" and the value when the environment was read
-# ("=" alone: no marker), and nothing when it was not (a process that has gone, another user's, a
-# macOS system binary, whose environment ps does not show) or when it holds two different values (on
-# macOS a word of that form inside an argument or another value cannot be told from the variable).
+# variable). There the command line is read first and taken off the front, so that no word of an
+# argument is read as a variable, and the rest is read one word at a time. Only the value of
+# LC_SIMPLETERM_TAB leaves the pipeline: nothing else of that environment is kept, written or used.
+# Prints "=" and the value when the environment was read ("=" alone: no marker), and nothing when it
+# was not (a process that has gone, another user's, a macOS system binary, whose environment ps does
+# not show) or when it holds two different values (on macOS a word of that form inside another
+# variable's value cannot be told from the variable).
 id_mark() { # pid
   [ -z "$ID_OFF" ] || return 0
   if [ -d "$ID_PROC/1" ]; then
-    { [ -r "$ID_PROC/$1/environ" ] && tr '\n\000' '\001\n' <"$ID_PROC/$1/environ"; } 2>/dev/null
-  else
-    "$ID_PS" -E -ww -o command= -p "$1" 2>/dev/null | tr ' ' '\n'
-  fi | awk '
-    /^[A-Za-z_][A-Za-z0-9_]*=/ { seen = 1 }
-    /^LC_SIMPLETERM_TAB=/ { v = substr($0, 19); if (!(v in S)) { S[v] = 1; n++; m = v } }
-    END { if (seen && n < 2) print "=" m }'
+    { [ -r "$ID_PROC/$1/environ" ] && tr '\n\000' '\001\n' <"$ID_PROC/$1/environ"; } 2>/dev/null | awk '
+      /^[A-Za-z_][A-Za-z0-9_]*=/ { seen = 1 }
+      /^LC_SIMPLETERM_TAB=/ { v = substr($0, 19); if (!(v in S)) { S[v] = 1; n++; m = v } }
+      END { if (seen && n < 2) print "=" m }'
+    return 0
+  fi
+  ima=$("$ID_PS" -ww -o command= -p "$1" 2>/dev/null) || return 0
+  [ -n "$ima" ] || return 0
+  "$ID_PS" -E -ww -o command= -p "$1" 2>/dev/null | ID_A=$ima awk '
+    NR == 1 {
+      a = ENVIRON["ID_A"]
+      if (substr($0, 1, length(a)) != a) { bad = 1; exit }
+      $0 = substr($0, length(a) + 1)
+    }
+    {
+      k = split($0, W, " ")
+      for (i = 1; i <= k; i++) {
+        if (W[i] ~ /^[A-Za-z_][A-Za-z0-9_]*=/) seen = 1
+        if (substr(W[i], 1, 18) == "LC_SIMPLETERM_TAB=") { v = substr(W[i], 19); if (!(v in S)) { S[v] = 1; n++; m = v } }
+      }
+    }
+    END { if (!bad && seen && n < 2) print "=" m }'
 }
 
 # PIDs of the user's own processes whose command name is $1.
@@ -1930,6 +1947,12 @@ tab_detect() {
           elif [ -n "$ID_BOUND" ]; then ID_ST=a ID_TM=${ibm#=}
           else ID_ST=c ID_WHY=form
           fi
+          return 0
+          ;;
+        *" app-server "*)
+          # Another app-server (an IDE's): its environment is not a tab's either, and the TUIs of
+          # the daemon are not its clients.
+          ID_ST=c ID_WHY=daemon MSESS='' MSOCK=''
           return 0
           ;;
       esac
@@ -2202,8 +2225,13 @@ sess_write() { # state [prompt]
   smx=$MUXV
   if [ -n "$ID_DAEMON" ]; then
     # In Codex's daemon the hook's variables are another TUI's: the multiplexer of the session's TUI,
-    # and when none could be looked at the one the record had.
-    if [ -n "$ID_JUDGED" ]; then smx=$ID_BMUX; else smx=$(printf '%s\n' "$ow" | sed -n 's/^mux=//p'); fi
+    # the one tied by its arguments or, for a new record, the only TUI. Otherwise the one the record
+    # had: a late event of a session whose TUI has gone must not take another TUI's.
+    if [ -n "$ID_JUDGED" ] && { [ -n "$ID_TUI" ] || [ -z "$old" ]; }; then
+      smx=$ID_BMUX
+    else
+      smx=$(printf '%s\n' "$ow" | sed -n 's/^mux=//p')
+    fi
     case $smx in tmux | screen | herdr | unknown) ;; *) smx='' ;; esac
   fi
   [ -n "$smx" ] && j=$j',"mux":"'$smx'"'
