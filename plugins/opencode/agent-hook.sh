@@ -1709,7 +1709,7 @@ id_mark() { # pid
         if (substr(W[i], 1, 18) == "LC_SIMPLETERM_TAB=") { v = substr(W[i], 19); if (!(v in S)) { S[v] = 1; n++; m = v } }
       }
     }
-    END { if (!bad && seen && n < 2) print "=" m }'
+    END { if (!bad && seen && n < 2) print "=" m }' 2>/dev/null
 }
 
 # PIDs of the user's own processes whose command name is $1.
