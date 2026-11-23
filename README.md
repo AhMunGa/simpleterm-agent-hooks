@@ -499,7 +499,7 @@ fields and skip the rest). The contract is in the SimpleTerm app's specs (`index
   `mux` inside tmux, screen, herdr, abduco or dtach, whose panes keep the environment of the tab
   that started the server; `daemon` in Codex's daemon or an OpenCode 2.x service; `container`;
   `refused` for an app that predates the marker; `form` for a marker of another form). Inside tmux
-  and herdr, and for a Codex daemon hook that cannot be tied to one Codex screen, it adds `n`, the
+  and herdr, and for a Codex daemon hook whose session no Codex screen names, it adds `n`, the
   number of tabs that look at the pane (or of Codex screens), and `cl`, the markers it could read
   from them (at most 8). How it reads them is under [Privacy](#privacy). With it the app puts a
   request on the row of the tab that asked, and shows a tmux you started yourself as one row with
@@ -794,13 +794,15 @@ it to go back to the default).
   the pane's session), one process at a time. From the environment of a tmux or herdr client, or of
   the Codex screen a daemon hook belongs to, it takes one value, `LC_SIMPLETERM_TAB`: Linux reads
   `/proc/<pid>/environ`, and macOS has only `ps -E`, which prints the whole environment, so the
-  hook cuts that value out in the same pipeline and drops the rest. Whether such a process runs
-  inside a multiplexer is told from its ancestors' command names, not from its variables. Nothing
-  it read is written to a file or a log, kept after the hook ends, or sent, except those markers
-  (random values the app made) in `tab`. A process it cannot read (gone, another user's, a macOS
-  system binary) is only counted. The check for a container looks for `/.dockerenv`,
-  `/run/.containerenv` and whether process 1 has a variable named `container`. Windows reads no
-  other process's environment.
+  hook cuts that value out in the same pipeline and drops the rest (on macOS a word of exactly
+  that form inside an argument or another variable's value cannot be told from the variable; when
+  two different values show, none is taken). Whether such a process runs inside a multiplexer is
+  told from its ancestors' command names, not from its variables. Nothing it read is written to a
+  file or a log, kept after the hook ends, or sent, except those markers (random values the app
+  made) in `tab`. A process it cannot read (gone, another user's, a macOS system binary) is only
+  counted, and a Codex screen it cannot read gives "unknown", never "not a SimpleTerm tab". The
+  check for a container looks for `/.dockerenv`, `/run/.containerenv` and whether process 1 has a
+  variable named `container`. Windows reads no other process's environment.
 - A permission answer is signed by the device; the hook ignores an answer whose signature does not match.
 - The hook keeps a 200-line log in `~/.simpleterm/agent-hook.log` with event types, the first
   8 characters of link IDs and HTTP results, never message text or host names.
@@ -917,13 +919,17 @@ Not tested on Windows yet.
 - **Claude Code MCP forms** are alerts without the server's name (the `Notification` has none).
 - **Codex's daemon mode** (its default): hooks run in Codex's shared daemon with the environment of
   the terminal that started it, so `TMUX`/`STY`/`HERDR_*` (`mux`) may be another session's (the hook
-  sends no `pane` for Codex for that reason). From 0.8.0 the hook ties a daemon hook to one Codex
-  screen by arguments only: the one started as `codex resume <this session>`, else the only one
-  (screens started with `--no-daemon` do not use the daemon). Tied, `tab` is that screen's; with
-  several screens and none that names the session it is `c` `daemon`. A session record is written
-  for a daemon hook only when it is tied to a screen whose environment has the tab marker, so with
-  two or more Codex screens of one user open at once (another terminal's too) their sessions are
-  not in the app's resume list; `SIMPLETERM` of the daemon is no longer read for that. A Codex
+  sends no `pane`, `msess` or `msock` from the daemon for that reason). From 0.8.0 the hook ties
+  a daemon hook (the notify program too) to a Codex screen by arguments only: the one started as
+  `codex resume <this session>`. Tied, `tab` is that screen's. With no such screen it is `c`
+  `daemon` with the Codex screens as candidates; the only screen is not taken for the session's,
+  because an event can come after the session's screen has gone (a turn that goes on in the
+  daemon, the session's end half an hour later), when the only screen is another tab's. A session
+  record is made for a daemon hook at a prompt or a session's start, and only for a screen whose
+  environment has the tab marker (the tied one, else the only one); one that is there is kept up.
+  So with two or more Codex screens of one user open at once (another terminal's too), none
+  started as `resume <session>`, a new daemon session is not in the app's resume list;
+  `SIMPLETERM` of the daemon is no longer read for that (Windows still goes by it). A Codex
   session's end comes when the daemon closes the conversation (about 30 minutes after you quit or
   the SSH connection drops). `codex --no-daemon` runs hooks in the session itself; the app adds
   it to the Codex lines it types. SimpleTerm `if/hook-tab-identity#shared-host`,
@@ -932,8 +938,10 @@ Not tested on Windows yet.
   that it is inside a multiplexer; a tmux or herdr client that runs inside another multiplexer is
   only counted; OpenCode 2.x is always `c` `daemon`; Zellij is not detected, so an agent there
   reports the tab that started its server; and after `su -`, `env -i` or in a shell the app's
-  line could not reach, the marker is gone and the app falls back to its older rules. SimpleTerm
-  `if/hook-tab-identity#cut-env`, `spec/event-binding#limitations`.
+  line could not reach, the marker is gone and the app falls back to its older rules. The clients
+  of a tmux session group's other sessions are not counted, and the hook sets no time limit on
+  `tmux` or `ps` (a tmux server that does not answer holds the hook until the agent's own hook
+  time limit). SimpleTerm `if/hook-tab-identity#cut-env`, `spec/event-binding#limitations`.
 - **Some held requests are not told again.** A request held back for a wait you are looking at is
   told again while the agent's own record shows its window open (Claude Code questions and forms,
   Antigravity CLI and Grok Build questions, Grok Build permission windows and plan reviews). Where no
