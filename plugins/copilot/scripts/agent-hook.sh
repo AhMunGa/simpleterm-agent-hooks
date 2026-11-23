@@ -51,7 +51,7 @@ LOGGED=0
 MAX_INPUT=262144
 MAX_LINKS=16
 # The plugin release of this script (the manifests carry the same).
-HOOK_VERSION=0.7.0
+HOOK_VERSION=0.8.0
 # Bumped when the ~/.simpleterm/bin/simpleterm wrapper must be rewritten.
 CLI_REV=2
 CR=$(printf '\r')
@@ -1174,7 +1174,16 @@ END {
   if (P("sub.id") != "") { O("sub"); S("sub.id", P("sub.id")); S("sub.type", P("sub.type"), 1); S("sub.name", P("sub.name"), 1); S("sub.parent", P("sub.parent")); B("sub.bg", P("sub.bg")) }
   S("dir", P("dir"))
   if (P("cfg.var") != "" && P("cfg.path") != "") { O("cfg"); S("cfg.var", P("cfg.var")); S("cfg.path", P("cfg.path")) }
-  S("pm", P("pm")); S("mux", P("mux")); S("pane", P("pane")); R("tms", P("tms"))
+  S("pm", P("pm")); S("mux", P("mux")); S("pane", P("pane")); S("msess", P("msess")); S("msock", P("msock"))
+  if (P("tab.st") != "") {
+    O("tab"); S("tab.st", P("tab.st")); S("tab.tm", P("tab.tm")); S("tab.why", P("tab.why"))
+    if (P("tab.n") != "") {
+      R("tab.n", P("tab.n")); A("tab.cl")
+      ncl = split(substr(P("tab.cl"), 2), CL, ",")
+      for (k = 1; k <= ncl; k++) S("tab.cl." (k - 1), CL[k])
+    }
+  }
+  R("tms", P("tms"))
   if (P("rkind") != "") req(P("rkind"))
   if (P("turn") == "1") turn()
   S("st", P("st"))
@@ -1281,6 +1290,7 @@ function limits() {
   split("", STR); split("", CNT)
   STR["dir"] = "1024 -"; STR["cfg"] = "0 -"; STR["cfg.path"] = "1024 -"
   STR["avs"] = "0 -"; STR["tid"] = "0 -"; STR["pm"] = "0 -"; STR["tms"] = "0 -"; STR["req.nid"] = "0 -"
+  STR["msock"] = "256 -"; STR["tab"] = "0 -"
   STR["req.tool"] = "128 128"; STR["req.ask.cmd"] = "8192 400"; STR["req.ask.desc"] = "1024 200"
   STR["req.ask.path"] = "1024 256"; STR["req.ask.file"] = "1024 256"; STR["req.ask.files.#"] = "1024 256"
   STR["req.ask.change"] = "0 -"; STR["req.ask.change.old"] = "12288 -"; STR["req.ask.change.new"] = "12288 -"
@@ -1373,9 +1383,10 @@ END {
     }
   }
   for (i = 1; i <= N; i++) ORIG[i] = live(i)
-  # step 1: the last item of the first non-empty array
+  # step 1: msess first (an optional field), then the last item of the first non-empty array
   split("req.others turn.bg req.scopes req.ask.qs", ARR, " ")
   while (size() > budget) {
+    if (node("msess")) { i = IDX["msess"]; b = length(NV[i]); kill(i); rec("msess", b); continue }
     done = 0
     for (a = 1; a <= 4 && !done; a++) {
       i = node(ARR[a])
@@ -1600,6 +1611,329 @@ mux_detect() {
   [ "${#PANEV}" -le 64 ] || PANEV=''
 }
 
+# --- which terminal tab the hook runs for (SimpleTerm if/hook-tab-identity) -----------------------
+# The app gives every shell channel a marker (LC_SIMPLETERM_TAB). tab_detect says whether the hook can
+# trust the one it sees. Every read of another process goes through the id_* functions: its parent,
+# command name, arguments and terminal, and from its environment the marker only
+# (if/hook-tab-identity#other-process). The test suite sets SIMPLETERM_HOOK_TEST_IDBIN=none (no such
+# read at all, honored always); a case that tests the reads points it, with SIMPLETERM_HOOK_TEST=1, at
+# a folder of stand-ins: ps, tmux, proc/ and root/ (the container signals).
+ID_PS=ps ID_TMUX=tmux ID_PROC=/proc ID_ROOT='' ID_OFF='' ID_START=$PPID
+case ${SIMPLETERM_HOOK_TEST_IDBIN:-} in
+  '') ;;
+  none) ID_OFF=1 ;;
+  *)
+    if [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ]; then
+      ID_PS=$SIMPLETERM_HOOK_TEST_IDBIN/ps ID_TMUX=$SIMPLETERM_HOOK_TEST_IDBIN/tmux
+      ID_PROC=$SIMPLETERM_HOOK_TEST_IDBIN/proc ID_ROOT=$SIMPLETERM_HOOK_TEST_IDBIN/root
+      case ${SIMPLETERM_HOOK_TEST_IDPPID:-} in '' | *[!0-9]*) ;; *) ID_START=$SIMPLETERM_HOOK_TEST_IDPPID ;; esac
+    else
+      ID_OFF=1
+    fi
+    ;;
+esac
+
+# Parent and command name of process $1: ID_PP, ID_PC (Linux /proc without a fork, else ps).
+id_pc() { # pid
+  ID_PP='' ID_PC=''
+  [ -z "$ID_OFF" ] || return 1
+  if [ -r "$ID_PROC/$1/stat" ]; then
+    { IFS= read -r il <"$ID_PROC/$1/stat"; } 2>/dev/null || return 1
+    ID_PC=${il#*\(} ID_PC=${ID_PC%\)*}
+    il=${il##*\) } il=${il#* }
+    ID_PP=${il%% *}
+  else
+    il=$("$ID_PS" -o ppid= -o comm= -p "$1" 2>/dev/null) || return 1
+    il=${il#"${il%%[! ]*}"}
+    ID_PP=${il%% *} ID_PC=${il#"$ID_PP"}
+    ID_PC=${ID_PC#"${ID_PC%%[! ]*}"}
+  fi
+  is_uint "$ID_PP"
+}
+
+# The arguments of process $1, joined by blanks.
+id_args() { # pid
+  [ -z "$ID_OFF" ] || return 1
+  if [ -r "$ID_PROC/$1/cmdline" ]; then
+    tr '\000' ' ' <"$ID_PROC/$1/cmdline" 2>/dev/null
+    return 0
+  fi
+  "$ID_PS" -ww -o args= -p "$1" 2>/dev/null
+}
+
+# The terminal of process $1 (its standard input on Linux, the tty column of ps elsewhere); empty
+# without one.
+id_tty() { # pid
+  [ -z "$ID_OFF" ] || return 0
+  if [ -d "$ID_PROC/1" ]; then
+    it=$(readlink "$ID_PROC/$1/fd/0" 2>/dev/null)
+    case $it in /dev/pts/* | /dev/tty*) printf '%s' "$it" ;; esac
+    return 0
+  fi
+  it=$("$ID_PS" -o tty= -p "$1" 2>/dev/null | tr -d ' ')
+  case $it in '' | '?' | '??' | -) ;; *) printf '%s' "$it" ;; esac
+}
+
+# The tab marker in the environment of process $1, a process of the same user found by its pid: Linux
+# /proc/<pid>/environ; elsewhere ps -E, which prints the command line and then the whole environment
+# (macOS has no call for one variable). Only the value of LC_SIMPLETERM_TAB leaves the pipeline:
+# nothing else of that environment is kept, written or used. Empty when there is none or the
+# environment cannot be read (a process that has gone, another user's, a macOS system binary).
+id_mark() { # pid
+  [ -z "$ID_OFF" ] || return 0
+  if [ -d "$ID_PROC/1" ]; then
+    [ -r "$ID_PROC/$1/environ" ] && tr '\000' '\n' <"$ID_PROC/$1/environ" 2>/dev/null
+  else
+    "$ID_PS" -E -ww -o command= -p "$1" 2>/dev/null | tr ' ' '\n'
+  fi | awk '/^LC_SIMPLETERM_TAB=/ { m = substr($0, 19) } END { if (m != "") print m }'
+}
+
+# PIDs of the user's own processes whose command name is $1.
+id_procs() { # name
+  [ -z "$ID_OFF" ] || return 0
+  if [ -d "$ID_PROC/1" ]; then
+    ifl=$-
+    set +f
+    for ipd in "$ID_PROC"/[0-9]*; do
+      [ -O "$ipd" ] || continue
+      { IFS= read -r il <"$ipd/stat"; } 2>/dev/null || continue
+      il=${il#*\(} il=${il%\)*}
+      [ "$il" = "$1" ] && printf '%s\n' "${ipd##*/}"
+    done
+    case $ifl in *f*) set -f ;; esac
+    return 0
+  fi
+  "$ID_PS" -U "$(id -u 2>/dev/null)" -o pid= -o comm= 2>/dev/null |
+    awk -v n="$1" '{ c = $2; sub(/.*\//, "", c); if (c == n && $1 ~ /^[0-9]+$/) print $1 }'
+}
+
+id_mark_ok() { # value: the marker form of SimpleTerm if/hook-tab-identity#marker
+  case $1 in st1-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) return 0 ;; esac
+  return 1
+}
+
+# A marker into ID_CL: well formed, no repeat, 8 at most.
+id_addmark() { # value
+  id_mark_ok "$1" || return 0
+  case ",$ID_CL," in *",$1,"*) return 0 ;; esac
+  [ "$ID_CLN" -lt 8 ] || return 0
+  ID_CL=$ID_CL${ID_CL:+,}$1 ID_CLN=$((ID_CLN + 1))
+}
+
+# herdr's arguments of process $1: IH_SUB its subcommand (empty: a client) and IH_SESS its --session.
+id_herdr_args() { # pid
+  IH_SUB='' IH_SESS=''
+  ia=$(id_args "$1")
+  ifl=$-
+  set -f
+  # shellcheck disable=SC2086
+  set -- $ia
+  case $ifl in *f*) ;; *) set +f ;; esac
+  [ $# -gt 0 ] && shift
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --session) shift; IH_SESS=${1:-}; [ $# -gt 0 ] && shift ;;
+      --session=*) IH_SESS=${1#*=}; shift ;;
+      -*) shift ;;
+      *) IH_SUB=$1; return 0 ;;
+    esac
+  done
+}
+
+# Whether process $1, whose command name is in ID_PC, is a multiplexer server: ID_SK its kind. The tmux
+# server is "tmux: server" on Linux; on macOS it keeps the command line of the client that started it
+# (measured, tmux 3.6a), so a tmux process with no terminal is the server. abduco and dtach masters
+# have no terminal either.
+id_srv() { # pid
+  ID_SK=''
+  case ${ID_PC##*/} in
+    'tmux: server') ID_SK=tmux ;;
+    tmux | abduco | dtach) [ -n "$(id_tty "$1")" ] || ID_SK=${ID_PC##*/} ;;
+    screen) case $(id_args "$1") in SCREEN*) ID_SK=screen ;; esac ;;
+    herdr) id_herdr_args "$1"; [ "$IH_SUB" = server ] && ID_SK=herdr ;;
+  esac
+  [ -n "$ID_SK" ]
+}
+
+# The nearest multiplexer server at or above process $1: ID_UK its kind (empty: none), by command names
+# only. The walk stops at process 1 or after 30 steps; it is false when a process on the way has gone
+# or cannot be read.
+id_up() { # pid
+  ID_UK='' iu=${1-} iuk=0
+  while is_uint "$iu" && [ "$iu" -gt 1 ] && [ "$iuk" -lt 30 ]; do
+    id_pc "$iu" || return 1
+    iupp=$ID_PP
+    if id_srv "$iu"; then ID_UK=$ID_SK; return 0; fi
+    iu=$iupp iuk=$((iuk + 1))
+  done
+  return 0
+}
+
+# A candidate client or TUI $1 for n and cl: counted in ID_N; its marker goes to ID_CL unless it runs
+# inside another multiplexer (a server among its ancestors: its marker is then that of the tab that
+# started the outer server) or its ancestors cannot be read.
+id_cand() { # pid
+  ID_N=$((ID_N + 1))
+  id_pc "$1" && id_up "$ID_PP" && [ -z "$ID_UK" ] || return 0
+  id_addmark "$(id_mark "$1")"
+}
+
+# The clients of the tmux session of pane $2 on socket $1 (not read: ID_N stays empty).
+id_tmux_clients() { # socket pane
+  [ -z "$ID_OFF" ] && [ -n "$1" ] && [ -n "$2" ] || return 0
+  isid=$("$ID_TMUX" -S "$1" display-message -p -t "$2" '#{session_id}' 2>/dev/null)
+  [ -n "$isid" ] || return 0
+  ilst=$("$ID_TMUX" -S "$1" list-clients -F '#{client_pid}:#{session_id}' 2>/dev/null) || return 0
+  ID_N=0
+  while IFS=: read -r icp ics; do
+    [ "$ics" = "$isid" ] && is_uint "$icp" || continue
+    id_cand "$icp"
+  done <<EOF
+$ilst
+EOF
+}
+
+# The herdr clients of session $1 (empty: the default session): the user's herdr processes run without
+# a subcommand and with that --session. herdr has no method that lists its clients.
+id_herdr_clients() { # session
+  [ -z "$ID_OFF" ] || return 0
+  ihl=$(id_procs herdr)
+  [ -n "$ihl" ] || return 0
+  ID_N=0
+  for ihp in $ihl; do
+    id_herdr_args "$ihp"
+    [ -z "$IH_SUB" ] && [ "$IH_SESS" = "$1" ] || continue
+    id_cand "$ihp"
+  done
+}
+
+# An abduco or dtach master among the hook's ancestors (they set no variable: abduco 0.6 sets none,
+# dtach never did). The walk goes up to the login shell, 12 steps at most.
+id_detach() {
+  [ -z "$ID_OFF" ] || return 1
+  iw=$ID_START ik=0
+  while [ "$ik" -lt 12 ] && is_uint "$iw" && [ "$iw" -gt 1 ]; do
+    id_pc "$iw" || return 1
+    case ${ID_PC##*/} in
+      abduco | dtach) return 0 ;;
+      -* | sshd* | login | init | systemd | launchd) return 1 ;;
+    esac
+    iw=$ID_PP ik=$((ik + 1))
+  done
+  return 1
+}
+
+# A container around the hook (if/hook-tab-identity#rules 4): Docker, Podman, or a container variable
+# in the environment of process 1 (only whether the name is there is taken).
+id_container() {
+  [ -z "$ID_OFF" ] || return 1
+  [ -e "$ID_ROOT/.dockerenv" ] || [ -e "$ID_ROOT/run/.containerenv" ] && return 0
+  [ -r "$ID_PROC/1/environ" ] && tr '\000' '\n' <"$ID_PROC/1/environ" 2>/dev/null | awk '/^container=/ { f = 1 } END { exit !f }' && return 0
+  return 1
+}
+
+# The nearest ancestor of the hook that is not a shell (the agent or its host): ID_HOST, its
+# arguments ID_HARGS. False when it cannot be read.
+id_host() {
+  ID_HOST='' ID_HARGS='' iw=$ID_START ik=0
+  while [ "$ik" -lt 4 ] && is_uint "$iw" && [ "$iw" -gt 1 ]; do
+    id_pc "$iw" || return 1
+    case ${ID_PC##*/} in
+      sh | -sh | bash | -bash | dash | zsh | -zsh | ksh | mksh | ash | fish | -fish | busybox) ;;
+      *) ID_HOST=$iw ID_HARGS=" $(id_args "$iw") "; return 0 ;;
+    esac
+    iw=$ID_PP ik=$((ik + 1))
+  done
+  return 1
+}
+
+# Codex's daemon $1 (if/hook-tab-identity#shared-host): the TUI that raised this session's hook, by
+# arguments only. It is the TUI whose arguments are "resume <this session>", else the only TUI.
+# Candidates: the user's codex processes that are not the daemon, its children or another app-server
+# and were not started with --no-daemon (those do not use the daemon). ID_TUI when bound; ID_N and
+# ID_CL (the candidates, and the markers of those outside a multiplexer) when not.
+id_codex_bind() { # daemon pid
+  ID_TUI='' ID_N=0 ID_CL='' ID_CLN=0
+  ione='' iex='' iexn=0 icands='' icn=0
+  for icx in $(id_procs codex); do
+    [ "$icx" = "$1" ] && continue
+    id_pc "$icx" && [ "$ID_PP" = "$1" ] && continue
+    ia=" $(id_args "$icx") "
+    case $ia in *" app-server "* | *" --no-daemon "*) continue ;; esac
+    icands="$icands $icx" ione=$icx icn=$((icn + 1))
+    if is_id "$RAWSID"; then
+      case $ia in *" resume $RAWSID "*) iexn=$((iexn + 1)) iex=$icx ;; esac
+    fi
+  done
+  if [ "$iexn" = 1 ]; then ID_TUI=$iex
+  elif [ "$iexn" = 0 ] && [ "$icn" = 1 ]; then ID_TUI=$ione
+  else
+    for icx in $icands; do id_cand "$icx"; done
+  fi
+}
+
+# The tab of this event, once a run (if/hook-tab-identity#rules): the multiplexer fields as before
+# (mux_detect), the scope fields MSESS and MSOCK from the hook's own environment, and the tab field
+# ID_ST (a b c), ID_TM, ID_WHY, ID_N, ID_CL. ID_DAEMON: the hook runs in Codex's daemon; ID_BOUND: it
+# is bound to a TUI whose environment has a well-formed marker, ID_BMUX the multiplexer that TUI runs
+# in (the session record: if/session-record#scope).
+tab_detect() {
+  [ "${TABD:-}" = 1 ] && return 0
+  TABD=1
+  mux_detect
+  MSESS='' MSOCK='' ID_ST='' ID_TM='' ID_WHY='' ID_N='' ID_CL='' ID_CLN=0 ID_DAEMON='' ID_BOUND='' ID_BMUX=''
+  case $MUXV in
+    herdr) MSESS=${HERDR_SESSION:-} ;;
+    tmux) MSOCK=${TMUX%%,*} ;;
+  esac
+  case $MSESS in '' | *[!A-Za-z0-9._-]*) MSESS='' ;; esac
+  [ "${#MSESS}" -le 64 ] || MSESS=''
+  # A path is sent as it is or not at all (not cut, nothing to escape): printable ASCII but " and \.
+  case $MSOCK in '' | *[!\ -~]* | *[\"\\]*) MSOCK='' ;; esac
+  [ "${#MSOCK}" -le 256 ] || MSOCK=''
+  # Rule 1: a host shared by several tabs.
+  if [ "$AGENT" = opencode ] && [ "$OCV" = 2 ]; then ID_ST=c ID_WHY=daemon; return 0; fi
+  if [ "$AGENT" = codex ]; then
+    # Whether the hook runs in the daemon cannot be read: the environment may be another tab's.
+    if ! id_host; then ID_ST=c ID_WHY=daemon; return 0; fi
+    case $ID_HARGS in
+      *" app-server "*" --managed-daemon "* | *" --managed-daemon "*" app-server "*)
+        ID_DAEMON=1
+        id_codex_bind "$ID_HOST"
+        if [ -z "$ID_TUI" ]; then ID_ST=c ID_WHY=daemon; return 0; fi
+        ID_N='' ID_CL='' ID_CLN=0
+        if ! id_pc "$ID_TUI" || ! id_up "$ID_PP"; then ID_ST=c ID_WHY=daemon; return 0; fi
+        itm=$(id_mark "$ID_TUI")
+        id_mark_ok "$itm" && ID_BOUND=1
+        case $ID_UK in tmux | screen | herdr) ID_BMUX=$ID_UK ;; esac
+        if [ -n "$ID_UK" ]; then ID_ST=c ID_WHY=mux
+        elif [ -z "$itm" ]; then ID_ST=b
+        elif [ -n "$ID_BOUND" ]; then ID_ST=a ID_TM=$itm
+        else ID_ST=c ID_WHY=form
+        fi
+        return 0
+        ;;
+    esac
+  fi
+  # Rule 2: a multiplexer. Its pane has the environment of the tab that started the server.
+  if [ -n "$MUXV" ]; then
+    ID_ST=c ID_WHY=mux
+    case $MUXV in
+      tmux) id_tmux_clients "${TMUX%%,*}" "${TMUX_PANE:-}" ;;
+      herdr) id_herdr_clients "${HERDR_SESSION:-}" ;;
+    esac
+    return 0
+  fi
+  if id_detach; then ID_ST=c ID_WHY=mux; return 0; fi
+  # Rules 3 and 4: the marker, a container, an app that predates the marker, or no SimpleTerm tab.
+  if [ -n "${LC_SIMPLETERM_TAB:-}" ]; then
+    if id_mark_ok "$LC_SIMPLETERM_TAB"; then ID_ST=a ID_TM=$LC_SIMPLETERM_TAB; else ID_ST=c ID_WHY=form; fi
+  elif id_container; then ID_ST=c ID_WHY=container
+  elif [ "${SIMPLETERM:-}" = 1 ]; then ID_ST=c ID_WHY=refused
+  else ID_ST=b
+  fi
+}
+
 # The common fields (SimpleTerm if/event-v2#fields) as @-parameters, once per run.
 v2_common() {
   [ "$V2C" = 1 ] && return 0
@@ -1642,9 +1976,18 @@ v2_common() {
   fi
   [ "$AGENT" = codex ] && PMODE=$(codex_pm)
   case $PMODE in '' | *[!A-Za-z0-9._:/-]*) ;; *) [ "${#PMODE}" -le 48 ] && at pm "$PMODE" ;; esac
-  mux_detect
+  tab_detect
   at mux "$MUXV"
   at pane "$PANEV"
+  at msess "$MSESS"
+  at msock "$MSOCK"
+  if [ -n "$ID_ST" ]; then
+    at tab.st "$ID_ST"
+    at tab.tm "$ID_TM"
+    at tab.why "$ID_WHY"
+    # `cl` goes with `n`, empty or not (SimpleTerm if/hook-tab-identity#tab-field).
+    is_uint "$ID_N" && AT="$AT@.tab.n${TAB}s$TAB$ID_N$NL@.tab.cl${TAB}s$TAB,$ID_CL$NL"
+  fi
 }
 
 # Event time in milliseconds where `date` has them (GNU), for `tms`.
@@ -1727,9 +2070,15 @@ send_state() { # st [extra]
 # be resumed; OpenCode 2.x not at all (SimpleTerm hist/session-record#d14: its service's environment is the
 # first TUI's).
 sess_ok() {
-  [ "${SIMPLETERM:-}" = 1 ] || return 1
   [ "$AGENT" = opencode ] && [ "$OCV" = 2 ] && return 1
   case $AGENT in claude | codex | grok | agy | copilot | opencode) ;; *) return 1 ;; esac
+  # A hook in Codex's daemon has the environment of the TUI that started the daemon, so its
+  # SIMPLETERM says nothing about this session: the session is recorded only when the hook is bound
+  # to a TUI whose own environment has the tab marker (SimpleTerm if/session-record#scope).
+  [ "$AGENT" = codex ] && tab_detect
+  if [ "$AGENT" = codex ] && [ -n "$ID_DAEMON" ]; then [ -n "$ID_BOUND" ] || return 1
+  else [ "${SIMPLETERM:-}" = 1 ] || return 1
+  fi
   is_id "$RAWSID" || return 1
   SESS_DIR=$ST_DIR/sessions/$APP
   case $RAWSID in
@@ -1823,8 +2172,11 @@ sess_write() { # state [prompt]
   [ -n "${cvv:-}" ] && [ -n "$cpp" ] && j=$j',"cfg":{"var":"'$cvv'","path":"'$(json_trim "$cpp" 100000 1024)'"}'
   j=$j',"state":"'$1'"'
   # No pane: a resumed session runs in another one (SimpleTerm hist/session-record#d25).
-  mux_detect
-  [ -n "$MUXV" ] && j=$j',"mux":"'$MUXV'"'
+  tab_detect
+  smx=$MUXV
+  # In Codex's daemon the hook's variables are another TUI's: the multiplexer of the bound TUI.
+  [ -n "$ID_DAEMON" ] && smx=$ID_BMUX
+  [ -n "$smx" ] && j=$j',"mux":"'$smx'"'
   j=$j'}'
   [ "${#j}" -le 4096 ] || return 0
   printf '%s\n' "$j" >"$SESS.json.$$" 2>/dev/null && chmod 600 "$SESS.json.$$" 2>/dev/null && mv -f "$SESS.json.$$" "$SESS.json" 2>/dev/null
@@ -5863,6 +6215,46 @@ stop_flow() {
   turn_end
 }
 
+# Antigravity CLI: was the turn that ended opened by a /schedule run (SimpleTerm
+# if/hook-events-schedule#antigravity, measured 1.5.5)? Its record (transcript_full.jsonl, one step a
+# line) names the task a `schedule` call started in the GENERIC step after that call ("... task id:
+# <conversation>/task-N", "Task Description: Timer: ..." or "Cron: ..."); a run of it opens a turn with
+# a SYSTEM_MESSAGE "[Message] ... sender=<conversation>/task-N ...", a person's turn with USER_INPUT.
+# 0 when the last input step is such a message, 1 when not, 2 when the record cannot be read (none, or
+# larger than AGY_TR_MAX bytes).
+AGY_TR_MAX=4194304
+agy_sched_turn() {
+  tf=$(input_file "$TPATH")
+  [ -n "$tf" ] && [ -f "$tf" ] || return 2
+  tsz=$(wc -c <"$tf" 2>/dev/null | tr -d ' ')
+  is_uint "$tsz" && [ "$tsz" -le "$AGY_TR_MAX" ] || return 2
+  awk '
+    function val(k,   m) {
+      if (!match($0, "\"" k "\": ?\"[^\"]*\"")) return ""
+      m = substr($0, RSTART, RLENGTH); sub(/^"[^"]*": ?"/, "", m)
+      return substr(m, 1, length(m) - 1)
+    }
+    {
+      t = val("type")
+      if (t == "PLANNER_RESPONSE") {
+        c = $0; nn = gsub(/"name": ?"/, "", c)
+        sch = ($0 ~ /"tool_calls": ?\[/ && $0 ~ /"name": ?"schedule"/) ? (nn == 1 ? 2 : 1) : 0
+        next
+      }
+      if (t == "GENERIC") {
+        if (match($0, /task id: [^\\" ]+/)) {
+          id = substr($0, RSTART + 9, RLENGTH - 9)
+          if (sch == 2 || $0 ~ /Task Description: (Timer|Cron):/) S[id] = 1
+        }
+        next
+      }
+      sch = 0
+      if (t == "USER_INPUT") { lt = t; ls = "" }
+      if (t == "SYSTEM_MESSAGE") { lt = t; ls = match($0, /sender=[^\\" ]+/) ? substr($0, RSTART + 7, RLENGTH - 7) : "" }
+    }
+    END { exit !(lt == "SYSTEM_MESSAGE" && ls != "" && (ls in S)) }' "$tf" 2>/dev/null
+}
+
 # --- v2 helpers of the event handlers ---------------------------------------------
 
 # The request kind parameter lines for v2_prep (SimpleTerm if/event-v2-request#fields).
@@ -6449,6 +6841,14 @@ case $AGENT:$EVENT in
       finish
     fi
     LAST=''
+    # A turn a /schedule run opened (SimpleTerm if/hook-events-schedule#antigravity): only the record
+    # says so, the agent having no turn start hook. Unread, the turn ends as before (`by` unknown).
+    AGYS=1
+    if [ -z "$ERR" ] || [ "$ERR" = null ]; then
+      agy_sched_turn
+      AGYS=$?
+    fi
+    [ "$AGYS" = 0 ] && TURN_BY=schedule
     if [ -n "$ERR" ] && [ "$ERR" != null ]; then
       setmsg "${TERMREASON:-error}: $ERR"
       turn_at error

@@ -488,8 +488,22 @@ fields and skip the rest). The contract is in the SimpleTerm app's specs (`index
   ids, the subagent, the working folder, the permission mode, a multiplexer (`tmux`, `screen`,
   `herdr`; `unknown` for OpenCode 2.x, whose service keeps the first TUI's environment) and the id of
   the agent's pane there (`pane`: `TMUX_PANE`, `HERDR_PANE_ID`; never for Codex or OpenCode 2.x),
-  with which the app ties an event to a herdr or tmux session row. These are for diagnosis and
-  records; nothing is switched on or off by a version.
+  with which the app ties an event to a herdr or tmux session row. Two fields say which server of
+  that kind the pane is in: `msess`, herdr's named session (`HERDR_SESSION`), and `msock`, the
+  tmux socket path (the part of `TMUX` before the first comma; SSH tunnel only). These are for
+  diagnosis and records; nothing is switched on or off by a version.
+- **Which terminal tab** (`tab`, SSH tunnel only, from 0.8.0): the app gives every shell it opens
+  a marker in the environment (`LC_SIMPLETERM_TAB`), and the hook says what it can tell from it:
+  `{"st":"a","tm":"st1-…"}` (the marker of the tab the agent runs in), `{"st":"b"}` (no marker, no
+  `SIMPLETERM` and no container: not a SimpleTerm tab) or `{"st":"c","why":…}` (it cannot tell:
+  `mux` inside tmux, screen, herdr, abduco or dtach, whose panes keep the environment of the tab
+  that started the server; `daemon` in Codex's daemon or an OpenCode 2.x service; `container`;
+  `refused` for an app that predates the marker; `form` for a marker of another form). Inside tmux
+  and herdr, and for a Codex daemon hook that cannot be tied to one Codex screen, it adds `n`, the
+  number of tabs that look at the pane (or of Codex screens), and `cl`, the markers it could read
+  from them (at most 8). How it reads them is under [Privacy](#privacy). With it the app puts a
+  request on the row of the tab that asked, and shows a tmux you started yourself as one row with
+  its tab.
 - **What is asked** (`req`): the window's kind (shell, edit, read, web, mcp, question, plan, form,
   login, other), the tool, the request itself (the command and its description, the file and the
   change as a replacement, a whole new file or a patch, the URL, the MCP server, tool and
@@ -773,6 +787,20 @@ it to go back to the default).
   they were checked (never an account id, an error text or a token).
 - Session records stay on the server, in `~/.simpleterm/sessions` (folder 700, files 600); the app
   reads them over SFTP when you open its resume list.
+- **Other processes** (from 0.8.0, to say which terminal tab an agent runs in): inside tmux and
+  herdr, and in Codex's daemon, the hook's own environment is that of another tab, so the hook
+  looks at processes of your own user. It finds them by process id, parent, command name,
+  arguments and terminal only (`ps`, or `/proc` on Linux; `tmux list-clients` for the clients of
+  the pane's session), one process at a time. From the environment of a tmux or herdr client, or of
+  the Codex screen a daemon hook belongs to, it takes one value, `LC_SIMPLETERM_TAB`: Linux reads
+  `/proc/<pid>/environ`, and macOS has only `ps -E`, which prints the whole environment, so the
+  hook cuts that value out in the same pipeline and drops the rest. Whether such a process runs
+  inside a multiplexer is told from its ancestors' command names, not from its variables. Nothing
+  it read is written to a file or a log, kept after the hook ends, or sent, except those markers
+  (random values the app made) in `tab`. A process it cannot read (gone, another user's, a macOS
+  system binary) is only counted. The check for a container looks for `/.dockerenv`,
+  `/run/.containerenv` and whether process 1 has a variable named `container`. Windows reads no
+  other process's environment.
 - A permission answer is signed by the device; the hook ignores an answer whose signature does not match.
 - The hook keeps a 200-line log in `~/.simpleterm/agent-hook.log` with event types, the first
   8 characters of link IDs and HTTP results, never message text or host names.
@@ -888,11 +916,24 @@ Not tested on Windows yet.
   plugin cannot reach yet), and OpenCode's last message is not in a turn's end.
 - **Claude Code MCP forms** are alerts without the server's name (the `Notification` has none).
 - **Codex's daemon mode** (its default): hooks run in Codex's shared daemon with the environment of
-  the terminal that started it, so `SIMPLETERM` (session records) and `TMUX`/`STY`/`HERDR_*` (`mux`)
-  may be another session's (the hook sends no `pane` for Codex for that reason); a Codex session's
-  end comes when the daemon closes the conversation (about 30 minutes after you quit or the SSH
-  connection drops). `codex --no-daemon` runs hooks in the session itself. SimpleTerm
-  `hist/event-v2-turn#r17`, issue #447.
+  the terminal that started it, so `TMUX`/`STY`/`HERDR_*` (`mux`) may be another session's (the hook
+  sends no `pane` for Codex for that reason). From 0.8.0 the hook ties a daemon hook to one Codex
+  screen by arguments only: the one started as `codex resume <this session>`, else the only one
+  (screens started with `--no-daemon` do not use the daemon). Tied, `tab` is that screen's; with
+  several screens and none that names the session it is `c` `daemon`. A session record is written
+  for a daemon hook only when it is tied to a screen whose environment has the tab marker, so with
+  two or more Codex screens of one user open at once (another terminal's too) their sessions are
+  not in the app's resume list; `SIMPLETERM` of the daemon is no longer read for that. A Codex
+  session's end comes when the daemon closes the conversation (about 30 minutes after you quit or
+  the SSH connection drops). `codex --no-daemon` runs hooks in the session itself; the app adds
+  it to the Codex lines it types. SimpleTerm `if/hook-tab-identity#shared-host`,
+  `if/session-record#scope`, issue #447.
+- **The tab of an agent is not always known.** Inside screen, abduco and dtach the hook says only
+  that it is inside a multiplexer; a tmux or herdr client that runs inside another multiplexer is
+  only counted; OpenCode 2.x is always `c` `daemon`; Zellij is not detected, so an agent there
+  reports the tab that started its server; and after `su -`, `env -i` or in a shell the app's
+  line could not reach, the marker is gone and the app falls back to its older rules. SimpleTerm
+  `if/hook-tab-identity#cut-env`, `spec/event-binding#limitations`.
 - **Some held requests are not told again.** A request held back for a wait you are looking at is
   told again while the agent's own record shows its window open (Claude Code questions and forms,
   Antigravity CLI and Grok Build questions, Grok Build permission windows and plan reviews). Where no
@@ -1001,6 +1042,10 @@ Test-only variables: with `SIMPLETERM_HOOK_TEST=1`, `SIMPLETERM_HOOK_TEST_IV`, `
 vectors, `SIMPLETERM_HOOK_TEST_PLAIN=<folder>` keeps each plaintext before it is sealed (one
 file per event and link), and `SIMPLETERM_HOOK_TEST_PROC=<folder>` stands in for Linux's `/proc`
 (the agent's pid where `ps` is missing). They are ignored otherwise.
+`SIMPLETERM_HOOK_TEST_IDBIN=<folder>` hands the tab identity stand-ins for every read of another
+process (`ps`, `tmux`, `proc/`, `root/`), and `SIMPLETERM_HOOK_TEST_IDPPID` the process its walk
+starts at; `SIMPLETERM_HOOK_TEST_IDBIN=none` turns those reads off and is honored always (the
+suite sets it, so that no case reads the processes of the machine it runs on).
 
 `tests/fixtures/v2/cases.json` holds hook inputs per agent and version, `expected.json` the
 plaintext every link gets, byte for byte; the sh hook and, for the agents it serves (Claude Code,
