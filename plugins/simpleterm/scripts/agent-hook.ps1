@@ -42,7 +42,7 @@ if ($ScriptArgs.Count -gt 1) { $Mode = [string]$ScriptArgs[1] }
 $MaxInput = 262144
 $MaxLinks = 16
 # The plugin release of this script (the manifests carry the same).
-$HookVersion = '0.7.0'
+$HookVersion = '0.8.0'
 # Bumped when the ~/.simpleterm/bin/simpleterm.cmd wrapper must be rewritten.
 $CliRev = 2
 $Inv = [Globalization.CultureInfo]::InvariantCulture
@@ -1218,6 +1218,23 @@ function Get-Spec([string]$text) {
     SpS 'pm' (SpP 'pm') $false
     SpS 'mux' (SpP 'mux') $false
     SpS 'pane' (SpP 'pane') $false
+    SpS 'msess' (SpP 'msess') $false
+    SpS 'msock' (SpP 'msock') $false
+    if ((SpP 'tab.st').Length -gt 0) {
+        SpO 'tab'
+        SpS 'tab.st' (SpP 'tab.st') $false
+        SpS 'tab.tm' (SpP 'tab.tm') $false
+        SpS 'tab.why' (SpP 'tab.why') $false
+        if ((SpP 'tab.n').Length -gt 0) {
+            SpR 'tab.n' (SpP 'tab.n')
+            SpA 'tab.cl'
+            $cls = (SpP 'tab.cl')
+            if ($cls.Length -gt 1) {
+                $k = 0
+                foreach ($c in $cls.Substring(1).Split(',')) { SpS ('tab.cl.' + $k) $c $false; $k++ }
+            }
+        }
+    }
     SpR 'tms' (SpP 'tms')
     if ((SpP 'rkind').Length -gt 0) { SpReq (SpP 'rkind') }
     if ((SpP 'turn') -ceq '1') { SpTurn }
@@ -1401,6 +1418,7 @@ function New-PlainV2($link, [string]$rid, [string]$ev, [string]$nonce) {
     $CNT = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     $STR['dir'] = '1024 -'; $STR['cfg'] = '0 -'; $STR['cfg.path'] = '1024 -'
     $STR['avs'] = '0 -'; $STR['tid'] = '0 -'; $STR['pm'] = '0 -'; $STR['tms'] = '0 -'; $STR['req.nid'] = '0 -'
+    $STR['msock'] = '256 -'; $STR['tab'] = '0 -'
     $STR['req.tool'] = '128 128'; $STR['req.ask.cmd'] = '8192 400'; $STR['req.ask.desc'] = '1024 200'
     $STR['req.ask.path'] = '1024 256'; $STR['req.ask.file'] = '1024 256'; $STR['req.ask.files.#'] = '1024 256'
     $STR['req.ask.change'] = '0 -'; $STR['req.ask.change.old'] = '12288 -'; $STR['req.ask.change.new'] = '12288 -'
@@ -1479,8 +1497,10 @@ function New-PlainV2($link, [string]$rid, [string]$ev, [string]$nonce) {
     $ORIG = @{}
     $ARR = @('req.others', 'turn.bg', 'req.scopes', 'req.ask.qs')
     foreach ($a in $ARR) { $x = 0; if ($IDX.TryGetValue($a, [ref]$x)) { $ORIG[$a] = BLive $x } }
-    # step 1: the last item of the first non-empty array
+    # step 1: msess first (an optional field), then the last item of the first non-empty array
     while ((BSize) -gt $budget) {
+        $i = BNode 'msess'
+        if ($i) { $b = $NV[$i].Length; BKill $i; BRec 'msess' $b; continue }
         $done = $false
         foreach ($a in $ARR) {
             $i = BNode $a
@@ -2144,9 +2164,21 @@ function Initialize-Common {
     }
     if ($Script:Agent -ceq 'codex') { $Script:PMode = Get-CodexPm }
     if ($Script:PMode -cmatch '\A[A-Za-z0-9._:/-]+\z' -and $Script:PMode.Length -le 48) { Add-At 'pm' $Script:PMode }
-    Get-Mux
+    Get-Tab
     if ($Script:MuxV) { Add-At 'mux' $Script:MuxV }
     if ($Script:PaneV) { Add-At 'pane' $Script:PaneV }
+    if ($Script:MSess) { Add-At 'msess' $Script:MSess }
+    if ($Script:MSock) { Add-At 'msock' $Script:MSock }
+    if ($Script:IdSt) {
+        Add-At 'tab.st' $Script:IdSt
+        Add-At 'tab.tm' $Script:IdTm
+        Add-At 'tab.why' $Script:IdWhy
+        # `cl` goes with `n`, empty or not (SimpleTerm if/hook-tab-identity#tab-field).
+        if ($Script:IdN -ge 0) {
+            Add-At 'tab.n' ([string]$Script:IdN)
+            $Script:AT += '@.tab.cl' + $Tab + 's' + $Tab + ',' + ($Script:IdCl -join ',') + $Nl
+        }
+    }
 }
 
 # The multiplexer the agent runs in and the id of its pane there (SimpleTerm
@@ -2163,6 +2195,353 @@ function Get-Mux {
     # Codex's default daemon runs every hook with the environment of the TUI that started it.
     if ($Script:Agent -ceq 'codex') { $Script:PaneV = '' }
     if ($Script:PaneV -cnotmatch '\A[A-Za-z0-9%._:-]{1,64}\z') { $Script:PaneV = '' }
+}
+
+# --- which terminal tab the hook runs for (SimpleTerm if/hook-tab-identity), as tab_detect in agent-hook.sh ---
+# Every read of another process goes through the Id* functions: its parent, command name, arguments and
+# terminal, and from its environment the tab marker only (if/hook-tab-identity#other-process). The test
+# suite sets SIMPLETERM_HOOK_TEST_IDBIN=none (no such read, honored always); a case that tests the reads
+# points it, with SIMPLETERM_HOOK_TEST=1, at a folder of stand-ins: ps, tmux, proc/ and root/. Windows:
+# no process environment can be read, so no client list and no bound TUI.
+$Script:IdPs = 'ps'; $Script:IdTmux = 'tmux'; $Script:IdProc = '/proc'; $Script:IdRoot = ''; $Script:IdOff = $false; $Script:IdStart = 0
+$Script:TabD = $false; $Script:IdDaemon = $false; $Script:IdJudged = $false; $Script:IdBound = $false; $Script:IdBMux = ''; $Script:IdTui = ''; $Script:IdSole = ''
+function Initialize-Id {
+    $b = [string]$env:SIMPLETERM_HOOK_TEST_IDBIN
+    if ($b -ceq 'none') { $Script:IdOff = $true }
+    elseif ($b) {
+        if ($env:SIMPLETERM_HOOK_TEST -eq '1') {
+            $Script:IdPs = Join-Path $b 'ps'; $Script:IdTmux = Join-Path $b 'tmux'
+            $Script:IdProc = Join-Path $b 'proc'; $Script:IdRoot = Join-Path $b 'root'
+        } else { $Script:IdOff = $true }
+    }
+    if (-not $Script:IdOff -and $env:SIMPLETERM_HOOK_TEST -eq '1' -and $b -and (Test-UInt $env:SIMPLETERM_HOOK_TEST_IDPPID)) {
+        $Script:IdStart = [int64]$env:SIMPLETERM_HOOK_TEST_IDPPID
+    } else {
+        try { $Script:IdStart = [int64](Get-ParentPid $PID) } catch { $Script:IdStart = 0 }
+    }
+}
+function Test-IdLinux { return (-not $Script:IdOff) -and [IO.Directory]::Exists($Script:IdProc + '/1') }
+# Runs the stand-in or real ps/tmux; $null when it fails or is not there.
+function Invoke-IdTool([string]$tool, [string[]]$a) {
+    try {
+        $o = & $tool @a 2>$null
+        if ($LASTEXITCODE -ne 0) { return $null }
+        return (@($o) -join "`n")
+    } catch { return $null }
+}
+# Parent and command name of process $id: @(ppid, comm), $null when it cannot be read.
+function Get-IdPc([string]$id) {
+    if ($Script:IdOff -or -not (Test-UInt $id)) { return $null }
+    $st = $Script:IdProc + '/' + $id + '/stat'
+    if ([IO.File]::Exists($st)) {
+        try { $l = [IO.File]::ReadAllText($st) } catch { return $null }
+        $o = $l.IndexOf('('); $c = $l.LastIndexOf(')')
+        if ($o -lt 0 -or $c -lt $o) { return $null }
+        $f = $l.Substring($c + 2).Split(' ')
+        if ($f.Count -lt 2 -or -not (Test-UInt $f[1])) { return $null }
+        return @($f[1], $l.Substring($o + 1, $c - $o - 1))
+    }
+    if ($IsWin) {
+        try { $pp = Get-ParentPid ([int]$id); return @([string]$pp, (Get-Process -Id ([int]$id) -ErrorAction Stop).ProcessName) } catch { return $null }
+    }
+    $o = Invoke-IdTool $Script:IdPs @('-o', 'ppid=', '-o', 'comm=', '-p', $id)
+    if ($null -eq $o) { return $null }
+    $m = [regex]::Match($o, '\A\s*([0-9]+)\s*(.*?)\s*\z')
+    if (-not $m.Success -or -not (Test-UInt $m.Groups[1].Value)) { return $null }
+    return @($m.Groups[1].Value, $m.Groups[2].Value)
+}
+function Get-IdBase([string]$comm) { $i = $comm.LastIndexOf('/'); if ($i -ge 0) { return $comm.Substring($i + 1) }; return $comm }
+function Get-IdArgs([string]$id) {
+    if ($Script:IdOff) { return '' }
+    $cl = $Script:IdProc + '/' + $id + '/cmdline'
+    if ([IO.File]::Exists($cl)) { try { return $Latin1.GetString([IO.File]::ReadAllBytes($cl)).Replace([char]0, ' ') } catch { return '' } }
+    if ($IsWin) {
+        try { return [string](Get-CimInstance Win32_Process -Filter ('ProcessId=' + $id) -ErrorAction Stop).CommandLine } catch { return '' }
+    }
+    $o = Invoke-IdTool $Script:IdPs @('-ww', '-o', 'args=', '-p', $id)
+    if ($null -eq $o) { return '' }
+    return $o
+}
+# The tab marker in the environment of process $id (id_mark): Linux environ, one entry at a time; macOS
+# ps -E, the command line taken off the front (no word of an argument is read as a variable) and the
+# rest one word at a time. Only the value of LC_SIMPLETERM_TAB is taken; nothing else of that
+# environment is kept, written or used. The marker, '' when the environment was read and has none, and
+# $null when it was not read or holds two different values. Windows reads none.
+function Get-IdMark([string]$id) {
+    if ($Script:IdOff -or $IsWin) { return $null }
+    if (Test-IdLinux) {
+        $f = $Script:IdProc + '/' + $id + '/environ'
+        if (-not [IO.File]::Exists($f)) { return $null }
+        try { $parts = $Latin1.GetString([IO.File]::ReadAllBytes($f)).Split([char]0) } catch { return $null }
+    } else {
+        $a = Invoke-IdTool $Script:IdPs @('-ww', '-o', 'command=', '-p', $id)
+        if (-not $a) { return $null }
+        $o = Invoke-IdTool $Script:IdPs @('-E', '-ww', '-o', 'command=', '-p', $id)
+        if ($null -eq $o -or -not $o.StartsWith($a, $Ord)) { return $null }
+        $parts = $o.Substring($a.Length).Split([string[]]@(' ', "`n"), [StringSplitOptions]::RemoveEmptyEntries)
+    }
+    $seen = $false
+    $vals = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($kv in $parts) {
+        if ($kv -cmatch '\A[A-Za-z_][A-Za-z0-9_]*=') { $seen = $true }
+        if ($kv.StartsWith('LC_SIMPLETERM_TAB=', $Ord)) { $v = $kv.Substring(18); if (-not $vals.Contains($v)) { $vals.Add($v) } }
+    }
+    if (-not $seen -or $vals.Count -gt 1) { return $null }
+    if ($vals.Count -eq 1) { return $vals[0] }
+    return ''
+}
+# PIDs of the user's own processes whose command name is $name.
+function Get-IdProcs([string]$name) {
+    $r = New-Object 'System.Collections.Generic.List[string]'
+    if ($Script:IdOff -or $IsWin) { return $r }
+    if (Test-IdLinux) {
+        $uid = [string](Invoke-IdTool 'id' @('-u'))
+        foreach ($d in [IO.Directory]::GetDirectories($Script:IdProc)) {
+            $p = [IO.Path]::GetFileName($d)
+            if ($p -cnotmatch '\A[0-9]+\z') { continue }
+            try { $su = [regex]::Match([IO.File]::ReadAllText($d + '/status'), '(?m)^Uid:\s*([0-9]+)').Groups[1].Value } catch { continue }
+            if ($su -cne $uid.Trim()) { continue }
+            $pc = Get-IdPc $p
+            if ($null -ne $pc -and $pc[1] -ceq $name) { $r.Add($p) }
+        }
+        $r.Sort([StringComparer]::Ordinal)
+        return $r
+    }
+    $uid = Invoke-IdTool 'id' @('-u')
+    if ($null -eq $uid) { return $r }
+    $o = Invoke-IdTool $Script:IdPs @('-U', $uid.Trim(), '-o', 'pid=', '-o', 'comm=')
+    if ($null -eq $o) { return $r }
+    foreach ($line in $o.Split("`n")) {
+        $m = [regex]::Match($line, '\A\s*([0-9]+)\s+(.*?)\s*\z')
+        if ($m.Success -and (Get-IdBase $m.Groups[2].Value) -ceq $name) { $r.Add($m.Groups[1].Value) }
+    }
+    return $r
+}
+function Test-IdMark([string]$v) { return $v -cmatch '\Ast1-[0-9a-f]{16}\z' }
+# A marker into cl: well formed, no repeat, 8 at most (id_addmark).
+function Add-IdMark([string]$m) {
+    if (-not (Test-IdMark $m) -or $Script:IdCl.Contains($m) -or $Script:IdCl.Count -ge 8) { return }
+    $Script:IdCl.Add($m)
+}
+function Get-IdWords([string]$a) { return @($a.Split([string[]]@(' '), [StringSplitOptions]::RemoveEmptyEntries)) }
+function Get-IdTty([string]$id) {
+    if ($Script:IdOff) { return '' }
+    if (Test-IdLinux) {
+        try { $t = [string](New-Object IO.FileInfo ($Script:IdProc + '/' + $id + '/fd/0')).LinkTarget } catch { return '' }
+        if ($t.StartsWith('/dev/pts/', $Ord) -or $t.StartsWith('/dev/tty', $Ord)) { return $t }
+        return ''
+    }
+    if ($IsWin) { return '' }
+    $t = Invoke-IdTool $Script:IdPs @('-o', 'tty=', '-p', $id)
+    if ($null -eq $t) { return '' }
+    $t = $t.Trim()
+    if ($t -ceq '' -or $t -ceq '?' -or $t -ceq '??' -or $t -ceq '-') { return '' }
+    return $t
+}
+# herdr's arguments of process $id: @(subcommand, session) (id_herdr_args).
+function Get-IdHerdrArgs([string]$id) {
+    $w = Get-IdWords (Get-IdArgs $id)
+    $sub = ''; $sess = ''; $i = 1
+    while ($i -lt $w.Count) {
+        if ($w[$i] -ceq '--session') { $i++; if ($i -lt $w.Count) { $sess = $w[$i] }; $i++ }
+        elseif ($w[$i].StartsWith('--session=', $Ord)) { $sess = $w[$i].Substring(10); $i++ }
+        elseif ($w[$i].StartsWith('-', $Ord)) { $i++ }
+        else { $sub = $w[$i]; break }
+    }
+    return @($sub, $sess)
+}
+# The kind of multiplexer server process $id with command name $comm is, '' when it is none (id_srv).
+function Get-IdSrv([string]$id, [string]$comm) {
+    $b = Get-IdBase $comm
+    if ($b -ceq 'tmux: server') { return 'tmux' }
+    if ($b -ceq 'tmux' -or $b -ceq 'abduco' -or $b -ceq 'dtach') { if (-not (Get-IdTty $id)) { return $b }; return '' }
+    if ($b -ceq 'screen') { if ((Get-IdArgs $id).StartsWith('SCREEN', $Ord)) { return 'screen' }; return '' }
+    if ($b -ceq 'herdr') { $h = Get-IdHerdrArgs $id; if ($h[0] -ceq 'server') { return 'herdr' }; return '' }
+    return ''
+}
+# The nearest multiplexer server at or above process $id (id_up): its kind, '' for none, $null when a
+# process on the way has gone or cannot be read.
+function Get-IdUp([string]$id) {
+    $k = 0
+    while ((Test-UInt $id) -and [int64]$id -gt 1 -and $k -lt 30) {
+        $pc = Get-IdPc $id
+        if ($null -eq $pc) { return $null }
+        $s = Get-IdSrv $id $pc[1]
+        if ($s) { return $s }
+        $id = $pc[0]
+        $k++
+    }
+    return ''
+}
+# A candidate client or TUI for n and cl (id_cand): counted; its marker goes to cl unless it runs inside
+# another multiplexer or its ancestors cannot be read.
+function Add-IdCand([string]$id) {
+    $Script:IdN++
+    $pc = Get-IdPc $id
+    if ($null -eq $pc) { return }
+    $u = Get-IdUp $pc[0]
+    if ($null -eq $u -or $u) { return }
+    $m = Get-IdMark $id
+    if ($m) { Add-IdMark $m }
+}
+function Add-IdTmuxClients([string]$sock, [string]$pane) {
+    if ($Script:IdOff -or -not $sock -or -not $pane) { return }
+    $sid = Invoke-IdTool $Script:IdTmux @('-S', $sock, 'display-message', '-p', '-t', $pane, '#{session_id}')
+    if (-not $sid) { return }
+    $sid = $sid.Trim()
+    if (-not $sid) { return }
+    $lst = Invoke-IdTool $Script:IdTmux @('-S', $sock, 'list-clients', '-F', '#{client_pid}:#{session_id}')
+    if ($null -eq $lst) { return }
+    $Script:IdN = 0
+    foreach ($line in $lst.Split("`n")) {
+        $f = $line.Trim().Split(':')
+        if ($f.Count -ge 2 -and $f[1] -ceq $sid -and (Test-UInt $f[0])) { Add-IdCand $f[0] }
+    }
+}
+function Add-IdHerdrClients([string]$sess) {
+    if ($Script:IdOff) { return }
+    $l = @(Get-IdProcs 'herdr')
+    if ($l.Count -eq 0) { return }
+    $Script:IdN = 0
+    foreach ($p in $l) {
+        $h = Get-IdHerdrArgs $p
+        if (-not $h[0] -and $h[1] -ceq $sess) { Add-IdCand $p }
+    }
+}
+# An abduco or dtach master among the hook's ancestors, up to the SSH or login process (id_detach).
+function Test-IdDetach {
+    if ($Script:IdOff) { return $false }
+    $id = [string]$Script:IdStart
+    $k = 0
+    while ($k -lt 12 -and (Test-UInt $id) -and [int64]$id -gt 1) {
+        $pc = Get-IdPc $id
+        if ($null -eq $pc) { return $false }
+        $b = Get-IdBase $pc[1]
+        if ($b -ceq 'dtach' -or $b -ceq 'abduco') { return $true }
+        if ($b.StartsWith('sshd', $Ord) -or $b -ceq 'login' -or $b -ceq 'init' -or $b -ceq 'systemd' -or $b -ceq 'launchd') { return $false }
+        $id = $pc[0]
+        $k++
+    }
+    return $false
+}
+function Test-IdContainer {
+    if ($Script:IdOff) { return $false }
+    if ([IO.File]::Exists($Script:IdRoot + '/.dockerenv') -or [IO.File]::Exists($Script:IdRoot + '/run/.containerenv')) { return $true }
+    try {
+        $f = $Script:IdProc + '/1/environ'
+        if ([IO.File]::Exists($f)) { foreach ($kv in $Latin1.GetString([IO.File]::ReadAllBytes($f)).Split([char]0)) { if ($kv.StartsWith('container=', $Ord)) { return $true } } }
+    } catch { }
+    return $false
+}
+# The Codex process that runs the hook: the nearest ancestor whose command name is codex, 6 steps at
+# most: @(pid, ' args ') or $null (id_host).
+function Find-IdHost {
+    $id = [string]$Script:IdStart
+    $k = 0
+    while ($k -lt 6 -and (Test-UInt $id) -and [int64]$id -gt 1) {
+        $pc = Get-IdPc $id
+        if ($null -eq $pc) { return $null }
+        $b = Get-IdBase $pc[1]
+        if ($b -ceq 'codex' -or $b -ceq 'codex.exe') { return @($id, (' ' + (Get-IdArgs $id) + ' ')) }
+        $id = $pc[0]
+        $k++
+    }
+    return $null
+}
+# Codex's daemon: the TUI of this session, by arguments only (id_codex_bind). $Script:IdTui: the one TUI
+# whose arguments are "resume <this session>". Without one: n and cl from the candidates, and
+# $Script:IdSole when there is one candidate only (the only TUI is not taken for the session's: an event
+# can come after the session's TUI has gone, when the only TUI is another tab's).
+function Find-IdCodexTui([string]$daemon) {
+    $Script:IdTui = ''; $Script:IdSole = ''; $Script:IdN = 0; $Script:IdCl = New-Object 'System.Collections.Generic.List[string]'
+    $cands = New-Object 'System.Collections.Generic.List[string]'
+    $ex = ''; $exn = 0
+    foreach ($p in @(Get-IdProcs 'codex')) {
+        if ($p -ceq $daemon) { continue }
+        $pc = Get-IdPc $p
+        if ($null -ne $pc -and $pc[0] -ceq $daemon) { continue }
+        $a = ' ' + (Get-IdArgs $p) + ' '
+        if ($a.Contains(' app-server ') -or $a.Contains(' --no-daemon ')) { continue }
+        $cands.Add($p)
+        if ((Test-Id $Script:RawSid) -and $a.Contains(' resume ' + $Script:RawSid + ' ')) { $exn++; $ex = $p }
+    }
+    if ($exn -eq 1) { $Script:IdTui = $ex; return }
+    if ($cands.Count -eq 1) { $Script:IdSole = $cands[0] }
+    foreach ($p in $cands) { Add-IdCand $p }
+}
+# The tab of this event, once a run (tab_detect): the multiplexer fields as before (Get-Mux), the scope
+# fields MSess and MSock from the hook's own environment, and IdSt IdTm IdWhy IdN IdCl. For the session
+# record: IdDaemon, the hook runs in Codex's daemon; IdJudged, a TUI of the session was looked at (the one
+# tied by its arguments, else the only TUI), IdBound, its environment has a well-formed marker, and IdBMux,
+# the multiplexer it runs in.
+function Get-Tab {
+    if ($Script:TabD) { return }
+    $Script:TabD = $true
+    Initialize-Id
+    Get-Mux
+    $Script:MSess = ''; $Script:MSock = ''
+    $Script:IdSt = ''; $Script:IdTm = ''; $Script:IdWhy = ''; $Script:IdN = -1
+    $Script:IdCl = New-Object 'System.Collections.Generic.List[string]'
+    $Script:IdDaemon = $false; $Script:IdJudged = $false; $Script:IdBound = $false; $Script:IdBMux = ''
+    if ($Script:MuxV -ceq 'herdr') { $Script:MSess = [string]$env:HERDR_SESSION }
+    elseif ($Script:MuxV -ceq 'tmux') { $Script:MSock = ([string]$env:TMUX).Split(',')[0] }
+    if ($Script:MSess -cnotmatch '\A[A-Za-z0-9._-]{1,64}\z') { $Script:MSess = '' }
+    # A path is sent as it is or not at all: printable ASCII but " and \, 256 bytes at most.
+    if ($Script:MSock -cnotmatch '\A[ -!#-\[\]-~]{1,256}\z') { $Script:MSock = '' }
+    # Rule 1: a host shared by several tabs.
+    if ($Script:Agent -ceq 'codex' -or $Script:Agent -ceq 'codex-notify') {
+        $h = Find-IdHost
+        # Whether the hook runs in the daemon cannot be read: the environment may be another tab's, and
+        # its scope fields with it.
+        if ($null -eq $h) { $Script:IdSt = 'c'; $Script:IdWhy = 'daemon'; $Script:MSess = ''; $Script:MSock = ''; return }
+        if ($h[1].Contains(' app-server ') -and $h[1].Contains(' --managed-daemon ')) {
+            $Script:IdDaemon = $true; $Script:MSess = ''; $Script:MSock = ''
+            if ($IsWin) { $Script:IdSt = 'c'; $Script:IdWhy = 'daemon'; return }
+            Find-IdCodexTui $h[0]
+            $bt = $Script:IdTui
+            if (-not $bt) { $bt = $Script:IdSole }
+            $bm = $null; $u = $null
+            if ($bt) {
+                $pc = Get-IdPc $bt
+                if ($null -ne $pc) { $u = Get-IdUp $pc[0] }
+                if ($null -ne $u) {
+                    $Script:IdJudged = $true
+                    $bm = Get-IdMark $bt
+                    if ($bm -and (Test-IdMark $bm)) { $Script:IdBound = $true }
+                    if ($u -ceq 'tmux' -or $u -ceq 'screen' -or $u -ceq 'herdr') { $Script:IdBMux = $u }
+                }
+            }
+            # Not tied by its arguments: n and cl of the candidates stand.
+            if (-not $Script:IdTui) { $Script:IdSt = 'c'; $Script:IdWhy = 'daemon'; return }
+            $Script:IdN = -1; $Script:IdCl = New-Object 'System.Collections.Generic.List[string]'
+            # Its ancestors or its environment cannot be read: unknown, not "no marker".
+            if (-not $Script:IdJudged) { $Script:IdSt = 'c'; $Script:IdWhy = 'daemon' }
+            elseif ($u) { $Script:IdSt = 'c'; $Script:IdWhy = 'mux' }
+            elseif ($null -eq $bm) { $Script:IdSt = 'c'; $Script:IdWhy = 'daemon' }
+            elseif ($bm -ceq '') { $Script:IdSt = 'b' }
+            elseif ($Script:IdBound) { $Script:IdSt = 'a'; $Script:IdTm = $bm }
+            else { $Script:IdSt = 'c'; $Script:IdWhy = 'form' }
+            return
+        }
+        # Another app-server (an IDE's): its environment is not a tab's either, and the TUIs of the
+        # daemon are not its clients.
+        if ($h[1].Contains(' app-server ')) { $Script:IdSt = 'c'; $Script:IdWhy = 'daemon'; $Script:MSess = ''; $Script:MSock = ''; return }
+    }
+    # Rule 2: a multiplexer. Its pane has the environment of the tab that started the server.
+    if ($Script:MuxV) {
+        $Script:IdSt = 'c'; $Script:IdWhy = 'mux'
+        if ($Script:MuxV -ceq 'tmux') { Add-IdTmuxClients (([string]$env:TMUX).Split(',')[0]) ([string]$env:TMUX_PANE) }
+        elseif ($Script:MuxV -ceq 'herdr') { Add-IdHerdrClients ([string]$env:HERDR_SESSION) }
+        return
+    }
+    if (Test-IdDetach) { $Script:IdSt = 'c'; $Script:IdWhy = 'mux'; return }
+    # Rules 3 and 4: the marker, a container, an app that predates the marker, or no SimpleTerm tab.
+    $mk = [string]$env:LC_SIMPLETERM_TAB
+    if ($mk) {
+        if (Test-IdMark $mk) { $Script:IdSt = 'a'; $Script:IdTm = $mk } else { $Script:IdSt = 'c'; $Script:IdWhy = 'form' }
+    } elseif (Test-IdContainer) { $Script:IdSt = 'c'; $Script:IdWhy = 'container' }
+    elseif ($env:SIMPLETERM -ceq '1') { $Script:IdSt = 'c'; $Script:IdWhy = 'refused' }
+    else { $Script:IdSt = 'b' }
 }
 
 # True if $dir (one trailing / or \ dropped) is ~/<name>.
@@ -2286,12 +2665,23 @@ function Send-Result($link, [string]$scope, [string]$out, [string]$rrid, [string
 # resumed. The file name is the id, or the start of its SHA-256 when it has
 # a `:` (a Windows file name cannot).
 function Test-SessOk {
-    if ($env:SIMPLETERM -ne '1') { return $false }
     if ($Script:Agent -cne 'claude' -and $Script:Agent -cne 'codex' -and $Script:Agent -cne 'grok') { return $false }
     if (-not (Test-Id $Script:RawSid)) { return $false }
     $Script:SessDir = Join-Path (Join-Path $StDir 'sessions') $Script:App
     if ($Script:RawSid.Contains(':')) { $Script:SessName = (Get-Sha256Hex $Script:RawSid).Substring(0, 32) } else { $Script:SessName = $Script:RawSid }
     $Script:Sess = Join-Path $Script:SessDir $Script:SessName
+    # A hook in Codex's daemon has the environment of the TUI that started the daemon, so its SIMPLETERM
+    # says nothing about this session (SimpleTerm if/session-record#scope). A record that is there is kept
+    # up without a look at any process. A new one is made only when a session starts or takes a prompt,
+    # and in the daemon only for a TUI whose own environment has the tab marker: the one tied to the
+    # session by its arguments, else the only TUI. Windows reads no environment and goes by SIMPLETERM.
+    if ($Script:Agent -ceq 'codex' -and -not $IsWin) {
+        if ([IO.File]::Exists($Script:Sess + '.json') -or [IO.File]::Exists($Script:Sess + '.beat')) { return $true }
+        if ($Script:HookEvent -cne 'SessionStart' -and $Script:HookEvent -cne 'UserPromptSubmit') { return $false }
+        Get-Tab
+        if ($Script:IdDaemon) { return $Script:IdBound }
+    }
+    if ($env:SIMPLETERM -ne '1') { return $false }
     return $true
 }
 
@@ -2365,7 +2755,7 @@ function Write-SessRecord([string]$state, [string]$prompt) {
     New-SessDir
     $old = Read-HeadB ($Script:Sess + '.json') 4096
     $ow = $null
-    if ($old) { $ow = Get-JsonKV $old @('started_at', 'last_prompt', 'title', 'title_src') }
+    if ($old) { $ow = Get-JsonKV $old @('started_at', 'last_prompt', 'title', 'title_src', 'mux') }
     $so = ''
     if ($ow) { $so = Get-Field $ow 'started_at' }
     if (-not (Test-UInt $so)) { $so = [string]$Script:Now }
@@ -2402,8 +2792,16 @@ function Write-SessRecord([string]$state, [string]$prompt) {
     if ($cvv -and $cpp) { $j += ',"cfg":{"var":"' + $cvv + '","path":"' + (Limit-Json $cpp 100000 1024) + '"}' }
     $j += ',"state":"' + $state + '"'
     # No pane: a resumed session runs in another one (SimpleTerm hist/session-record#d25).
-    Get-Mux
-    if ($Script:MuxV) { $j += ',"mux":"' + $Script:MuxV + '"' }
+    Get-Tab
+    $smx = $Script:MuxV
+    if ($Script:IdDaemon -and -not $IsWin) {
+        # In Codex's daemon the hook's variables are another TUI's: the multiplexer of the session's TUI,
+        # the one tied by its arguments or, for a new record, the only TUI. Otherwise the one the record
+        # had: a late event of a session whose TUI has gone must not take another TUI's.
+        if ($Script:IdJudged -and ($Script:IdTui -or -not $old)) { $smx = $Script:IdBMux } elseif ($ow) { $smx = Get-Field $ow 'mux' } else { $smx = '' }
+        if ($smx -cne 'tmux' -and $smx -cne 'screen' -and $smx -cne 'herdr' -and $smx -cne 'unknown') { $smx = '' }
+    }
+    if ($smx) { $j += ',"mux":"' + $smx + '"' }
     $j += '}'
     if ($j.Length -gt 4096) { return }
     $tmp = $Script:Sess + '.json.' + $PID

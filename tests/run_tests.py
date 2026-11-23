@@ -364,6 +364,9 @@ class Suite:
             "PATH": str(self.bare if bare else self.bin),
             "LANG": "en_US.UTF-8",
             "TMPDIR": str(self.tmp),
+            # The tab identity (SimpleTerm if/hook-tab-identity) reads no other process and no tmux
+            # server here: on the machine running the suite they are the user's. t_v2_tab hands it stand-ins.
+            "SIMPLETERM_HOOK_TEST_IDBIN": "none",
         }
         if self.kind == "ps1":
             # pwsh is run by its path; the hook needs nothing from PATH, and no agent the user has
@@ -6179,6 +6182,419 @@ def t_v2_mux(s):
         s.check("mux opencode %s plugin inside herdr: mux %s, pane %s" % (kind, mux, pane), p.get("mux") == mux and p.get("pane") == pane, str(p)[:300])
 
 
+TAB_PS = r'''#!/bin/sh
+# Stand-in ps for the tab identity cases: ps.d/<pid>/{ppid,comm,args,env,tty} beside it.
+d=${0%/*}/ps.d
+E='' fields='' pid='' all=''
+while [ $# -gt 0 ]; do
+  case $1 in
+    -E) E=1 ;;
+    -o) shift; fields="$fields $1" ;;
+    -p) shift; pid=$1 ;;
+    -U) shift; all=1 ;;
+  esac
+  shift
+done
+show() {
+  out=''
+  for f in $fields; do
+    case $f in
+      pid=) v=$1 ;;
+      ppid=) v=$(cat "$d/$1/ppid") ;;
+      comm=) v=$(cat "$d/$1/comm") ;;
+      tty=) v=$(cat "$d/$1/tty" 2>/dev/null || echo '??') ;;
+      args= | command=) v=$(cat "$d/$1/args"); [ -n "$E" ] && [ -f "$d/$1/env" ] && v="$v $(tr '\n' ' ' <"$d/$1/env")" ;;
+    esac
+    out="$out${out:+ }$v"
+  done
+  printf '%s\n' "$out"
+}
+if [ -n "$all" ]; then
+  for x in "$d"/*; do show "${x##*/}"; done
+  exit 0
+fi
+[ -d "$d/$pid" ] || exit 1
+show "$pid"
+'''
+TAB_TMUX = r'''#!/bin/sh
+# Stand-in tmux: tmux.d/pane.<pane> (the session id) and tmux.d/clients beside it.
+d=${0%/*}/tmux.d
+case " $* " in
+  *" display-message "*)
+    t=''
+    while [ $# -gt 0 ]; do [ "$1" = -t ] && t=$2; shift; done
+    cat "$d/pane.$t" 2>/dev/null || exit 1 ;;
+  *" list-clients "*) cat "$d/clients" ;;
+  *) exit 1 ;;
+esac
+'''
+MK_A = "st1-0123456789abcdef"
+MK_B = "st1-fedcba9876543210"
+MK_C = "st1-00000000000000c0"
+
+
+def merged(*ds):
+    r = {}
+    for d in ds:
+        r.update(d)
+    return r
+
+
+def tab_bin(root, procs=None, tmux=None, linux=None, container=False):
+    """Stand-ins of the reads the tab identity makes (SimpleTerm if/hook-tab-identity#other-process), in folder
+    root: procs {pid: dict(ppid, comm, args, env {name: value}, tty)} for ps; tmux (pane, its session id,
+    [(client pid, session id)]); linux {pid: dict(ppid, comm, args, env, fd {n: target})} as proc/ (proc/1
+    exists, so the hook reads /proc as on Linux); container: root/.dockerenv."""
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True)
+    write(root / "ps", TAB_PS).chmod(0o755)
+    write(root / "tmux", TAB_TMUX).chmod(0o755)
+    for pid, p in (procs or {}).items():
+        d = root / "ps.d" / str(pid)
+        write(d / "ppid", str(p.get("ppid", 1)) + "\n")
+        write(d / "comm", p["comm"] + "\n")
+        write(d / "args", p.get("args", p["comm"]) + "\n")
+        if "env" in p:
+            write(d / "env", "".join("%s=%s\n" % kv for kv in p["env"].items()))
+        if "tty" in p:
+            write(d / "tty", p["tty"] + "\n")
+    if tmux:
+        write(root / "tmux.d" / ("pane." + tmux[0]), tmux[1] + "\n")
+        write(root / "tmux.d" / "clients", "".join("%s:%s\n" % c for c in tmux[2]))
+    if linux is not None:
+        for pid, p in merged({1: {"ppid": 0, "comm": "init"}}, linux).items():
+            d = root / "proc" / str(pid)
+            write(d / "stat", "%d (%s) S %d 0 0\n" % (pid, p["comm"], p.get("ppid", 1)))
+            write(d / "status", "Name:\t%s\nUid:\t%d\t%d\t%d\t%d\n" % ((p["comm"],) + (os.getuid(),) * 4))
+            (d / "cmdline").write_bytes(("\0".join(p.get("args", p["comm"]).split(" ")) + "\0").encode())
+            (d / "environ").write_bytes("".join("%s=%s\0" % kv for kv in p.get("env", {}).items()).encode())
+            (d / "fd").mkdir()
+            for n, target in p.get("fd", {}).items():
+                os.symlink(target, d / "fd" / str(n))
+    if container:
+        write(root / "root" / ".dockerenv", "")
+    return root
+
+
+def t_v2_tab(s):
+    """SimpleTerm if/hook-tab-identity (#450), phase 1: the tab field (a: the tab's marker, b: not a SimpleTerm
+    tab, c: unknown, with why, n and cl), rules 1 to 4 in order, the clients of tmux and herdr with the ancestor
+    check of each client (inside another multiplexer, unreadable or gone: n only), Codex's daemon bound to one
+    TUI by its arguments, the scope fields msess (herdr named session, tunnel and relay) and msock (tmux socket,
+    tunnel only), the session record of a daemon hook (if/session-record#scope), and the relay summary that
+    drops msess first when it is over budget (if/event-v2-limits#shrinking). Every process read goes to
+    stand-ins (SIMPLETERM_HOOK_TEST_IDBIN)."""
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2}), (LINK_A, {"fmt": 2, "push": "disabled"})],
+                conf={"claude_wait": 5, "codex_wait": 0})
+        tctl("/_ctl/reset", {})
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, push="suppressed", unknown_error="unknown", max_body=65536)}})
+        base = s.tmp / "idb"
+        sock = "/tmp/tmux-1000/default"
+        # The hook's ancestors: 100 the hook's sh, 90 the agent, 80 the login shell (the walk stops there).
+        chain = {100: {"ppid": 90, "comm": "sh"}, 90: {"ppid": 80, "comm": "claude", "args": "claude"}, 80: {"ppid": 1, "comm": "-zsh"}}
+        cases = []  # (sid, agent, input, env, tab, mux, pane, msess, msock)
+
+        def cx_in(sid, event="PermissionRequest"):
+            d = {"session_id": sid, "turn_id": "t1", "transcript_path": "/nonexistent/rollout.jsonl", "cwd": "/w/api",
+                 "hook_event_name": event, "model": "gpt-5.5", "permission_mode": "default"}
+            if event == "PermissionRequest":
+                d.update(tool_name="Bash", tool_input={"command": "echo hi > x"})
+            else:
+                d.update(prompt="go")
+            return json.dumps(d)
+
+        def case(sid, env, tab, mux=None, pane=None, msess=None, msock=None, agent="claude", **bin_kw):
+            root = base / sid
+            start = bin_kw.pop("start", "100")
+            if bin_kw.pop("off", False):
+                e = dict(env)
+            else:
+                tab_bin(root, **bin_kw)
+                e = dict(env, SIMPLETERM_HOOK_TEST="1", SIMPLETERM_HOOK_TEST_IDBIN=str(root), SIMPLETERM_HOOK_TEST_IDPPID=start)
+            cases.append((sid, agent, cx_in(sid) if agent == "codex" else v2_perm(session=sid), e, tab, mux, pane, msess, msock))
+
+        # Rules 3 and 4 (no multiplexer, no shared host).
+        case("tb-a", {"LC_SIMPLETERM_TAB": MK_A, "SIMPLETERM": "1"}, {"st": "a", "tm": MK_A}, procs=chain)
+        case("tb-b", {}, {"st": "b"}, procs=chain)
+        case("tb-refused", {"SIMPLETERM": "1"}, {"st": "c", "why": "refused"}, procs=chain)
+        case("tb-form", {"LC_SIMPLETERM_TAB": "st1-ABC"}, {"st": "c", "why": "form"}, procs=chain)
+        case("tb-form-long", {"LC_SIMPLETERM_TAB": MK_A + "0"}, {"st": "c", "why": "form"}, procs=chain)
+        case("tb-container", {"SIMPLETERM": "1"}, {"st": "c", "why": "container"}, procs=chain, container=True)
+        case("tb-container-mark", {"LC_SIMPLETERM_TAB": MK_A}, {"st": "a", "tm": MK_A}, procs=chain, container=True)
+        # Podman: container= in the environment of process 1 (Linux).
+        case("tb-container-pid1", {"SIMPLETERM": "1"}, {"st": "c", "why": "container"},
+             linux=merged(chain, {1: {"ppid": 0, "comm": "init", "env": {"container": "podman"}}}))
+        # No process can be read at all (the suite's default): the hook's own environment still decides.
+        case("tb-off", {"LC_SIMPLETERM_TAB": MK_A}, {"st": "a", "tm": MK_A}, off=True)
+        # Rule 2, tmux: the clients of the pane's session; a client is a tab unless a server is among its ancestors.
+        tm_env = {"TMUX": sock + ",4242,0", "TMUX_PANE": "%3", "LC_SIMPLETERM_TAB": MK_C}
+        clients = merged(chain, {201: {"comm": "tmux", "tty": "ttys001", "env": {"LC_SIMPLETERM_TAB": MK_A}},
+                                 202: {"comm": "tmux", "tty": "ttys002", "env": {"LC_SIMPLETERM_TAB": MK_B}},
+                                 203: {"comm": "tmux", "tty": "ttys003", "env": {"LC_SIMPLETERM_TAB": MK_C}},
+                                 # 204 runs in a pane of another tmux: its marker is that server's first tab's
+                                 204: {"ppid": 85, "comm": "tmux", "tty": "ttys004", "env": {"LC_SIMPLETERM_TAB": MK_C}},
+                                 85: {"ppid": 84, "comm": "-zsh"}, 84: {"ppid": 1, "comm": "/opt/homebrew/bin/tmux", "args": "tmux new -s w"},
+                                 205: {"comm": "tmux", "tty": "ttys005", "env": {"PATH": "/usr/bin"}},
+                                 206: {"comm": "tmux", "tty": "ttys006", "env": {"LC_SIMPLETERM_TAB": MK_A}},
+                                 207: {"ppid": 999, "comm": "tmux", "tty": "ttys007", "env": {"LC_SIMPLETERM_TAB": MK_B}}})
+        mux = {"st": "c", "why": "mux"}
+        case("tb-tmux", tm_env, dict(mux, n=2, cl=[MK_A, MK_B]), "tmux", "%3", None, sock,
+             procs=clients, tmux=("%3", "$1", [(201, "$1"), (202, "$1"), (203, "$2")]))
+        case("tb-tmux-nested", tm_env, dict(mux, n=2, cl=[MK_A]), "tmux", "%3", None, sock,
+             procs=clients, tmux=("%3", "$1", [(201, "$1"), (204, "$1")]))
+        case("tb-tmux-nomark", tm_env, dict(mux, n=2, cl=[MK_A]), "tmux", "%3", None, sock,
+             procs=clients, tmux=("%3", "$1", [(201, "$1"), (205, "$1")]))
+        case("tb-tmux-same", tm_env, dict(mux, n=2, cl=[MK_A]), "tmux", "%3", None, sock,
+             procs=clients, tmux=("%3", "$1", [(201, "$1"), (206, "$1")]))
+        # A client whose parent is gone, and a client that is gone itself, count in n only.
+        case("tb-tmux-noread", tm_env, dict(mux, n=3, cl=[MK_A]), "tmux", "%3", None, sock,
+             procs=clients, tmux=("%3", "$1", [(201, "$1"), (207, "$1"), (299, "$1")]))
+        nine = merged(chain, {210 + k: {"comm": "tmux", "tty": "ttys01%d" % k, "env": {"LC_SIMPLETERM_TAB": "st1-00000000000000d%d" % k}} for k in range(9)})
+        case("tb-tmux-nine", tm_env, dict(mux, n=9, cl=["st1-00000000000000d%d" % k for k in range(8)]), "tmux", "%3", None, sock,
+             procs=nine, tmux=("%3", "$1", [(210 + k, "$1") for k in range(9)]))
+        case("tb-tmux-none", tm_env, dict(mux, n=0, cl=[]), "tmux", "%3", None, sock, procs=chain, tmux=("%3", "$1", [(203, "$2")]))
+        # The clients cannot be listed (no pane id, tmux fails): no n and no cl.
+        case("tb-tmux-nopane", {"TMUX": sock + ",1,0"}, mux, "tmux", None, None, sock, procs=clients, tmux=("%3", "$1", [(201, "$1")]))
+        case("tb-tmux-fail", tm_env, mux, "tmux", "%3", None, sock, procs=clients)
+        case("tb-tmux-quote", {"TMUX": '/tmp/a"b,1,0', "TMUX_PANE": "%3"}, mux, "tmux", "%3", procs=chain)
+        case("tb-tmux-long", {"TMUX": "/" + "s" * 256 + ",1,0", "TMUX_PANE": "%3"}, mux, "tmux", "%3", procs=chain)
+        # A tmux server among the ancestors without TMUX is no multiplexer (rule 2): the marker decides.
+        case("tb-tmux-novar", {"LC_SIMPLETERM_TAB": MK_A}, {"st": "a", "tm": MK_A},
+             procs=merged(chain, {80: {"ppid": 84, "comm": "-zsh"}, 84: {"ppid": 1, "comm": "/opt/homebrew/bin/tmux", "args": "tmux new -s w"}}))
+        # The same on Linux (/proc): the server is "tmux: server".
+        lx = {100: {"ppid": 90, "comm": "sh"}, 90: {"ppid": 80, "comm": "claude"}, 80: {"ppid": 84, "comm": "bash"},
+              84: {"ppid": 1, "comm": "tmux: server", "args": "tmux new -s w"},
+              201: {"ppid": 1, "comm": "tmux: client", "args": "tmux attach", "env": {"LC_SIMPLETERM_TAB": MK_A, "HOME": "/home/u"}, "fd": {0: "/dev/pts/3"}},
+              204: {"ppid": 85, "comm": "tmux: client", "args": "tmux attach", "env": {"LC_SIMPLETERM_TAB": MK_B}, "fd": {0: "/dev/pts/4"}},
+              85: {"ppid": 84, "comm": "bash"}}
+        case("tb-tmux-linux", tm_env, dict(mux, n=2, cl=[MK_A]), "tmux", "%3", None, sock, linux=lx, tmux=("%3", "$1", [(201, "$1"), (204, "$1")]))
+        # herdr: the user's herdr processes run without a subcommand, of the pane's session.
+        hd = merged(chain, {301: {"comm": "herdr", "args": "herdr --session s2", "tty": "ttys021", "env": {"LC_SIMPLETERM_TAB": MK_A}},
+                            302: {"comm": "herdr", "args": "/opt/homebrew/bin/herdr server", "env": {"LC_SIMPLETERM_TAB": MK_C}},
+                            303: {"comm": "herdr", "args": "herdr --session s3", "tty": "ttys023", "env": {"LC_SIMPLETERM_TAB": MK_C}},
+                            304: {"comm": "herdr", "args": "herdr pane run w1:p1 x", "env": {"LC_SIMPLETERM_TAB": MK_C}},
+                            305: {"comm": "/opt/homebrew/bin/herdr", "args": "/opt/homebrew/bin/herdr --session=s2", "tty": "ttys025", "env": {"LC_SIMPLETERM_TAB": MK_B}},
+                            306: {"comm": "herdr", "args": "herdr", "tty": "ttys026", "env": {"LC_SIMPLETERM_TAB": MK_C}}})
+        hd_env = {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1", "HERDR_SESSION": "s2", "LC_SIMPLETERM_TAB": MK_C}
+        case("tb-herdr", hd_env, dict(mux, n=2, cl=[MK_A, MK_B]), "herdr", "w1:p1", "s2", procs=hd)
+        case("tb-herdr-default", dict(hd_env, HERDR_SESSION=""), dict(mux, n=1, cl=[MK_C]), "herdr", "w1:p1", procs=hd)
+        case("tb-herdr-badsess", dict(hd_env, HERDR_SESSION="a b"), dict(mux, n=0, cl=[]), "herdr", "w1:p1", procs=hd)
+        case("tb-herdr-noprocs", hd_env, mux, "herdr", "w1:p1", "s2", procs=chain)
+        # screen: detected by STY; its clients are not listed in phase 1.
+        case("tb-screen", {"STY": "400.w", "LC_SIMPLETERM_TAB": MK_C}, mux, "screen", procs=chain)
+        # abduco and dtach set no variable: the master among the ancestors tells. No mux field for them.
+        case("tb-dtach", {"LC_SIMPLETERM_TAB": MK_C}, mux,
+             procs={100: {"ppid": 90, "comm": "sh"}, 90: {"ppid": 110, "comm": "claude"}, 110: {"ppid": 111, "comm": "bash"},
+                    111: {"ppid": 1, "comm": "dtach", "args": "dtach -c /tmp/d.sock bash"}})
+        case("tb-abduco", {"LC_SIMPLETERM_TAB": MK_C, "SIMPLETERM": "1"}, mux,
+             procs={100: {"ppid": 90, "comm": "sh"}, 90: {"ppid": 120, "comm": "claude"}, 120: {"ppid": 121, "comm": "-zsh"},
+                    121: {"ppid": 1, "comm": "/usr/bin/abduco", "args": "abduco -e ^q -c work zsh -l"}})
+        # The same from /proc, with herdr's clients listed there too.
+        case("tb-herdr-linux", hd_env, dict(mux, n=1, cl=[MK_A]), "herdr", "w1:p1", "s2",
+             linux={100: {"ppid": 90, "comm": "sh"}, 90: {"ppid": 80, "comm": "claude"}, 80: {"ppid": 302, "comm": "bash"},
+                    301: {"ppid": 1, "comm": "herdr", "args": "herdr --session s2", "env": {"LC_SIMPLETERM_TAB": MK_A, "PATH": "/usr/bin"}, "fd": {0: "/dev/pts/2"}},
+                    302: {"ppid": 1, "comm": "herdr", "args": "herdr server", "env": {"LC_SIMPLETERM_TAB": MK_C}},
+                    303: {"ppid": 1, "comm": "herdr", "args": "herdr --session s3", "env": {"LC_SIMPLETERM_TAB": MK_B}, "fd": {0: "/dev/pts/3"}}})
+
+        # Rule 1, Codex: the daemon is the hook's host (the nearest ancestor named codex, whatever shell
+        # stands between). The session's TUI is the one started as "resume <session>": judged by its
+        # ancestors and its marker, whatever the daemon's own environment says.
+        def daemon(sid, more=None):
+            return merged({80: {"ppid": 1, "comm": "-zsh"}, 500: {"ppid": 501, "comm": "sh"},
+                           501: {"ppid": 1, "comm": "codex", "args": "codex app-server --listen unix:///tmp/x --managed-daemon"},
+                           # not candidates: a TUI that does not use the daemon, and the daemon's own child
+                           520: {"ppid": 80, "comm": "codex", "args": "codex -C /w resume %s --no-daemon" % sid, "env": {"LC_SIMPLETERM_TAB": MK_C}},
+                           530: {"ppid": 501, "comm": "codex", "args": "codex exec x"}}, more or {})
+
+        def tui(env, args="codex -C /w", ppid=80, comm="codex"):
+            return {"ppid": ppid, "comm": comm, "args": args, "tty": "ttys030", "env": dict(env, PATH="/usr/bin")}
+        cx = dict(agent="codex", start="500")
+        stale = {"LC_SIMPLETERM_TAB": MK_C, "SIMPLETERM": "1", "TMUX": sock + ",1,0", "TMUX_PANE": "%9"}  # the daemon's own
+        other = tui({"LC_SIMPLETERM_TAB": MK_A})
+
+        def resumed(sid, env, **kw):
+            return tui(env, "codex resume " + sid, **kw)
+        in_tmux = {86: {"ppid": 87, "comm": "-zsh"}, 87: {"ppid": 1, "comm": "tmux", "args": "tmux"}}
+        case("tb-cx-exact", stale, {"st": "a", "tm": MK_B}, "tmux", procs=daemon("tb-cx-exact", {510: other, 511: resumed("tb-cx-exact", {"LC_SIMPLETERM_TAB": MK_B})}), **cx)
+        case("tb-cx-exact-b", stale, {"st": "b"}, "tmux", procs=daemon("tb-cx-exact-b", {510: other, 511: resumed("tb-cx-exact-b", {})}), **cx)
+        case("tb-cx-exact-form", {}, {"st": "c", "why": "form"},
+             procs=daemon("tb-cx-exact-form", {510: other, 511: resumed("tb-cx-exact-form", {"LC_SIMPLETERM_TAB": "st1-XYZ"})}), **cx)
+        case("tb-cx-exact-mux", stale, mux, "tmux",
+             procs=daemon("tb-cx-exact-mux", merged(in_tmux, {510: other, 511: resumed("tb-cx-exact-mux", {"LC_SIMPLETERM_TAB": MK_B}, ppid=86)})), **cx)
+        # Its environment cannot be read (ps shows none), or holds two values: unknown, never b or a.
+        case("tb-cx-exact-noenv", stale, {"st": "c", "why": "daemon"}, "tmux",
+             procs=daemon("tb-cx-exact-noenv", {510: other, 511: {"ppid": 80, "comm": "codex", "args": "codex resume tb-cx-exact-noenv"}}), **cx)
+        case("tb-cx-exact-two", {}, {"st": "c", "why": "daemon"},
+             procs=daemon("tb-cx-exact-two", {511: resumed("tb-cx-exact-two", {"LC_SIMPLETERM_TAB": MK_B, "NOTE": "x LC_SIMPLETERM_TAB=" + MK_C})}), **cx)
+        # No word of an argument is read as a variable: a marker there is not the tab's, and a k=v there
+        # does not make a hidden environment "read, no marker".
+        case("tb-cx-exact-argmark", {}, {"st": "a", "tm": MK_B},
+             procs=daemon("tb-cx-exact-argmark", {511: tui({"LC_SIMPLETERM_TAB": MK_B}, "codex resume tb-cx-exact-argmark LC_SIMPLETERM_TAB=" + MK_C)}), **cx)
+        case("tb-cx-exact-argonly", {}, {"st": "b"},
+             procs=daemon("tb-cx-exact-argonly", {511: tui({}, "codex resume tb-cx-exact-argonly LC_SIMPLETERM_TAB=" + MK_C)}), **cx)
+        case("tb-cx-exact-hidden", stale, {"st": "c", "why": "daemon"}, "tmux",
+             procs=daemon("tb-cx-exact-hidden", {510: other, 511: {"ppid": 80, "comm": "codex", "args": "codex -c model_reasoning_effort=high resume tb-cx-exact-hidden"}}), **cx)
+        # Its parent is gone: whether it runs inside a multiplexer cannot be told.
+        case("tb-cx-exact-orphan", {}, {"st": "c", "why": "daemon"},
+             procs=daemon("tb-cx-exact-orphan", {511: resumed("tb-cx-exact-orphan", {"LC_SIMPLETERM_TAB": MK_B}, ppid=999)}), **cx)
+        # No TUI names the session: c daemon, n the candidate TUIs, cl the markers of those outside a
+        # multiplexer. The only TUI is a candidate too, not the session's: a late event of a session whose
+        # TUI has gone must not name another tab.
+        case("tb-cx-sole", stale, {"st": "c", "why": "daemon", "n": 1, "cl": [MK_A]}, "tmux", procs=daemon("tb-cx-sole", {510: other}), **cx)
+        case("tb-cx-sole-b", {}, {"st": "c", "why": "daemon", "n": 1, "cl": []}, procs=daemon("tb-cx-sole-b", {510: tui({})}), **cx)
+        case("tb-cx-unbound", stale, {"st": "c", "why": "daemon", "n": 3, "cl": [MK_A]}, "tmux",
+             procs=daemon("tb-cx-unbound", {510: other, 511: tui({}),
+                                            512: tui({"LC_SIMPLETERM_TAB": MK_B}, ppid=85), 85: {"ppid": 1, "comm": "abduco", "args": "abduco -c x codex"}}), **cx)
+        case("tb-cx-two-exact", {}, {"st": "c", "why": "daemon", "n": 2, "cl": [MK_A, MK_B]},
+             procs=daemon("tb-cx-two-exact", {510: resumed("tb-cx-two-exact", {"LC_SIMPLETERM_TAB": MK_A}),
+                                              511: resumed("tb-cx-two-exact", {"LC_SIMPLETERM_TAB": MK_B})}), **cx)
+        case("tb-cx-nocand", stale, {"st": "c", "why": "daemon", "n": 0, "cl": []}, "tmux", procs=daemon("tb-cx-nocand"), **cx)
+        # A codex whose path has a blank is a candidate too (two TUIs, so the first is not the only one).
+        case("tb-cx-space", {}, {"st": "c", "why": "daemon", "n": 2, "cl": [MK_A, MK_B]},
+             procs=daemon("tb-cx-space", {510: other, 511: tui({"LC_SIMPLETERM_TAB": MK_B}, comm="/Users/u/Application Support/codex/bin/codex")}), **cx)
+        # Codex starts the hook through another shell: the daemon is still found.
+        case("tb-cx-wrapper", stale, {"st": "c", "why": "daemon", "n": 1, "cl": [MK_A]}, "tmux",
+             procs=daemon("tb-cx-wrapper", {500: {"ppid": 505, "comm": "sh"}, 505: {"ppid": 501, "comm": "tcsh"}, 510: other}), **cx)
+        # Codex runs the hook itself (--no-daemon): the hook's own environment, as any agent, scope fields too.
+        case("tb-cx-builtin", {"LC_SIMPLETERM_TAB": MK_A}, {"st": "a", "tm": MK_A},
+             procs={80: {"ppid": 1, "comm": "-zsh"}, 500: {"ppid": 510, "comm": "sh"}, 510: tui({"LC_SIMPLETERM_TAB": MK_A}, "codex -C /w resume tb-cx-builtin --no-daemon")}, **cx)
+        case("tb-cx-builtin-tmux", {"TMUX": sock + ",1,0", "TMUX_PANE": "%9", "LC_SIMPLETERM_TAB": MK_C}, dict(mux, n=1, cl=[MK_A]), "tmux", None, None, sock,
+             procs=merged({80: {"ppid": 84, "comm": "-zsh"}, 84: {"ppid": 1, "comm": "tmux", "args": "tmux"}, 500: {"ppid": 510, "comm": "sh"},
+                           510: tui({}, "codex --no-daemon"), 201: {"comm": "tmux", "tty": "ttys001", "env": {"LC_SIMPLETERM_TAB": MK_A}}}),
+             tmux=("%9", "$1", [(201, "$1")]), **cx)
+        # No codex among the ancestors, or nothing can be read: whether it is the daemon is not known,
+        # so unknown, and no scope field of an environment that may be another tab's.
+        case("tb-cx-nohost", stale, {"st": "c", "why": "daemon"}, "tmux",
+             procs={80: {"ppid": 1, "comm": "-zsh"}, 500: {"ppid": 510, "comm": "sh"}, 510: {"ppid": 80, "comm": "node", "args": "node x.js"}}, **cx)
+        case("tb-cx-noread", {"LC_SIMPLETERM_TAB": MK_A, "TMUX": "/x,1,0", "TMUX_PANE": "%2"}, {"st": "c", "why": "daemon"}, "tmux", agent="codex", off=True)
+        # Another app-server (an IDE's, not the managed daemon): its environment is not a tab's either.
+        case("tb-cx-appserver", stale, {"st": "c", "why": "daemon"}, "tmux",
+             procs={80: {"ppid": 1, "comm": "-zsh"}, 500: {"ppid": 501, "comm": "sh"},
+                    501: {"ppid": 80, "comm": "codex", "args": "codex app-server --listen stdio://"}, 510: other}, **cx)
+        # The same from /proc: the candidates listed there, and a line feed inside another variable's
+        # value does not make a marker.
+        lcx = {80: {"ppid": 1, "comm": "bash"}, 500: {"ppid": 501, "comm": "sh"},
+               501: {"ppid": 1, "comm": "codex", "args": "codex app-server --listen unix:///tmp/x --managed-daemon"},
+               510: {"ppid": 80, "comm": "codex", "args": "codex", "env": {"LC_SIMPLETERM_TAB": MK_A, "PATH": "/usr/bin"}, "fd": {0: "/dev/pts/1"}},
+               511: {"ppid": 80, "comm": "codex", "args": "codex resume tb-cx-linux",
+                     "env": {"NOTE": "x\nLC_SIMPLETERM_TAB=" + MK_C, "LC_SIMPLETERM_TAB": MK_B, "PATH": "/usr/bin"}, "fd": {0: "/dev/pts/2"}}}
+        case("tb-cx-linux", {}, {"st": "a", "tm": MK_B}, linux=lcx, **cx)
+        case("tb-cx-linux-unbound", {}, {"st": "c", "why": "daemon", "n": 2, "cl": [MK_A, MK_B]}, linux=lcx, **cx)
+        for sid, agent, inp, env, *_ in cases:
+            s.run(agent, inp, env)
+
+        def plains(recs):
+            got = {}
+            for r in recs:
+                if r["path"] == "/v1/ingest" and r.get("plain"):
+                    got[(r.get("plain_json") or {}).get("sid")] = r["plain"]
+            return got
+        wait_for(lambda: len(plains(tctl("/_ctl/records")["records"])) >= len(cases) and len(plains(s.records())) >= len(cases), 30)
+        tun_p, rel_p = plains(tctl("/_ctl/records")["records"]), plains(s.records())
+        order = ("mux", "pane", "msess", "msock", "tab", "tms")
+        for sid, agent, inp, env, tab, mux_v, pane, msess, msock in cases:
+            for where, got in (("tunnel", tun_p), ("relay", rel_p)):
+                raw = got.get(sid)
+                j = json.loads(raw) if raw else {}
+                want_tab = tab if where == "tunnel" else None
+                ok = (raw is not None and j.get("tab") == want_tab and j.get("mux") == mux_v and j.get("pane") == pane
+                      and j.get("msess") == msess and j.get("msock") == (msock if where == "tunnel" else None))
+                # key order: mux, pane, msess, msock, tab, then tms (if/event-v2#common-fields)
+                ok = ok and [k for k in j if k in order] == [k for k in order if k in j]
+                if ok and want_tab:
+                    ok = list(j["tab"]) == [k for k in ("st", "tm", "why", "n", "cl") if k in want_tab]
+                s.check("tab %s: %s tab %s mux %s pane %s msess %s msock %s" % (sid, where, want_tab, mux_v, pane, msess, msock and "set"),
+                        ok, str(raw)[:400])
+        # Codex's notify program runs in the daemon too: its own environment (the stale marker) is not its tab.
+        root = tab_bin(base / "cx-notify", procs=daemon("cx-notify", {510: other}))
+        s.run("codex-notify", "", dict(stale, SIMPLETERM_HOOK_TEST="1", SIMPLETERM_HOOK_TEST_IDBIN=str(root), SIMPLETERM_HOOK_TEST_IDPPID="500"),
+              args=(json.dumps({"type": "agent-turn-complete", "cwd": "/w/cxnotify", "last-assistant-message": "notify-probe done"}),))
+        probe = wait_for(lambda: [r for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and "notify-probe" in (r.get("plain") or "")], 15)
+        jn = (probe[0].get("plain_json") or {}) if probe else {}
+        s.check("tab cx-notify: the notify program in the daemon is c daemon with the candidate, not the daemon's marker",
+                jn.get("tab") == {"st": "c", "why": "daemon", "n": 1, "cl": [MK_A]} and "msock" not in jn, str(probe)[:400])
+        # The session record of a Codex hook (if/session-record#scope): in the daemon only for a TUI whose
+        # own environment has the marker (the one tied by its arguments, else the only TUI); SIMPLETERM of
+        # the daemon says nothing. Made at a prompt or a session's start only; one that is there is kept up.
+        sd = s.home / ".simpleterm" / "sessions" / "codex"
+        builtin = {80: {"ppid": 1, "comm": "-zsh"}, 500: {"ppid": 510, "comm": "sh"}, 510: tui({}, "codex --no-daemon")}
+        marked = {"LC_SIMPLETERM_TAB": MK_A}
+
+        def rec_run(sid, env, procs, event="UserPromptSubmit"):
+            root = tab_bin(base / (sid + "-" + event), procs=procs)
+            s.run("codex", cx_in(sid, event), dict(env, SIMPLETERM_HOOK_TEST="1", SIMPLETERM_HOOK_TEST_IDBIN=str(root), SIMPLETERM_HOOK_TEST_IDPPID="500"))
+            rec = sd / (sid + ".json")
+            return json.loads(rec.read_text()) if rec.exists() else None
+        recs = [  # (sid, hook environment, processes, record written, its mux)
+            ("cx-rec-sole", {}, daemon("cx-rec-sole", {510: tui(marked)}), True, None),
+            ("cx-rec-sole-tmux", {}, daemon("cx-rec-sole-tmux", merged(in_tmux, {510: tui(marked, ppid=86)})), True, "tmux"),
+            ("cx-rec-exact", {}, daemon("cx-rec-exact", {510: tui({}), 511: resumed("cx-rec-exact", marked)}), True, None),
+            ("cx-rec-nomark", stale, daemon("cx-rec-nomark", {510: tui({})}), False, None),
+            ("cx-rec-unbound", stale, daemon("cx-rec-unbound", {510: tui(marked), 511: tui({"LC_SIMPLETERM_TAB": MK_B})}), False, None),
+            ("cx-rec-noenv", stale, daemon("cx-rec-noenv", {510: {"ppid": 80, "comm": "codex", "args": "codex"}}), False, None),
+            ("cx-rec-builtin", {"SIMPLETERM": "1"}, builtin, True, None),
+            ("cx-rec-builtin-other", {}, builtin, False, None),
+        ]
+        for sid, env, procs, want, rmux in recs:
+            r = rec_run(sid, env, procs)
+            s.check("tab %s: session record %s, mux %s" % (sid, "written" if want else "not written", rmux),
+                    (r is not None and r.get("mux") == rmux and "pane" not in r) if want else r is None, str(r)[:300])
+        # Not at an event that is neither a prompt nor a session's start.
+        r = rec_run("cx-rec-late", {}, daemon("cx-rec-late", {510: tui(marked)}), "PermissionRequest")
+        s.check("tab cx-rec-late: no record is made at a permission request", r is None and not (sd / "cx-rec-late.beat").exists(), str(r)[:300])
+        # A record that is there is kept up whatever the processes are now, and keeps its multiplexer
+        # when no TUI of the session can be looked at.
+        two = daemon("cx-rec-sole-tmux", {510: tui({}), 511: tui({})})
+        root = tab_bin(base / "cx-rec-again", procs=two)
+        s.run("codex", json.dumps(dict(json.loads(cx_in("cx-rec-sole-tmux", "UserPromptSubmit")), prompt="again")),
+              dict(stale, SIMPLETERM_HOOK_TEST="1", SIMPLETERM_HOOK_TEST_IDBIN=str(root), SIMPLETERM_HOOK_TEST_IDPPID="500"))
+        r = json.loads((sd / "cx-rec-sole-tmux.json").read_text())
+        s.check("tab cx-rec-again: a record that is there is kept up without a TUI to tie it to, with the multiplexer it had",
+                r.get("last_prompt") == "again" and r.get("mux") == "tmux", str(r)[:300])
+        # A late prompt-less event of a recorded session whose TUI has gone, the only TUI left being another
+        # tab's inside tmux: the record does not take that TUI's multiplexer. A TUI tied by its arguments does.
+        root = tab_bin(base / "cx-rec-late-other", procs=daemon("cx-rec-sole", merged(in_tmux, {510: tui(marked, ppid=86)})))
+        s.run("codex", json.dumps(dict(json.loads(cx_in("cx-rec-sole", "UserPromptSubmit")), prompt="late")),
+              dict(SIMPLETERM_HOOK_TEST="1", SIMPLETERM_HOOK_TEST_IDBIN=str(root), SIMPLETERM_HOOK_TEST_IDPPID="500"))
+        r = json.loads((sd / "cx-rec-sole.json").read_text())
+        s.check("tab cx-rec-late-other: the record of a session does not take the multiplexer of another tab's only TUI",
+                r.get("last_prompt") == "late" and "mux" not in r, str(r)[:300])
+        root = tab_bin(base / "cx-rec-late-tied", procs=daemon("cx-rec-sole", merged(in_tmux, {510: tui({}), 511: resumed("cx-rec-sole", marked, ppid=86)})))
+        s.run("codex", json.dumps(dict(json.loads(cx_in("cx-rec-sole", "UserPromptSubmit")), prompt="tied")),
+              dict(SIMPLETERM_HOOK_TEST="1", SIMPLETERM_HOOK_TEST_IDBIN=str(root), SIMPLETERM_HOOK_TEST_IDPPID="500"))
+        r = json.loads((sd / "cx-rec-sole.json").read_text())
+        s.check("tab cx-rec-late-tied: the record takes the multiplexer of the TUI tied to the session by its arguments",
+                r.get("last_prompt") == "tied" and r.get("mux") == "tmux", str(r)[:300])
+        # The relay summary over budget: msess goes first (and is recorded in cut); mux and pane stay.
+        tctl("/_ctl/reset", {})
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, push="suppressed", unknown_error="unknown", max_body=65536)}})
+        big = "".join(chr(0x4E00 + i) for i in range(400))
+        env = {"HERDR_ENV": "1", "HERDR_PANE_ID": "p" * 64, "HERDR_SESSION": "s" * 64}
+        sid_big = "tb-big-" + "x" * 121
+        big_in = json.loads(v2_perm(command=big, session=sid_big, cwd="/w/" + "d" * 64))
+        big_in["tool_input"]["description"] = big[:120]
+        s.run("claude", json.dumps(big_in), env)
+        wait_for(lambda: plains(s.records()).get(sid_big) and plains(tctl("/_ctl/records")["records"]).get(sid_big), 15)
+        rel = plains(s.records()).get(sid_big) or ""
+        tun_raw = plains(tctl("/_ctl/records")["records"]).get(sid_big) or ""
+        jr = json.loads(rel) if rel else {}
+        s.check("tab: relay over budget drops msess first (cut msess 64), keeps mux and pane, within 2048 bytes",
+                bool(rel) and "msess" not in jr and (jr.get("cut") or {}).get("msess") == 64 and jr.get("mux") == "herdr"
+                and jr.get("pane") == "p" * 64 and len(rel.encode()) <= 2048,
+                "%d %s" % (len(rel.encode()), json.dumps({k: v for k, v in jr.items() if k not in ("msg", "req", "sid", "cwd", "nonce", "pane")})[:500]))
+        s.check("tab: the tunnel keeps msess", json.loads(tun_raw).get("msess") == "s" * 64 if tun_raw else False, tun_raw[:200])
+        # Within budget the relay keeps msess.
+        s.run("claude", v2_perm(session="tb-small"), dict(env, HERDR_PANE_ID="w1:p1", HERDR_SESSION="s2"))
+        wait_for(lambda: plains(s.records()).get("tb-small"), 15)
+        js = json.loads(plains(s.records()).get("tb-small") or "{}")
+        s.check("tab: relay within budget keeps msess", js.get("msess") == "s2" and "cut" not in js, str(js)[:300])
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+
 def t_v2_versions(s):
     """SimpleTerm if/hook-events-identification#version-cache: the agent's version where the agent gives none: `--version`, run in the background
     when the executable is new or newer than the cache (SimpleTerm hist/event-v2#d13); the first dotted number is taken."""
@@ -6827,7 +7243,7 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_schedule, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js, t_opencode_schedule,
          t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_usage_ask_gate, t_v2_usage_ask_refresh, t_usage_ask_refresh_vectors, t_conf_vectors, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_held, t_v2_held_bg, t_v2_not_sent,
-         t_v2_state, t_v2_sessions, t_v2_mux, t_v2_opencode_js, t_copilot_hooks, t_copilot, t_copilot_schedules,
+         t_v2_state, t_v2_sessions, t_v2_mux, t_v2_tab, t_v2_opencode_js, t_copilot_hooks, t_copilot, t_copilot_schedules,
          t_v2_versions, t_v2_claude_question_once, t_hooks_removed_plugin]
 
 # The cases where the shell and openssl meet (the compat set): the openssl calls (random hex, SHA-256 read

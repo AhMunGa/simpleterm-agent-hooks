@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+## 0.8.0 - 2026-11-24
+
+Which terminal tab a hook runs for (SimpleTerm `if/hook-tab-identity` phase 1, `if/event-v2#common-fields`,
+`if/event-v2-limits#shrinking`, `if/session-record#scope`; issues AhMunGa/simple-term#450, #447, #635).
+
+- **`tab`** on every v2 event to a tunnel (never to the relay), after the multiplexer fields:
+  `{"st":"a","tm":"st1-…"}` (the tab's marker `LC_SIMPLETERM_TAB`, which the app sends by the SSH environment
+  request and by the shell integration line), `{"st":"b"}` (no marker, no `SIMPLETERM`, no container: not a
+  SimpleTerm tab) or `{"st":"c","why":…}` (unknown: `mux`, `daemon`, `container`, `refused`, `form`), with `n`
+  (candidate tabs found) and `cl` (their well-formed markers, at most 8, each once) where the clients can be read.
+  An app that predates the field ignores it.
+- **Rules, the first that applies**: (1) a host shared by several tabs: Codex's daemon (the nearest ancestor
+  named `codex` is `codex app-server … --managed-daemon`; the notify program too) is tied by arguments only to
+  the one TUI started as `resume <session>` (TUIs started with `--no-daemon`, the daemon's own children and
+  other app-servers are not candidates), and that TUI is judged: inside a multiplexer `c` `mux`, a marker `a`,
+  none `b`, unreadable `c` `daemon`; no such TUI: `c` `daemon` with `n` and `cl` (the only TUI is a
+  candidate, not the session's: an event can come after the session's TUI has gone); another
+  `codex app-server` (an IDE's) or a host that cannot be read: `c` `daemon`. OpenCode 2.x is always `c` `daemon`;
+  (2) a multiplexer: `TMUX`, `STY`, herdr, or an `abduco` or `dtach` master among the hook's ancestors up to
+  the SSH or login process (they set no variable; `mux` is not sent for those two); (3) the marker (`a`, or `c`
+  `form`); (4) a container signal,
+  `SIMPLETERM=1` without a marker (`refused`), or `b`.
+- **Clients**: tmux (`list-clients` of the pane's session) and herdr (the user's `herdr` processes run without a
+  subcommand, of the pane's session). A client with a multiplexer server among its ancestors (told by command
+  names), one whose ancestors cannot be read and one that has gone count in `n` only. From a client's or a
+  TUI's environment only the value of `LC_SIMPLETERM_TAB` is taken (Linux `/proc/<pid>/environ` one entry at a
+  time, macOS `ps -E -p` with the command line taken off the front and cut out in the same pipeline; two
+  different values: none is taken); nothing else is
+  kept, written or sent. Windows reads none. The README's Privacy section states the rules.
+- **Scope fields**: `msess` (herdr's named session, tunnel and relay; the relay summary drops it first when it is
+  over budget, recorded in `cut`) and `msock` (the tmux socket path, tunnel only; sent as it is or not at all:
+  printable ASCII without `"` or `\`, 256 bytes at most). A Codex hook in the daemon, or one that cannot
+  tell, sends neither: its variables may be another tab's.
+- **Session record of a Codex hook**: a record that is there is kept up without a look at any process; a new one
+  is made at a prompt or a session's start only. In the daemon it is made only for a TUI whose own environment
+  has the tab marker (the one tied by its arguments, else the only TUI), with the multiplexer that TUI runs in
+  (by its ancestors; a record that is there changes its multiplexer only for a tied TUI); before, the
+  daemon's `SIMPLETERM` decided, which belonged to the TUI that started the
+  daemon. A Codex that runs its hooks itself (`--no-daemon`) goes by `SIMPLETERM` as before, and so does
+  Windows.
+- Codex sends no `pane`, as before, and the multiplexer fields of every agent are as before.
+- The same in `agent-hook.ps1` (Claude Code, Codex, Grok Build) and in every plugin's copy of `agent-hook.sh`.
+  The test suite gives the hook stand-ins for every process read (`SIMPLETERM_HOOK_TEST_IDBIN`); outside a case
+  that sets them it reads nothing (`none`). `t_v2_tab` holds the cases of the rules for both hooks. Outside herdr
+  the relay events are byte for byte those before; the tunnel events gain `tab` (the shared fixtures).
+- Not in this release (phase 2 of `if/hook-tab-identity`): the outer tabs of nested multiplexers, the clients of
+  screen, abduco and dtach, and the TUI part that tells an OpenCode 2.x service which tab shows a session.
+
 ## 0.7.0 - 2026-11-17
 
 - **Claude Code background pause on the screen** (SimpleTerm `if/terminal-signals-bg`, `hist/hook-events#e28`,
