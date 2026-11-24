@@ -5924,18 +5924,43 @@ agy_parent() { # record file
     exit
   }' 2>/dev/null
 }
+# The main session above a Grok id: each sub-agent's is kept in <id>.subof
+# (first line). Grok 1.0.93 runs a sub-agent's sub-agent's SubagentStart under
+# the main session (SimpleTerm hist/hook-events#e35); one under a sub-agent's
+# id goes up the kept ones, at most 8 steps (none past them).
+grok_top() { # id
+  gt=$1 gt_i=0
+  while gt_n=$(sed -n 1p "$RUN_DIR/$(printf '%s' "$gt" | tr -c 'A-Za-z0-9_-' '_' | cut -c1-80).subof" 2>/dev/null) &&
+    is_id "$gt_n"; do
+    gt_i=$((gt_i + 1))
+    [ "$gt_i" -le 8 ] || return 0
+    gt=$gt_n
+  done
+  printf '%s\n' "$gt"
+}
 case $AGENT:$EVENT in
-  grok:SubagentStart)
-    # Its own hooks come under subagentId: the parent is kept for its stop.
-    is_id "$SUBID" && is_id "$RAWSID" &&
-      printf '%s\n' "$RAWSID" >"$RUN_DIR/$(printf '%s' "$SUBID" | tr -c 'A-Za-z0-9_-' '_' | cut -c1-80).subof" 2>/dev/null
-    ;;
-  grok:SubagentStop)
-    if [ "$RAWSID" = "$SUBID" ]; then
+  grok:SubagentStart | grok:SubagentStop)
+    if [ "$EVENT" = SubagentStop ] && [ "$RAWSID" = "$SUBID" ]; then
+      # Its own stop: under the main session kept at its start, with the
+      # sub-agent that started it when that was not the main session.
       sp_f=$RUN_DIR/$SID.subof
       sp=$(sed -n 1p "$sp_f" 2>/dev/null)
+      spp=$(sed -n 2p "$sp_f" 2>/dev/null)
       rm -f "$sp_f" 2>/dev/null
+      is_id "$spp" && SUBPAR=$spp
       sub_parent "$sp"
+    elif is_id "$SUBID" && is_id "$RAWSID"; then
+      gs_top=$(grok_top "$RAWSID")
+      is_id "$gs_top" || finish
+      # Its own hooks come under subagentId: the main session is kept for its
+      # stop, and the sub-agent that started it if that was not the main one.
+      [ "$EVENT" = SubagentStart ] &&
+        { printf '%s\n' "$gs_top"; [ "$gs_top" = "$RAWSID" ] || printf '%s\n' "$RAWSID"; } \
+          >"$RUN_DIR/$(printf '%s' "$SUBID" | tr -c 'A-Za-z0-9_-' '_' | cut -c1-80).subof" 2>/dev/null
+      if [ "$gs_top" != "$RAWSID" ]; then
+        SUBPAR=$RAWSID
+        sub_parent "$gs_top"
+      fi
     fi
     ;;
   grok:UserPromptSubmit | grok:SessionEnd | grok:Stop | grok:StopFailure | grok:StopCancelled)
@@ -7093,7 +7118,10 @@ cop_wait_start() {
       END { if (found) print "y"; else if (any) print "n" }' 2>/dev/null)
     [ "$cw" = n ] || return 0
     cw_i=$((cw_i + 1))
-    [ "$cw_i" -ge 10 ] && return 0
+    if [ "$cw_i" -ge 10 ]; then
+      log "agentStop: no hook.start line of its own in its record after 1 s; read as it is"
+      return 0
+    fi
     sleep 0.1 2>/dev/null || { sleep 1; cw_i=$((cw_i + 9)); }
   done
 }

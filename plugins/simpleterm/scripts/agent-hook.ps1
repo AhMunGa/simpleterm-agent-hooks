@@ -6703,6 +6703,37 @@ function Get-AskKey {
 
 # The fields of the hook input that the hook reads (the case list of
 # agent-hook.sh), in document order.
+# A Grok sub-agent's kept parents (SimpleTerm if/event-v2-turn#sub): <id>.subof holds the main
+# session (first line) and the sub-agent that started it when that was not the main one.
+function Get-SubOfPath([string]$id) {
+    $n = [regex]::Replace($id, '[^A-Za-z0-9_-]', '_')
+    if ($n.Length -gt 80) { $n = $n.Substring(0, 80) }
+    return (Join-Path $RunDir ($n + '.subof'))
+}
+
+function Read-SubOf([string]$path) {
+    try { return @(([IO.File]::ReadAllText($path, $Latin1)) -split "`n" | ForEach-Object { $_.Trim() }) } catch { return @() }
+}
+
+# The main session above a Grok id, as grok_top in agent-hook.sh: up the kept parents, at most
+# 8 steps; '' past them.
+function Get-GrokTop([string]$id) {
+    $top = $id
+    for ($i = 0; $i -le 8; $i++) {
+        $kept = @(Read-SubOf (Get-SubOfPath $top))
+        if ($kept.Count -lt 1 -or -not (Test-Id $kept[0])) { return $top }
+        if ($i -eq 8) { return '' }
+        $top = $kept[0]
+    }
+    return ''
+}
+
+function Set-SubParent([string]$id) {
+    $Script:RawSid = $id
+    $Script:Sid = [regex]::Replace($id, '[^A-Za-z0-9_-]', '_')
+    if ($Script:Sid.Length -gt 80) { $Script:Sid = $Script:Sid.Substring(0, 80) }
+}
+
 function Read-HookFields($kv) {
     foreach ($p in $kv.order) {
         $v = $kv.got[$p]
@@ -7322,19 +7353,27 @@ try {
     # prompt, end and stop send nothing, and its SubagentStop is a sub_stop under
     # the parent that SubagentStart kept. Its tool and permission hooks go on.
     if ($Agent -ceq 'grok') {
-        $subOf = [regex]::Replace($Script:SubId, '[^A-Za-z0-9_-]', '_')
-        if ($subOf.Length -gt 80) { $subOf = $subOf.Substring(0, 80) }
-        $subOf = Join-Path $RunDir ($subOf + '.subof')
-        if ($Script:HookEvent -ceq 'SubagentStart') {
-            if ((Test-Id $Script:SubId) -and (Test-Id $Script:RawSid)) { $null = Write-FileB $subOf ($Script:RawSid + "`n") }
-        } elseif ($Script:HookEvent -ceq 'SubagentStop' -and (Test-Id $Script:SubId) -and $Script:RawSid -ceq $Script:SubId) {
-            $par = ''
-            try { $par = ([IO.File]::ReadAllText($subOf, $Latin1)).Trim() } catch { }
+        $subOf = Get-SubOfPath $Script:SubId
+        if ($Script:HookEvent -ceq 'SubagentStop' -and (Test-Id $Script:SubId) -and $Script:RawSid -ceq $Script:SubId) {
+            # Its own stop: under the main session kept at its start (and the sub-agent that
+            # started it when that was not the main one).
+            $kept = @(Read-SubOf $subOf)
             Remove-FileQ $subOf
-            if (-not (Test-Id $par)) { Trim-Log; exit 0 }
-            $Script:RawSid = $par
-            $Script:Sid = [regex]::Replace($par, '[^A-Za-z0-9_-]', '_')
-            if ($Script:Sid.Length -gt 80) { $Script:Sid = $Script:Sid.Substring(0, 80) }
+            if ($kept.Count -lt 1 -or -not (Test-Id $kept[0])) { Trim-Log; exit 0 }
+            if ($kept.Count -gt 1 -and (Test-Id $kept[1])) { $Script:SubPar = $kept[1] }
+            Set-SubParent $kept[0]
+        } elseif ((@('SubagentStart', 'SubagentStop') -ccontains $Script:HookEvent) -and (Test-Id $Script:SubId) -and (Test-Id $Script:RawSid)) {
+            $top = Get-GrokTop $Script:RawSid
+            if (-not (Test-Id $top)) { Trim-Log; exit 0 }
+            if ($Script:HookEvent -ceq 'SubagentStart') {
+                $keep = $top + "`n"
+                if ($top -cne $Script:RawSid) { $keep += $Script:RawSid + "`n" }
+                $null = Write-FileB $subOf $keep
+            }
+            if ($top -cne $Script:RawSid) {
+                $Script:SubPar = $Script:RawSid
+                Set-SubParent $top
+            }
         } elseif ((@('UserPromptSubmit', 'SessionEnd', 'Stop', 'StopFailure', 'StopCancelled') -ccontains $Script:HookEvent) -and
             -not $Script:AgentId -and $Script:SubType) {
             Trim-Log

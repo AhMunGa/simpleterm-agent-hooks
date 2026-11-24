@@ -6976,6 +6976,49 @@ def t_sub_sessions(s):
         s.check("sub sessions: grok, one relay done of the parent", [r["body"]["ev"] for r in relay(P)] == ["done"],
                 str([r["body"]["ev"] for r in relay(P)]))
         s.check("sub sessions: grok, no session record of the sub-agent", not records(S), str(records(S)))
+
+        # A sub-agent's sub-agent (GROK_SUBAGENTS_MAX_DEPTH 2). 1.0.93 runs its SubagentStart under the main session
+        # with no parent field and its SubagentStop under its own id (measured, SimpleTerm hist/hook-events#e35): N.
+        # A SubagentStart under a sub-agent's id (not seen) goes up the kept parents to the main session, with
+        # sub.parent the sub-agent that started it: M under S. A chain of kept parents that loops ends.
+        P, S, N, M = "gnest-main", "gnest-agent-1", "gnest-agent-2", "gnest-agent-3"
+
+        def gsub(sid, event, snake, ev, sub_id, **kw):
+            return g(sid, event, snake, ev, subagentId=sub_id, subagentType="general-purpose", **kw)
+
+        nest = [
+            g(P, "UserPromptSubmit", "user_prompt_submit", ("running", None), promptId="gn-1", prompt="MAINTASK start one"),
+            gsub(P, "SubagentStart", "subagent_start", ("sub_start", S), S, description="bg measure"),
+            gsub(P, "SubagentStart", "subagent_start", ("sub_start", N), N, description="nested measure"),
+            gsub(S, "SubagentStart", "subagent_start", ("sub_start", M), M, description="nested under its parent"),
+            gsub(M, "SubagentStop", "subagent_stop", ("sub_stop", M), M, promptId="gn-m", phase="gate", stopHookActive=False),
+            g(M, "SessionEnd", "session_end", None, reason="shutdown", subagentType="general-purpose"),
+            gsub(N, "SubagentStop", "subagent_stop", ("sub_stop", N), N, promptId="gn-n", phase="gate", stopHookActive=False),
+            g(N, "SessionEnd", "session_end", None, reason="shutdown", subagentType="general-purpose"),
+            gsub(S, "SubagentStop", "subagent_stop", ("sub_stop", S), S, promptId="gn-s", phase="gate", stopHookActive=False),
+        ]
+        want = play(nest, P, "grok nested")
+        s.check("sub sessions: grok nested, every sub_start and sub_stop under the main session", evs(P) == want, str(evs(P)))
+        s.check("sub sessions: grok nested, nothing under a sub-agent's id",
+                not any(tunnel_all(x) or relay(x) for x in (S, N, M)), str([tunnel_all(x) for x in (S, N, M)])[:300])
+        subs = {(p.get("st"), (p.get("sub") or {}).get("id")): (p.get("sub") or {}).get("parent")
+                for p in state(P, "sub_start") + state(P, "sub_stop")}
+        s.check("sub sessions: grok nested, sub.parent only for the one started under a sub-agent's id",
+                subs == {("sub_start", S): None, ("sub_start", N): None, ("sub_start", M): S,
+                         ("sub_stop", M): S, ("sub_stop", N): None, ("sub_stop", S): None}, str(subs))
+        # Kept parents that loop (A's parent B, B's parent A): the walk stops at its limit and sends nothing under
+        # a guess; the hook ends in time.
+        run = s.home / ".simpleterm" / "run"
+        run.mkdir(parents=True, exist_ok=True)
+        (run / "gloop-a.subof").write_text("gloop-b\n")
+        (run / "gloop-b.subof").write_text("gloop-a\n")
+        t0 = time.time()
+        inp, env = gk("gloop-a", "SubagentStart", "subagent_start", subagentId="gloop-c", subagentType="general-purpose")
+        s.run("claude", inp, env)
+        s.settle("grok: a loop of kept parents")
+        s.check("sub sessions: grok, a loop of kept parents ends (nothing sent, in time)",
+                not any(tunnel_all(x) for x in ("gloop-a", "gloop-b")) and time.time() - t0 < 5,
+                str([tunnel_all(x) for x in ("gloop-a", "gloop-b")])[:300])
         if s.kind != "sh":
             return
 
@@ -7062,6 +7105,25 @@ def t_sub_sessions(s):
         s.settle("copilot race: the hook's sends")
         s.check("sub sessions: copilot, a sub-agent line written after the hook started still counts (background, no done)",
                 evs(P) == [("running", None), ("background", None)] and not relay(P), str(evs(P)) + str(relay(P))[:200])
+
+        # Its own hook.start line never comes (other hook.start lines are there): after 1 s the hook reads the record
+        # as it is and says so in its log, once.
+        P = "cnoline-main"
+        tx = s.tmp / "cnoline" / "events.jsonl"
+        lines = []
+        play([cop("userPromptSubmitted", ("running", None), prompt="MAINTASK no line")], P, "copilot no-line prompt")
+        ev("user.message", {"content": "MAINTASK no line"})
+        ev("assistant.message", {"content": "Done."})
+        ev("assistant.turn_end", {"turnId": "0"})
+        log0 = s.log_text().count("hook.start")
+        t0 = time.time()
+        play([cop("agentStop", ("done", None), write_start=False, transcriptPath=str(tx), stopReason="end_turn",
+                  stop_hook_active=False)], P, "copilot no-line stop")
+        took = time.time() - t0
+        logged = [ln for ln in s.log_text().splitlines() if "hook.start" in ln]
+        s.check("sub sessions: copilot, no hook.start line of its own: done after the 1 s wait, one log line",
+                evs(P) == [("running", None), ("done", None)] and took >= 1.0 and len(logged) == log0 + 1
+                and "agentStop" in logged[-1], "%s took=%.2f log=%s" % (evs(P), took, logged[-2:]))
 
         # --- Antigravity CLI 1.5.16: invoke_subagent (always in the background, a conversation of its own).
         P, S = "f41d4660-7c54-484e-8d2b-51aa2eac1f33", "3013f634-dd4f-45cc-9e16-998a5b47e2b4"
