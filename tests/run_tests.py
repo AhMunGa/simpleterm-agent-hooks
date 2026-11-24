@@ -5802,8 +5802,15 @@ def t_v2_held(s):
             return [r for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and r["body"]["ev"] == "permission"]
 
         def results():
-            return [((r.get("plain_json") or {}).get("res") or {}) for r in tctl("/_ctl/records")["records"]
-                    if r["path"] == "/v1/ingest" and r["body"]["ev"] == "resolved"]
+            # Only the results of this step's requests (their req.id): a hook posts its result in the
+            # background after it ends (rq_finish), so under load the result of the step before can
+            # land after this step's reset. Its window result once read as this step's last one.
+            recs = tctl("/_ctl/records")["records"]
+            reqs = {((r.get("plain_json") or {}).get("req") or {}).get("id") for r in recs
+                    if r["path"] == "/v1/ingest" and r["body"]["ev"] in ("permission", "question")}
+            res = [((r.get("plain_json") or {}).get("res") or {}) for r in recs
+                   if r["path"] == "/v1/ingest" and r["body"]["ev"] == "resolved"]
+            return [x for x in res if x.get("req") and x.get("req") in reqs]
 
         def state(pid, session="held-1", status="waiting", waiting_for="permission prompt", at=1793232000123, raw=False):
             # raw: non-ASCII text as UTF-8, the way Claude Code (JSON.stringify) writes it
