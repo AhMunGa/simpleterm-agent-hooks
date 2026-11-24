@@ -2078,7 +2078,8 @@ v2_common() {
   if is_id "$SUBID"; then
     at sub.id "$SUBID"
     at sub.type "$SUBTYPE"
-    is_id "$SUBPAR" && at sub.parent "$SUBPAR"
+    # parent: a sub-agent's sub-agent only (Copilot names the main session too).
+    is_id "$SUBPAR" && [ "$SUBPAR" != "$vs" ] && at sub.parent "$SUBPAR"
   fi
   case $DIRV in /* | [A-Za-z]:'\\'*) at dir "$DIRV" ;; esac
   cv='' cp=''
@@ -5221,14 +5222,15 @@ case $AGENT in
     ;;
   agy)
     # toolCall.args has no Cwd in 1.4.12 (the workspace is workspacePaths).
-    WANT='conversationId,workspacePaths.0,workspacePaths.1,workspacePaths.2,workspacePaths.3,workspacePaths.4,workspacePaths.5,workspacePaths.6,workspacePaths.7,toolCall.name,toolCall.args.CommandLine,toolCall.args.questions.0.question,toolCall.args.Path,toolCall.args.ServerName,toolCall.args.ToolName,toolCall.args.ArtifactMetadata.RequestFeedback,terminationReason,error,fullyIdle,executionNum,stepIdx,transcriptPath,lastUserInput,invocationNum'
+    WANT='conversationId,workspacePaths.0,workspacePaths.1,workspacePaths.2,workspacePaths.3,workspacePaths.4,workspacePaths.5,workspacePaths.6,workspacePaths.7,toolCall.name,toolCall.args.CommandLine,toolCall.args.questions.0.question,toolCall.args.Path,toolCall.args.ServerName,toolCall.args.ToolName,toolCall.args.ArtifactMetadata.RequestFeedback,terminationReason,error,fullyIdle,executionNum,stepIdx,transcriptPath,lastUserInput,invocationNum,initialNumSteps'
     ;;
   grok)
     # backgroundTasks (Grok's Stop, camelCase): the first ten tasks.
     # sessionCrons (the first five): scheduled wake-ups; a prompt id that is
     # not a person's marks a turn Grok started itself.
     WANT='hook_event_name,hookEventName,notificationType,sessionId,cwd,message,lastAssistantMessage,error,reason,promptId,timestamp,prompt,stop_hook_active'
-    WANT=$WANT',permissionMode,agentId,agent_id,agentType,subagentType,toolName,toolUseId,transcriptPath,transcript_path'
+    # subagentId: SubagentStart and SubagentStop name the sub-agent so (1.0.93).
+    WANT=$WANT',permissionMode,agentId,agent_id,subagentId,agentType,subagentType,toolName,toolUseId,transcriptPath,transcript_path'
     for i in 0 1 2 3 4 5 6 7 8 9; do WANT=$WANT,backgroundTasks.$i.id,backgroundTasks.$i.type,backgroundTasks.$i.description,backgroundTasks.$i.command; done
     for i in 0 1 2 3 4; do WANT=$WANT,sessionCrons.$i.id,sessionCrons.$i.schedule,sessionCrons.$i.prompt; done
     ;;
@@ -5243,7 +5245,7 @@ EVENT='' NTYPE='' TOOL='' DETAIL='' DESC='' SID='' CWD='' LAST='' ERR='' QTEXT='
 HB_KIND='' HB_APID='' HB_RESBASE=''
 TPATH='' CTXTOK='' MODEL='' GTYPE='' FULLYIDLE='' TERMREASON='' EXTRA='' GKEY='' REASON=''
 PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS='' REQIDIN='' TOOLUSEID=''
-OCTITLE='' OCBY='' OCCOST='' OCTIN='' OCTOUT='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX='' AINV='' CXST='' OCSC=''
+OCTITLE='' OCBY='' OCCOST='' OCTIN='' OCTOUT='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX='' AINV='' CXST='' OCSC='' ASTEPS='' TSIN=''
 OCB='' OCBG='' OCST='' OCN='' OCCL='' VIEWST=''
 BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_VAL=''
 BG_SVC=0 BG_IDMAP='' BG_KEEP='' BG_SHELLS='' BG_IDS='' BG_NOID=0 BG_M=''
@@ -5769,7 +5771,7 @@ while IFS= read -r kv; do
     source=*) SRC=${kv#*=} ;;
     stop_hook_active=*) STOPACT=${kv#*=} ;;
     is_interrupt=*) ISINT=${kv#*=} ;;
-    agent_id=* | agentId=*) AGENTID=${kv#*=} ;;
+    agent_id=* | agentId=* | subagentId=*) AGENTID=${kv#*=} ;;
     agent_type=* | agentType=* | subagentType=*) [ -n "$SUBTYPE" ] || SUBTYPE=${kv#*=} ;;
     parentAgentId=* | parent_agent_id=*) SUBPAR=${kv#*=} ;;
     prompt_id=* | turn_id=* | message_id=* | executionNum=*) TID=${kv#*=} ;;
@@ -5799,6 +5801,7 @@ while IFS= read -r kv; do
     toolCall.args.ToolName=*) AMT=${kv#*=} ;;
     lastUserInput=*) LASTIN=${kv#*=} ;;
     invocationNum=*) AINV=${kv#*=} ;;
+    initialNumSteps=*) ASTEPS=${kv#*=} ;;
     hookName=*) [ -n "$EVENT" ] || EVENT=${kv#*=} ;;
     error.name=*) ERR=${kv#*=} ;;
     error.message=*) LAST=${kv#*=} ;;
@@ -5838,7 +5841,7 @@ while IFS= read -r kv; do
     terminationReason=*) TERMREASON=${kv#*=} ;;
     reason=*) REASON=${kv#*=} ;;
     promptId=*) PROMPTID=${kv#*=}; GKEY=$GKEY.$PROMPTID TID=$PROMPTID ;;
-    timestamp=*) GKEY=$GKEY.${kv#*=} ;;
+    timestamp=*) GKEY=$GKEY.${kv#*=} TSIN=${kv#*=} ;;
   esac
 done <<EOF
 $(printf '%s' "$INPUT" | awk -v want="$WANT" "$JSON_GET" 2>/dev/null)
@@ -5893,6 +5896,97 @@ DIRV=$CWD
 # A subagent (its own hook events carry its id; SimpleTerm if/event-v2-turn#sub).
 SUBID=''
 is_id "$AGENTID" && SUBID=$AGENTID
+
+# A sub-agent's own hooks are not a session (SimpleTerm if/event-v2-turn#sub). Grok
+# Build, Copilot CLI and Antigravity CLI run them under the sub-agent's own id
+# (measured on Grok 1.0.93, Copilot 1.0.115, Antigravity 1.5.16: SimpleTerm
+# if/hook-events-background#background): its prompt, end and stop send no state,
+# done, relay event or session record; its stop is a sub_stop under the parent
+# (sub_parent). Its tool and permission hooks go on as before.
+# The hook goes on as the parent's ($1), the sub-agent in SUBID; none: it ends.
+sub_parent() { # parent id
+  is_id "$1" || finish
+  SUBID=${SUBID:-$RAWSID}
+  RAWSID=$1
+  SID=$(printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_' | cut -c1-80)
+}
+# The Antigravity conversation that started this one, for a sub-agent's: the
+# sender of the message its record starts with (`[Message] ... sender=<id>`,
+# measured on 1.5.16). A schedule's or a command's message names
+# `<id>/task-<n>` and the system's `system`: none.
+agy_parent() { # record file
+  [ -n "$1" ] || return 0
+  head -c 4096 "$1" 2>/dev/null | awk 'NR == 1 {
+    if (index($0, "\"type\":\"SYSTEM_MESSAGE\"") && match($0, /sender=[0-9A-Za-z_-]+ /)) {
+      p = substr($0, RSTART + 7, RLENGTH - 8)
+      if (p != "system") print p
+    }
+    exit
+  }' 2>/dev/null
+}
+# The main session above a Grok id: each sub-agent's is kept in <id>.subof
+# (first line). Grok 1.0.93 runs a sub-agent's sub-agent's SubagentStart under
+# the main session (SimpleTerm hist/hook-events#e35); one under a sub-agent's
+# id goes up the kept ones, at most 8 steps (none past them).
+grok_top() { # id
+  gt=$1 gt_i=0
+  while gt_n=$(sed -n 1p "$RUN_DIR/$(printf '%s' "$gt" | tr -c 'A-Za-z0-9_-' '_' | cut -c1-80).subof" 2>/dev/null) &&
+    is_id "$gt_n"; do
+    gt_i=$((gt_i + 1))
+    [ "$gt_i" -le 8 ] || return 0
+    gt=$gt_n
+  done
+  printf '%s\n' "$gt"
+}
+case $AGENT:$EVENT in
+  grok:SubagentStart | grok:SubagentStop)
+    if [ "$EVENT" = SubagentStop ] && [ "$RAWSID" = "$SUBID" ]; then
+      # Its own stop: under the main session kept at its start, with the
+      # sub-agent that started it when that was not the main session.
+      sp_f=$RUN_DIR/$SID.subof
+      sp=$(sed -n 1p "$sp_f" 2>/dev/null)
+      spp=$(sed -n 2p "$sp_f" 2>/dev/null)
+      rm -f "$sp_f" 2>/dev/null
+      is_id "$spp" && SUBPAR=$spp
+      sub_parent "$sp"
+    elif is_id "$SUBID" && is_id "$RAWSID"; then
+      gs_top=$(grok_top "$RAWSID")
+      is_id "$gs_top" || finish
+      # Its own hooks come under subagentId: the main session is kept for its
+      # stop, and the sub-agent that started it if that was not the main one.
+      [ "$EVENT" = SubagentStart ] &&
+        { printf '%s\n' "$gs_top"; [ "$gs_top" = "$RAWSID" ] || printf '%s\n' "$RAWSID"; } \
+          >"$RUN_DIR/$(printf '%s' "$SUBID" | tr -c 'A-Za-z0-9_-' '_' | cut -c1-80).subof" 2>/dev/null
+      if [ "$gs_top" != "$RAWSID" ]; then
+        SUBPAR=$RAWSID
+        sub_parent "$gs_top"
+      fi
+    fi
+    ;;
+  grok:UserPromptSubmit | grok:SessionEnd | grok:Stop | grok:StopFailure | grok:StopCancelled)
+    # The sub-agent's own (subagentType, no subagentId).
+    [ -z "$AGENTID" ] && [ -n "$SUBTYPE" ] && finish
+    ;;
+  copilot:userPromptSubmitted | copilot:agentStop)
+    if [ -n "$AGENTID" ] && [ "$RAWSID" = "$AGENTID" ]; then
+      [ "$EVENT" = agentStop ] || finish
+      sub_parent "$SUBPAR"
+    fi
+    ;;
+  agy:PreInvocation | agy:Stop)
+    ap=$(agy_parent "$(input_file "$TPATH")")
+    if [ -n "$ap" ] && [ "$ap" != "$RAWSID" ]; then
+      [ "$EVENT" = Stop ] || finish
+      SUBTYPE=subagent
+      sub_parent "$ap"
+      send_state sub_stop
+      finish
+    fi
+    # A sub-agent's first model call may come before its record has a line:
+    # no steps and no input (a person's first call has 1 and the prompt).
+    [ "$EVENT" = PreInvocation ] && [ "$ASTEPS" = 0 ] && [ -z "$LASTIN" ] && finish
+    ;;
+esac
 
 CWD_BASE=$(json_trim "$CWD" 64 256 base)
 CWD_BASEF=$(json_trim "$CWD" 100000 400000 base)
@@ -6783,6 +6877,15 @@ codex_plan() { # rollout file
 AGY_TX='
 function grab(s, re) { if (match(s, re)) return substr(s, RSTART, RLENGTH); return "" }
 function sender(s,   t) { t = grab(s, "sender=[0-9A-Za-z-]+/task-[0-9]+"); sub(/^sender=/, "", t); return t }
+# The sub-agent a "Subagent <id> has gone idle" message names.
+function idle(s,   t) { t = grab(s, "Subagent [0-9A-Za-z_-]+ has gone idle"); return (t == "") ? "" : substr(t, 10, length(t) - 23) }
+function jstr(s, key,   p, r) {
+  p = index(s, "\"" key "\":\"")
+  if (!p) return ""
+  r = substr(s, p + length(key) + 4)
+  if (match(r, /^([^"\\]|\\.)*/)) return substr(r, 1, RLENGTH)
+  return ""
+}
 BEGIN { open = !cut }
 NR == 1 && cut { next }
 {
@@ -6794,6 +6897,7 @@ NR == 1 && cut { next }
       id = sender(s)
       if (id != "" && (id in sched)) who = "schedule"
       else if (id != "" && (id in cmd)) who = (by[id] == "schedule") ? "schedule" : "task"
+      else if ((id = idle(s)) != "" && (id in sa)) who = (sby[id] == "schedule") ? "schedule" : "task"
       else who = "agent"
     }
   }
@@ -6814,6 +6918,24 @@ NR == 1 && cut { next }
     else if ((id in sched) && (index(s, "content=Cron schedule completed") || index(s, "content=Cron schedule cancelled"))) done[id] = 1
     else if ((id in cmd) && index(s, "content=Task id \\\"")) done[id] = 1
   }
+  # Sub-agents (invoke_subagent, measured on 1.5.16): the Role and TypeName
+  # of each call in order, the conversation each "Created the following
+  # subagent:" names, until its "Subagent <id> has gone idle".
+  if (index(s, "\"type\":\"PLANNER_RESPONSE\"") && index(s, "\"name\":\"invoke_subagent\"")) {
+    r = s
+    while ((p = index(r, "\"name\":\"invoke_subagent\"")) > 0) {
+      r = substr(r, p + 24); q = index(r, "{\"name\":"); a = (q > 0) ? substr(r, 1, q) : r
+      nq++; qrole[nq] = jstr(a, "Role"); qtype[nq] = jstr(a, "TypeName")
+    }
+  }
+  if (index(s, "\"type\":\"GENERIC\"") && (p = index(s, "Created the following subagent:")) > 0) {
+    t = substr(s, p); c = index(t, "conversationId"); t = substr(t, c + 14)
+    if (c > 0 && match(t, /[0-9A-Za-z][0-9A-Za-z_-]*/)) {
+      id = substr(t, RSTART, RLENGTH)
+      if (!(id in sa)) { sa[id] = 1; sorder[++nsa] = id; qi++; srole[id] = qrole[qi]; stype[id] = qtype[qi]; sby[id] = who }
+    }
+  }
+  if (index(s, "\"type\":\"SYSTEM_MESSAGE\"") && (id = idle(s)) != "") sdone[id] = 1
   if (index(s, "\"type\":\"GENERIC\"") && match(s, /Task \\"[0-9A-Za-z-]+\/task-[0-9]+\\" cancelled\./)) done[substr(s, RSTART + 7, RLENGTH - 20)] = 1
   if (index(s, "\"type\":\"PLANNER_RESPONSE\"") && !index(s, "\"tool_calls\":[")) open = 1
 }
@@ -6822,14 +6944,25 @@ END {
   for (k = 1; k <= no; k++) if (!(order[k] in done)) { ns++; if (d1 == "") d1 = desc[order[k]] }
   nc = 0
   for (id in cmd) if (!(id in done)) nc++
-  printf "B\t%s\nS\t%d\nD\t%s\nC\t%d\n", who, ns, d1, nc
+  na = 0
+  for (k = 1; k <= nsa; k++) {
+    id = sorder[k]
+    if (id in sdone) continue
+    printf "F\tbackground_tasks.%d.id\ts\t%s\n", na, id
+    printf "F\tbackground_tasks.%d.type\ts\tsubagent\n", na
+    if (stype[id] != "") printf "F\tbackground_tasks.%d.agent_type\ts\t%s\n", na, stype[id]
+    if (srole[id] != "") printf "F\tbackground_tasks.%d.description\ts\t%s\n", na, srole[id]
+    na++
+  }
+  printf "B\t%s\nS\t%d\nD\t%s\nC\t%d\nA\t%d\n", who, ns, d1, nc, na
 }'
 
-# AGY_BY, AGY_SCHED, AGY_DESC and AGY_CMD from the record file (AGY_TX; its
-# last 4 MiB, the first line dropped when cut).
-AGY_BY='' AGY_SCHED=0 AGY_DESC='' AGY_CMD=0
+# AGY_BY, AGY_SCHED, AGY_DESC, AGY_CMD, and the sub-agents not gone idle
+# (AGY_SUB, their background_tasks facts AGY_FT) from the record file (AGY_TX;
+# its last 4 MiB, the first line dropped when cut).
+AGY_BY='' AGY_SCHED=0 AGY_DESC='' AGY_CMD=0 AGY_SUB=0 AGY_FT=''
 agy_turn() { # record file
-  AGY_BY='' AGY_SCHED=0 AGY_DESC='' AGY_CMD=0
+  AGY_BY='' AGY_SCHED=0 AGY_DESC='' AGY_CMD=0 AGY_SUB=0 AGY_FT=''
   [ -n "$1" ] || return 1
   at_cut=0 at_sz=$(wc -c <"$1" 2>/dev/null | tr -d ' ')
   is_uint "$at_sz" && [ "$at_sz" -gt 4194304 ] && at_cut=1
@@ -6840,6 +6973,8 @@ agy_turn() { # record file
       S) is_uint "$at_v" && AGY_SCHED=$at_v ;;
       D) AGY_DESC=$at_v ;;
       C) is_uint "$at_v" && AGY_CMD=$at_v ;;
+      A) is_uint "$at_v" && AGY_SUB=$at_v ;;
+      F) AGY_FT="$AGY_FT$at_v$NL" ;;
     esac
   done <<EOF
 $at_out
@@ -6960,6 +7095,36 @@ END {
   }
   if (last != "") print "L\t" last
 }'
+
+# Copilot writes events.jsonl in batches (1.0.115: 0.12 to 0.15 s apart), and
+# an agentStop hook may start before the lines of its turn are there (a
+# sub-agent started in that turn: 3 runs of 3). The hook's own hook.start line
+# (its input's timestamp) comes after them: wait for it, at most 1 s, before
+# reading the work (SimpleTerm if/hook-events-background#background). A file
+# with no hook.start line at all (one we cannot read whole) is read as it is.
+cop_wait_start() {
+  # A time in milliseconds (13 digits, more than is_uint takes).
+  case $TSIN in '' | *[!0-9]*) return 0 ;; esac
+  [ "${#TSIN}" -le 16 ] || return 0
+  cw_f=$(input_file "$TPATH")
+  [ -n "$cw_f" ] || return 0
+  cw_i=0
+  while :; do
+    cw=$(tail -c 262144 "$cw_f" 2>/dev/null | awk -v t="\"timestamp\":$TSIN" '
+      index($0, "\"type\":\"hook.start\"") {
+        any = 1
+        if (index($0, "\"hookType\":\"agentStop\"") && (index($0, t ",") || index($0, t "}"))) { found = 1; exit }
+      }
+      END { if (found) print "y"; else if (any) print "n" }' 2>/dev/null)
+    [ "$cw" = n ] || return 0
+    cw_i=$((cw_i + 1))
+    if [ "$cw_i" -ge 10 ]; then
+      log "agentStop: no hook.start line of its own in its record after 1 s; read as it is"
+      return 0
+    fi
+    sleep 0.1 2>/dev/null || { sleep 1; cw_i=$((cw_i + 9)); }
+  done
+}
 
 copilot_tx() {
   tf=$(input_file "$TPATH")
@@ -7369,18 +7534,32 @@ case $AGENT:$EVENT in
       # other turn with only schedules left is done.
       agy_turn "$(input_file "$TPATH")"
       TURN_BY=$AGY_BY
-      if [ "$FULLYIDLE" = true ] || { [ "$AGY_CMD" -eq 0 ] && [ "$AGY_SCHED" -gt 0 ] && [ "$TURN_BY" != schedule ]; }; then
+      if [ "$FULLYIDLE" = true ] || { [ "$AGY_CMD" -eq 0 ] && [ "$AGY_SUB" -eq 0 ] && [ "$AGY_SCHED" -gt 0 ] && [ "$TURN_BY" != schedule ]; }; then
         setmsg ''
         turn_at done
         v2_prep "$TURN_AT"
         if [ "$TURN_BY" = schedule ]; then send_bg done "" tunnel; else send_bg done; fi
         st_end
-      elif [ "$AGY_CMD" -eq 0 ] && [ "$AGY_SCHED" -gt 0 ]; then
+      elif [ "$AGY_CMD" -eq 0 ] && [ "$AGY_SUB" -eq 0 ] && [ "$AGY_SCHED" -gt 0 ]; then
         CRON_N=$AGY_SCHED CRON_SCHED=$AGY_DESC
         bg_pause
+      elif [ "$AGY_SUB" -gt 0 ]; then
+        # Sub-agents it started that have not gone idle (with commands, if
+        # any): a sub-agent reports back when it ends, so the pause names them
+        # (turn.bg) and sets no bg_done_after done (SimpleTerm
+        # if/hook-events-background#background).
+        v2_facts
+        FACTS="$FACTS$NL$AGY_FT"
+        while IFS="$TAB" read -r k t v; do
+          [ -n "$k" ] && bg_field "$k=$v"
+        done <<EOF
+$AGY_FT
+EOF
+        BG_N=$((BG_N + AGY_CMD))
+        bg_pause
       else
-        # Background commands still run, or work the record does not name
-        # (subagents: not measured): the wait is bounded as for a dev server.
+        # Background commands still run, or work the record does not name:
+        # the wait is bounded as for a dev server.
         BG_N=1
         bg_pause
       fi
@@ -7595,6 +7774,7 @@ case $AGENT:$EVENT in
       finish
     fi
     note turn
+    cop_wait_start
     copilot_tx
     stop_flow
     sess_turn idle

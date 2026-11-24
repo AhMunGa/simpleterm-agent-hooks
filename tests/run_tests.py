@@ -6884,6 +6884,328 @@ def t_v2_state_turns(s):
         tun.wait(5)
 
 
+def t_sub_sessions(s):
+    """SimpleTerm if/event-v2-turn#sub, if/hook-events-background#background (issue #805): a sub-agent's own hooks
+    are not a session. Grok Build 1.0.93, Copilot CLI 1.0.115 and Antigravity CLI 1.5.16 run a sub-agent's hooks under
+    the sub-agent's own id (the shapes measured, SimpleTerm hist/hook-events#e34). The plugin sends nothing under that
+    id (no state, no done, no relay event, no session record), only sub_start and sub_stop under the parent's sid with
+    the sub-agent's id (Grok's subagentId too), and sub.parent only for a sub-agent's sub-agent. Antigravity's main Stop
+    names the sub-agents its record created that have not gone idle (turn.bg, kind subagent) and sets no
+    bg_done_after done for them. Copilot's main agentStop waits for its own hook.start line in events.jsonl before it
+    counts the work (the sub-agent's line may come after the hook started)."""
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2}), (LINK_A, {"fmt": 2})], conf={"bg_done_after": 2})
+        tctl("/_ctl/reset", {})
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown")}})
+
+        def evs(sid):
+            """The session's tunnel events in order: (the state for a state, else the event, the sub id)."""
+            out = []
+            for r in tctl("/_ctl/records")["records"]:
+                p = r.get("plain_json") or {}
+                if r["path"] == "/v1/ingest" and p.get("sid") == sid and r["body"]["ev"] not in ("resolved", "usage"):
+                    out.append((p.get("st") if r["body"]["ev"] == "state" else r["body"]["ev"], (p.get("sub") or {}).get("id")))
+            return out
+
+        def tunnel_all(sid):
+            return [r for r in tctl("/_ctl/records")["records"] if (r.get("plain_json") or {}).get("sid") == sid]
+
+        def relay(sid):
+            return [r for r in s.records("/v1/ingest") if (r.get("plain_json") or {}).get("sid") == sid]
+
+        def state(sid, st):
+            got = [r.get("plain_json") or {} for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest"]
+            return [p for p in got if p.get("sid") == sid and p.get("st") == st]
+
+        def records(sid):
+            d = s.home / ".simpleterm" / "sessions"
+            return sorted(str(p.relative_to(d)) for p in d.rglob("*") if p.is_file() and p.name.startswith(sid)) if d.exists() else []
+
+        def play(steps, sid, label):
+            """steps: (agent, input, env, argv, the parent's event it sends or None); waits for each."""
+            want, n0 = [], len(evs(sid))
+            for agent, inp, env, argv, ev in steps:
+                s.run(agent, inp, env, args=argv)
+                if ev:
+                    want.append(ev)
+                    wait_for(lambda: len(evs(sid)) >= n0 + len(want), 6)
+            s.settle("%s: the hooks' sends" % label)
+            return want
+
+        # --- Grok Build 1.0.93: spawn_subagent with background (both hooks, sh and Windows).
+        P, S = "gsub-main", "gsub-agent-1"
+        n = [0]
+
+        def gk(sid, event, snake, **kw):
+            n[0] += 1
+            j = {"hookEventName": snake, "sessionId": sid, "cwd": "/w/grokproj", "workspaceRoot": "/w/grokproj",
+                 "timestamp": "2026-11-24T14:36:%02d.000000+00:00" % n[0], "permissionMode": "bypassPermissions",
+                 "hook_event_name": event, "session_id": sid}
+            j.update(kw)
+            return json.dumps(j), {"GROK_HOOK_EVENT": snake, "SIMPLETERM": "1"}
+
+        def g(sid, event, snake, ev, **kw):
+            inp, env = gk(sid, event, snake, **kw)
+            return ("claude", inp, env, (), ev)
+
+        task = [{"id": S, "type": "subagent", "status": "running", "description": "bg measure", "agentType": "general-purpose"}]
+        grok = [
+            g(P, "UserPromptSubmit", "user_prompt_submit", ("running", None), promptId="gp-1", prompt="MAINTASK start one"),
+            g(P, "SubagentStart", "subagent_start", ("sub_start", S), subagentId=S, subagentType="general-purpose",
+              description="bg measure"),
+            g(S, "UserPromptSubmit", "user_prompt_submit", None, promptId="gp-sub", prompt="SUBTASK count",
+              subagentType="general-purpose"),
+            g(P, "Stop", "stop", ("background", None), promptId="gp-1", reason="end_turn", stopHookActive=False,
+              lastAssistantMessage="Started the sub-agent.", backgroundTasks=task, sessionCrons=[]),
+            g(S, "SubagentStop", "subagent_stop", ("sub_stop", S), promptId="gp-sub", phase="gate", subagentId=S,
+              subagentType="general-purpose", stopHookActive=False, lastAssistantMessage="SUB-DONE"),
+            g(S, "SessionEnd", "session_end", None, reason="shutdown", subagentType="general-purpose"),
+            g(P, "UserPromptSubmit", "user_prompt_submit", ("running", None), promptId="subagent-completed-" + S,
+              prompt="<system-reminder>\nWhile you were idle, 1 background subagent completed"),
+            g(P, "Stop", "stop", ("done", None), promptId="subagent-completed-" + S, reason="end_turn",
+              stopHookActive=False, lastAssistantMessage="Report: the sub-agent finished.", backgroundTasks=[], sessionCrons=[]),
+        ]
+        want = play(grok, P, "grok")
+        s.check("sub sessions: grok, the parent's events", evs(P) == want, str(evs(P)))
+        st = state(P, "sub_start")
+        s.check("sub sessions: grok sub_start names the sub-agent (subagentId), no parent",
+                st and st[0].get("sub") == {"id": S, "type": "general-purpose"}, str(st)[:300])
+        s.check("sub sessions: grok, nothing under the sub-agent's id", not tunnel_all(S) and not relay(S),
+                str(tunnel_all(S) + relay(S))[:300])
+        s.check("sub sessions: grok, one relay done of the parent", [r["body"]["ev"] for r in relay(P)] == ["done"],
+                str([r["body"]["ev"] for r in relay(P)]))
+        s.check("sub sessions: grok, no session record of the sub-agent", not records(S), str(records(S)))
+
+        # A sub-agent's sub-agent (GROK_SUBAGENTS_MAX_DEPTH 2). 1.0.93 runs its SubagentStart under the main session
+        # with no parent field and its SubagentStop under its own id (measured, SimpleTerm hist/hook-events#e35): N.
+        # A SubagentStart under a sub-agent's id (not seen) goes up the kept parents to the main session, with
+        # sub.parent the sub-agent that started it: M under S. A chain of kept parents that loops ends.
+        P, S, N, M = "gnest-main", "gnest-agent-1", "gnest-agent-2", "gnest-agent-3"
+
+        def gsub(sid, event, snake, ev, sub_id, **kw):
+            return g(sid, event, snake, ev, subagentId=sub_id, subagentType="general-purpose", **kw)
+
+        nest = [
+            g(P, "UserPromptSubmit", "user_prompt_submit", ("running", None), promptId="gn-1", prompt="MAINTASK start one"),
+            gsub(P, "SubagentStart", "subagent_start", ("sub_start", S), S, description="bg measure"),
+            gsub(P, "SubagentStart", "subagent_start", ("sub_start", N), N, description="nested measure"),
+            gsub(S, "SubagentStart", "subagent_start", ("sub_start", M), M, description="nested under its parent"),
+            gsub(M, "SubagentStop", "subagent_stop", ("sub_stop", M), M, promptId="gn-m", phase="gate", stopHookActive=False),
+            g(M, "SessionEnd", "session_end", None, reason="shutdown", subagentType="general-purpose"),
+            gsub(N, "SubagentStop", "subagent_stop", ("sub_stop", N), N, promptId="gn-n", phase="gate", stopHookActive=False),
+            g(N, "SessionEnd", "session_end", None, reason="shutdown", subagentType="general-purpose"),
+            gsub(S, "SubagentStop", "subagent_stop", ("sub_stop", S), S, promptId="gn-s", phase="gate", stopHookActive=False),
+        ]
+        want = play(nest, P, "grok nested")
+        s.check("sub sessions: grok nested, every sub_start and sub_stop under the main session", evs(P) == want, str(evs(P)))
+        s.check("sub sessions: grok nested, nothing under a sub-agent's id",
+                not any(tunnel_all(x) or relay(x) for x in (S, N, M)), str([tunnel_all(x) for x in (S, N, M)])[:300])
+        subs = {(p.get("st"), (p.get("sub") or {}).get("id")): (p.get("sub") or {}).get("parent")
+                for p in state(P, "sub_start") + state(P, "sub_stop")}
+        s.check("sub sessions: grok nested, sub.parent only for the one started under a sub-agent's id",
+                subs == {("sub_start", S): None, ("sub_start", N): None, ("sub_start", M): S,
+                         ("sub_stop", M): S, ("sub_stop", N): None, ("sub_stop", S): None}, str(subs))
+        # Kept parents that loop (A's parent B, B's parent A): the walk stops at its limit and sends nothing under
+        # a guess; the hook ends in time.
+        run = s.home / ".simpleterm" / "run"
+        run.mkdir(parents=True, exist_ok=True)
+        (run / "gloop-a.subof").write_text("gloop-b\n")
+        (run / "gloop-b.subof").write_text("gloop-a\n")
+        t0 = time.time()
+        inp, env = gk("gloop-a", "SubagentStart", "subagent_start", subagentId="gloop-c", subagentType="general-purpose")
+        s.run("claude", inp, env)
+        s.settle("grok: a loop of kept parents")
+        s.check("sub sessions: grok, a loop of kept parents ends (nothing sent, in time)",
+                not any(tunnel_all(x) for x in ("gloop-a", "gloop-b")) and time.time() - t0 < 5,
+                str([tunnel_all(x) for x in ("gloop-a", "gloop-b")])[:300])
+        if s.kind != "sh":
+            return
+
+        # --- Copilot CLI 1.0.115: task with mode background.
+        P, S = "csub-main", "csub-agent-1"
+        tx = s.tmp / "csub" / "events.jsonl"
+        lines = []
+        env = {"COPILOT_CLI": "1", "COPILOT_CLI_BINARY_VERSION": "1.0.115"}
+        ts = [1795531161898]
+
+        def ev(t, data, agent=None):
+            rec = dict({"type": t, "data": data}, **({"agentId": agent} if agent else {}))
+            rec.update({"id": "e7895550-3728-4d1e-9d27-15d2f75c72e8", "timestamp": "2026-11-24T14:39:22.423Z"})
+            lines.append(json.dumps(rec, separators=(",", ":")))
+            write(tx, "\n".join(lines) + "\n")
+
+        def hook_start(hook, inp):
+            ev("hook.start", {"hookInvocationId": "402928cf-3e4d-4b50-800c-503d06c66f54", "hookType": hook, "input": inp})
+
+        def cop(hook, want, sid=None, write_start=True, **kw):
+            sid = sid or P
+            ts[0] += 37
+            inp = dict({"sessionId": sid, "timestamp": ts[0], "cwd": "/w/proj"}, **kw)
+            if write_start:
+                hook_start(hook, inp)
+            return ("copilot", json.dumps(inp), env, (hook,), want)
+
+        sub = {"agentId": S, "agentType": "general-purpose", "parentAgentId": P}
+        steps = [cop("userPromptSubmitted", ("running", None), prompt="MAINTASK start one")]
+        want = play(steps, P, "copilot prompt")
+        ev("user.message", {"content": "MAINTASK start one"})
+        ev("subagent.started", {"toolCallId": "call_1_0", "agentName": "general-purpose", "agentDisplayName": "bgmeasure",
+                                "agentDescription": "bg measure", "agentType": "general-purpose", "executionMode": "background"}, S)
+        ev("assistant.message", {"content": "Started the sub-agent."})
+        ev("assistant.turn_end", {"turnId": "0"})
+        steps = [
+            cop("agentStop", ("background", None), transcriptPath=str(tx), stopReason="end_turn", stop_hook_active=False),
+            cop("subagentStart", ("sub_start", S), transcriptPath=str(tx), agentName="general-purpose", **sub),
+            cop("userPromptSubmitted", None, sid=S, prompt="SUBTASK count", **sub),
+            cop("agentStop", ("sub_stop", S), sid=S, transcriptPath=str(tx), stopReason="end_turn", stop_hook_active=False, **sub),
+            cop("subagentStop", ("sub_stop", S), transcriptPath=str(tx), agentName="general-purpose", response="SUB-DONE",
+                stopReason="end_turn", stop_hook_active=False, **sub),
+        ]
+        want += play(steps, P, "copilot sub-agent")
+        ev("subagent.completed", {"toolCallId": "call_1_0", "agentName": "general-purpose", "agentDisplayName": "bgmeasure"}, S)
+        note = "<system_notification>\nAgent \"bgmeasure\" (general-purpose) has finished processing and is now idle.\n</system_notification>"
+        ev("hook.end", {"hookInvocationId": "6c1f74d3-8d68-4dd0-924f-901e1815a31f", "hookType": "userPromptSubmitted", "success": True})
+        ev("system.notification", {"content": note, "kind": {"type": "agent_idle", "agentId": S, "agentType": "general-purpose",
+                                                            "displayName": "bgmeasure", "description": "bg measure"}})
+        steps = [cop("userPromptSubmitted", ("running", None), prompt=note)]
+        want += play(steps, P, "copilot report prompt")
+        ev("assistant.message", {"content": "Report: the sub-agent finished."})
+        steps = [cop("agentStop", ("done", None), transcriptPath=str(tx), stopReason="end_turn", stop_hook_active=False)]
+        want += play(steps, P, "copilot report")
+        s.check("sub sessions: copilot, the parent's events", evs(P) == want, str(evs(P)))
+        st = state(P, "sub_start")
+        s.check("sub sessions: copilot sub_start has no parent (the main session's sub-agent)",
+                st and st[0].get("sub") == {"id": S, "type": "general-purpose"}, str(st)[:300])
+        s.check("sub sessions: copilot, nothing under the sub-agent's id", not tunnel_all(S) and not relay(S),
+                str(tunnel_all(S) + relay(S))[:300])
+        s.check("sub sessions: copilot, one relay done of the parent", [r["body"]["ev"] for r in relay(P)] == ["done"],
+                str([r["body"]["ev"] for r in relay(P)]))
+        s.check("sub sessions: copilot, no session record of the sub-agent", not records(S), str(records(S)))
+
+        # Copilot writes events.jsonl in batches: the sub-agent's line may come after the agentStop hook started
+        # (1.0.115, 3 runs of 3), then the hook's own hook.start line. The hook waits for its line.
+        P = "crace-main"
+        tx = s.tmp / "crace" / "events.jsonl"
+        lines = []
+        play([cop("userPromptSubmitted", ("running", None), prompt="MAINTASK start one")], P, "copilot race prompt")
+        ev("user.message", {"content": "MAINTASK start one"})
+        ts[0] += 37
+        stop = {"sessionId": P, "timestamp": ts[0], "cwd": "/w/proj", "transcriptPath": str(tx), "stopReason": "end_turn",
+                "stop_hook_active": False}
+        p = s.start("copilot", json.dumps(stop), env, args=("agentStop",))
+        time.sleep(0.6)
+        ev("subagent.started", {"toolCallId": "call_2_0", "agentName": "general-purpose", "agentDisplayName": "late",
+                                "agentDescription": "late line", "agentType": "general-purpose", "executionMode": "background"}, "csub-agent-2")
+        ev("assistant.message", {"content": "Started it."})
+        ev("assistant.turn_end", {"turnId": "0"})
+        hook_start("agentStop", stop)
+        s.finish(p)
+        wait_for(lambda: len(evs(P)) >= 2, 6)
+        s.settle("copilot race: the hook's sends")
+        s.check("sub sessions: copilot, a sub-agent line written after the hook started still counts (background, no done)",
+                evs(P) == [("running", None), ("background", None)] and not relay(P), str(evs(P)) + str(relay(P))[:200])
+
+        # Its own hook.start line never comes (other hook.start lines are there): after 1 s the hook reads the record
+        # as it is and says so in its log, once.
+        P = "cnoline-main"
+        tx = s.tmp / "cnoline" / "events.jsonl"
+        lines = []
+        play([cop("userPromptSubmitted", ("running", None), prompt="MAINTASK no line")], P, "copilot no-line prompt")
+        ev("user.message", {"content": "MAINTASK no line"})
+        ev("assistant.message", {"content": "Done."})
+        ev("assistant.turn_end", {"turnId": "0"})
+        log0 = s.log_text().count("hook.start")
+        t0 = time.time()
+        play([cop("agentStop", ("done", None), write_start=False, transcriptPath=str(tx), stopReason="end_turn",
+                  stop_hook_active=False)], P, "copilot no-line stop")
+        took = time.time() - t0
+        logged = [ln for ln in s.log_text().splitlines() if "hook.start" in ln]
+        s.check("sub sessions: copilot, no hook.start line of its own: done after the 1 s wait, one log line",
+                evs(P) == [("running", None), ("done", None)] and took >= 1.0 and len(logged) == log0 + 1
+                and "agentStop" in logged[-1], "%s took=%.2f log=%s" % (evs(P), took, logged[-2:]))
+
+        # --- Antigravity CLI 1.5.16: invoke_subagent (always in the background, a conversation of its own).
+        P, S = "f41d4660-7c54-484e-8d2b-51aa2eac1f33", "3013f634-dd4f-45cc-9e16-998a5b47e2b4"
+        tp = s.tmp / "asub" / P / "transcript_full.jsonl"
+        tsub = s.tmp / "asub" / S / "transcript_full.jsonl"
+
+        def step(f, i, t, **kw):
+            rec = dict({"step_index": i, "source": "MODEL", "type": t, "status": "DONE", "created_at": "2026-11-24T14:54:13Z"}, **kw)
+            with open(f, "a") as fh:
+                fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
+
+        def sysmsg(sender, content):
+            return ("The following is a <SYSTEM_MESSAGE> not actually sent by the user. It is provided by the system as important "
+                    "information to pay attention to.\n\n<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T14:54:13Z sender=%s "
+                    "priority=MESSAGE_PRIORITY_HIGH content=%s\n</SYSTEM_MESSAGE>" % (sender, content))
+
+        tp.parent.mkdir(parents=True, exist_ok=True)
+        tsub.parent.mkdir(parents=True, exist_ok=True)
+        step(tp, 0, "USER_INPUT", source="USER_EXPLICIT", content="<USER_REQUEST>\nMAINTASK start one\n</USER_REQUEST>")
+        step(tp, 1, "PLANNER_RESPONSE", tool_calls=[{"name": "invoke_subagent", "args": {
+            "Prompt": "SUBTASK count {to} \"three\"", "Role": "Measure Helper", "TypeName": "self"}}])
+        step(tp, 2, "GENERIC", content="Created At: 2026-11-24T23:54:13+09:00\nCreated the following subagent:\n{\n  \"conversationId\":  "
+             "\"%s\",\n  \"logAbsoluteUri\":  \"file:///x/%s/.system_generated/logs/transcript.jsonl\"\n}\nThe subagent will send "
+             "you a message when it has completed its task or requires guidance." % (S, S))
+        step(tp, 3, "PLANNER_RESPONSE", content="Started the sub-agent; I will report when it is done.")
+        step(tsub, 0, "SYSTEM_MESSAGE", source="SYSTEM", content=sysmsg(P, "SUBTASK count {to} \"three\""))
+        step(tsub, 1, "PLANNER_RESPONSE", content="SUB-DONE counted one two three.")
+
+        def pre(sid, n, steps0, last, path):
+            j = {"conversationId": sid, "workspacePaths": ["/w/agyproj"], "transcriptPath": str(path), "modelName": "m",
+                 "artifactDirectoryPath": "/x/art", "hookEventName": "PreInvocation", "invocationNum": n,
+                 "initialNumSteps": steps0, "lastUserInput": last}
+            return json.dumps(j)
+
+        def stop_(sid, idle, last, path):
+            return agy_stop(conversationId=sid, transcriptPath=str(path), executionNum=0, fullyIdle=idle, lastUserInput=last,
+                            continuationActive=False, error="", hookEventName="Stop")
+
+        t0 = time.time()
+        steps = [
+            ("agy", pre(P, 0, 1, "MAINTASK start one", tp), {}, ("PreInvocation",), ("running", None)),
+            ("agy", pre(S, 0, 0, "", tsub), {}, ("PreInvocation",), None),
+            ("agy", stop_(P, False, "MAINTASK start one", tp), {}, ("Stop",), ("background", None)),
+            ("agy", stop_(S, True, "", tsub), {}, ("Stop",), ("sub_stop", S)),
+        ]
+        want = play(steps, P, "agy sub-agent")
+        bg = state(P, "background")
+        s.check("sub sessions: agy, the main pause names the sub-agent (turn.bg)",
+                bg and [(b.get("kind"), b.get("id"), b.get("name"), b.get("desc")) for b in (bg[0].get("turn") or {}).get("bg", [])]
+                == [("subagent", S, "self", "Measure Helper")], str(bg[0].get("turn") if bg else bg)[:400])
+        # bg_done_after is 2 s here: a pause for a sub-agent sets no done for it.
+        time.sleep(max(0, t0 + 3.5 - time.time()))
+        s.settle("agy: a pause's wait, if one was set")
+        s.check("sub sessions: agy, no bg_done_after done for a sub-agent", ("done", None) not in evs(P), str(evs(P)))
+        step(tp, 4, "SYSTEM_MESSAGE", source="SYSTEM",
+             content=sysmsg("system", "Subagent %s has gone idle. This was the subagent's most recent response: SUB-DONE" % S))
+        steps = [
+            ("agy", pre(P, 0, 4, "MAINTASK start one", tp), {}, ("PreInvocation",), ("running", None)),
+            ("agy", stop_(P, True, "MAINTASK start one", tp), {}, ("Stop",), ("done", None)),
+        ]
+        step(tp, 5, "PLANNER_RESPONSE", content="Report: the sub-agent finished.")
+        want += play(steps, P, "agy report")
+        s.check("sub sessions: agy, the parent's events", evs(P) == want, str(evs(P)))
+        d = [r.get("plain_json") or {} for r in relay(P) if r["body"]["ev"] == "done"]
+        s.check("sub sessions: agy, the report turn of a sub-agent is a task's (by task)",
+                d and (d[0].get("turn") or {}).get("by") == "task", str(d[0].get("turn") if d else d)[:300])
+        s.check("sub sessions: agy, nothing under the sub-agent's id", not tunnel_all(S) and not relay(S),
+                str(tunnel_all(S) + relay(S))[:300])
+        s.check("sub sessions: agy, one relay done of the parent", [r["body"]["ev"] for r in relay(P)] == ["done"],
+                str([r["body"]["ev"] for r in relay(P)]))
+        s.check("sub sessions: agy, no session record of the sub-agent", not records(S), str(records(S)))
+        # A sub-agent's first model call before its record has a line (no transcript yet) is still not a session.
+        S2 = "5a0c1d2e-0000-4000-8000-000000000002"
+        s.run("agy", pre(S2, 0, 0, "", s.tmp / "asub" / S2 / "none.jsonl"), {}, args=("PreInvocation",))
+        s.settle("agy: a sub-agent's first model call")
+        s.check("sub sessions: agy, a first call with no steps and no input sends nothing", not tunnel_all(S2) and not relay(S2),
+                str(tunnel_all(S2))[:300])
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+
 def t_v2_sessions(s):
     """SimpleTerm if/session-record#files: the session records of SimpleTerm sessions."""
     s.setup([(LINK_A, {"push": "disabled"})])
@@ -8650,7 +8972,7 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_schedule, t_agy_paths, t_grok, t_opencode_sh, t_auth_end, t_auth_end_state, t_opencode_js, t_opencode_schedule,
          t_opencode_automation, t_opencode_tui, t_opencode_tabs, t_opencode_tab_events,
          t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_usage_ask_gate, t_v2_usage_ask_refresh, t_usage_ask_refresh_vectors, t_conf_vectors, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_held, t_v2_held_bg, t_v2_not_sent,
-         t_v2_state, t_v2_state_turns, t_v2_sessions, t_v2_mux, t_v2_tab, t_v2_opencode_js, t_copilot_hooks, t_copilot, t_copilot_schedules,
+         t_v2_state, t_v2_state_turns, t_sub_sessions, t_v2_sessions, t_v2_mux, t_v2_tab, t_v2_opencode_js, t_copilot_hooks, t_copilot, t_copilot_schedules,
          t_v2_versions, t_v2_claude_question_once, t_hooks_removed_plugin]
 
 # The cases where the shell and openssl meet (the compat set): the openssl calls (random hex, SHA-256 read
