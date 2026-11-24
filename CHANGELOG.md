@@ -98,6 +98,29 @@
   plain terminal and herdr) and `codex exec` sent none. The PowerShell hook was not run (no
   `pwsh` on the test machine).
 
+- **A sub-agent's own hooks are not a session** (SimpleTerm `if/event-v2-turn#sub`,
+  `if/hook-events-background#background`, `hist/hook-events#e34`, issue AhMunGa/simple-term#805).
+  Grok Build, Copilot CLI and Antigravity CLI run a sub-agent's hooks under the sub-agent's own id, and
+  0.9.0 sent them as a session of that id: its `running`, `ended` and `done`, and for Antigravity a
+  relay `done` (one more completion alert) when the sub-agent ended. Now its prompt, end and stop send
+  no state, `done`, relay event or session record; its stop is a `sub_stop` under the parent, with
+  the sub-agent's id. Grok's `SubagentStart` and `SubagentStop` now name the sub-agent
+  (`subagentId`, which 0.9.0 did not read), and `sub.parent` is left out when it is the main session
+  (Copilot's `parentAgentId`). Grok in both hooks (sh, PowerShell); Copilot and Antigravity sh only.
+- **Antigravity waits for its sub-agents** (SimpleTerm `if/hook-events-background#background`). A
+  turn that leaves sub-agents running (`invoke_subagent`, always in the background) pauses with them
+  in `turn.bg` (`kind: subagent`, the call's `TypeName` and `Role`) and no `done` after
+  `bg_done_after`: the sub-agent reports back when it ends, and that report turn is a task's
+  (`by: task`). 0.9.0 took them for a command (no `turn.bg`, `done` after 600 s).
+- **Copilot reads a turn's work once its lines are written** (SimpleTerm
+  `if/hook-events-background#background`). Copilot writes `events.jsonl` in batches, and the
+  `agentStop` hook may start before the line of a sub-agent that turn started: 0.9.0 read the file at
+  once and could send `done` (Copilot's `done_delay` is 0). The hook now waits, at most 1 s, for its
+  own `hook.start` line, which comes after them.
+  Measured on Grok Build 1.0.93, Copilot CLI 1.0.115 and Antigravity CLI 1.5.16 (the latest) in an
+  isolated home with a model stub and a stand-in tunnel and relay. The PowerShell hook was not run (no
+  `pwsh` on the test machine).
+
 ## 0.9.0 - 2026-11-24
 
 - **A Claude Code request answered in the terminal ends at once** (SimpleTerm `if/ssh-tunnel-wait#window-closed`,

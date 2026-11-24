@@ -2262,7 +2262,8 @@ function Initialize-Common {
     if (Test-Id $Script:SubId) {
         Add-At 'sub.id' $Script:SubId
         Add-At 'sub.type' $Script:SubType
-        if (Test-Id $Script:SubPar) { Add-At 'sub.parent' $Script:SubPar }
+        # parent: a sub-agent's sub-agent only (Copilot names the main session too).
+        if ((Test-Id $Script:SubPar) -and $Script:SubPar -cne $Script:RawSid) { Add-At 'sub.parent' $Script:SubPar }
     }
     if ($Script:DirV -cmatch '\A(/|[A-Za-z]:\\\\)') { Add-At 'dir' $Script:DirV }
     $cv = ''
@@ -6711,7 +6712,7 @@ function Read-HookFields($kv) {
         elseif ($p -ceq 'source') { $Script:Src = $v }
         elseif ($p -ceq 'stop_hook_active') { $Script:StopAct = $v }
         elseif ($p -ceq 'is_interrupt') { $Script:IsInt = $v }
-        elseif ($p -ceq 'agent_id' -or $p -ceq 'agentId') { $Script:AgentId = $v }
+        elseif ($p -ceq 'agent_id' -or $p -ceq 'agentId' -or $p -ceq 'subagentId') { $Script:AgentId = $v }
         elseif ($p -ceq 'agent_type' -or $p -ceq 'agentType' -or $p -ceq 'subagentType') { if (-not $Script:SubType) { $Script:SubType = $v } }
         elseif ($p -ceq 'parentAgentId' -or $p -ceq 'parent_agent_id') { $Script:SubPar = $v }
         elseif ($p -ceq 'prompt_id' -or $p -ceq 'turn_id' -or $p -ceq 'message_id' -or $p -ceq 'executionNum') { $Script:Tid = $v }
@@ -7278,7 +7279,7 @@ try {
         # sessionCrons (the first five): scheduled wake-ups; a prompt id that is
         # not a person's marks a turn Grok started itself.
         $want = @('hook_event_name', 'hookEventName', 'notificationType', 'sessionId', 'cwd', 'message', 'lastAssistantMessage', 'error', 'reason',
-            'promptId', 'timestamp', 'prompt', 'stop_hook_active', 'permissionMode', 'agentId', 'agent_id', 'agentType', 'subagentType', 'toolName',
+            'promptId', 'timestamp', 'prompt', 'stop_hook_active', 'permissionMode', 'agentId', 'agent_id', 'subagentId', 'agentType', 'subagentType', 'toolName',
             'toolUseId', 'transcriptPath', 'transcript_path')
         foreach ($i in 0..9) { foreach ($k in @('id', 'type', 'description', 'command')) { $want += 'backgroundTasks.' + $i + '.' + $k } }
         foreach ($i in 0..4) { foreach ($k in @('id', 'schedule', 'prompt')) { $want += 'sessionCrons.' + $i + '.' + $k } }
@@ -7316,6 +7317,30 @@ try {
     # A subagent (its own hook events carry its id; SimpleTerm if/event-v2-turn#sub).
     $Script:SubId = ''
     if (Test-Id $Script:AgentId) { $Script:SubId = $Script:AgentId }
+    # A sub-agent's own hooks are not a session (SimpleTerm if/event-v2-turn#sub). Grok
+    # Build runs them under the sub-agent's id (1.0.93, as in agent-hook.sh): its
+    # prompt, end and stop send nothing, and its SubagentStop is a sub_stop under
+    # the parent that SubagentStart kept. Its tool and permission hooks go on.
+    if ($Agent -ceq 'grok') {
+        $subOf = [regex]::Replace($Script:SubId, '[^A-Za-z0-9_-]', '_')
+        if ($subOf.Length -gt 80) { $subOf = $subOf.Substring(0, 80) }
+        $subOf = Join-Path $RunDir ($subOf + '.subof')
+        if ($Script:HookEvent -ceq 'SubagentStart') {
+            if ((Test-Id $Script:SubId) -and (Test-Id $Script:RawSid)) { $null = Write-FileB $subOf ($Script:RawSid + "`n") }
+        } elseif ($Script:HookEvent -ceq 'SubagentStop' -and (Test-Id $Script:SubId) -and $Script:RawSid -ceq $Script:SubId) {
+            $par = ''
+            try { $par = ([IO.File]::ReadAllText($subOf, $Latin1)).Trim() } catch { }
+            Remove-FileQ $subOf
+            if (-not (Test-Id $par)) { Trim-Log; exit 0 }
+            $Script:RawSid = $par
+            $Script:Sid = [regex]::Replace($par, '[^A-Za-z0-9_-]', '_')
+            if ($Script:Sid.Length -gt 80) { $Script:Sid = $Script:Sid.Substring(0, 80) }
+        } elseif ((@('UserPromptSubmit', 'SessionEnd', 'Stop', 'StopFailure', 'StopCancelled') -ccontains $Script:HookEvent) -and
+            -not $Script:AgentId -and $Script:SubType) {
+            Trim-Log
+            exit 0
+        }
+    }
     $Script:CwdBase = Limit-Json $Script:Cwd 64 256 -Base
     $Script:CwdBaseF = Limit-Json $Script:Cwd 100000 400000 -Base
     $Script:Fp = (Get-Sha256Hex ($Script:Tool + "`t" + (Limit-Json $Script:Detail 200 800))).Substring(0, 16)
