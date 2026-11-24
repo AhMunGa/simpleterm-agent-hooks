@@ -23,12 +23,12 @@ Grok Build, OpenCode 2.x and 1.x, and Gemini CLI.
 | Agent | Alerts | Answer from the device | Badge | Context / limits |
 |---|---|---|---|---|
 | Claude Code | permission, question, plan, done, error, sign-in | allow, allow for a suggested scope, deny, deny with a reason, answer a question, approve a plan (default or accept edits) or ask for changes; the terminal prompt stays open, first answer wins (waits up to 540 s) | yes | context; 5-hour, 7-day and per-model limits by [asking Claude Code](#asking-the-agent-for-its-limits) or the [status line tap](#context-and-rate-limits) |
-| Codex | permission, plan, done | allow, deny, deny with a reason: in the connected app, or from another device when no app is connected (Codex hides its prompt while a hook waits, up to 60 s) | Codex sends OSC 7501 itself | context, limits (the rollout and [asking Codex](#asking-the-agent-for-its-limits)), plan |
-| GitHub Copilot CLI | permission and question (alerts), plan, done, error | not yet: its permission hook also runs for calls that never prompt, so it is not used until those can be told apart | no | premium requests, chat and completions quota (from its session events) |
-| Antigravity CLI (`agy`) | question, plan, done, error; commands, file writes and edits, reads outside the workspace, MCP calls with `agy_wait` | opt-in (`agy_wait`, only while the app is not connected): allow, deny, deny with a reason, approve a plan | agy sends OSC 7501 itself | no |
-| Grok Build | permission, question and plan (alerts), idle question, done, error | no: a Grok hook can block but not approve | no | session tokens and cost |
-| OpenCode 2.x | permission, question (input form, alert), done, error | allow, always (the pattern), deny, deny with a reason; device or terminal, first answer wins | the TUI sends OSC 7501 itself | session tokens and cost |
-| OpenCode 1.x | permission, question, done, error | allow, always, deny (1.19: with a reason), answer a question (1.19); device or terminal, first answer wins | no | session tokens and cost |
+| Codex | permission, plan, done, sign-in | allow, deny, deny with a reason: in the connected app, or from another device when no app is connected (Codex hides its prompt while a hook waits, up to 60 s) | Codex sends OSC 7501 itself | context, limits (the rollout and [asking Codex](#asking-the-agent-for-its-limits)), plan |
+| GitHub Copilot CLI | permission and question (alerts), plan, done, error, sign-in | not yet: its permission hook also runs for calls that never prompt, so it is not used until those can be told apart | no | premium requests, chat and completions quota (from its session events) |
+| Antigravity CLI (`agy`) | question, plan, done, error, sign-in; commands, file writes and edits, reads outside the workspace, MCP calls with `agy_wait` | opt-in (`agy_wait`, only while the app is not connected): allow, deny, deny with a reason, approve a plan | agy sends OSC 7501 itself | no |
+| Grok Build | permission, question and plan (alerts), idle question, done, error, sign-in | no: a Grok hook can block but not approve | no | session tokens and cost |
+| OpenCode 2.x | permission, question (input form, alert), done, error, sign-in | allow, always (the pattern), deny, deny with a reason; device or terminal, first answer wins | the TUI sends OSC 7501 itself | session tokens and cost |
+| OpenCode 1.x | permission, question, done, error, sign-in | allow, always, deny (1.19: with a reason), answer a question (1.19); device or terminal, first answer wins | no | session tokens and cost |
 | Gemini CLI | permission (alert only), done | no: Gemini takes no answer from a hook | no | context |
 
 "Alert only" means the device shows that the agent is waiting; you answer in the terminal.
@@ -281,6 +281,7 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | Codex `PermissionRequest` | `permission`, to the SSH tunnel first; to the relay (waits up to 60 s) only when no tunnel answered, else an alert there | none |
 | Codex `Stop` | `done`, none while a `/goal` is active; a `question` (plan) when the turn ended on "Implement this plan?" | none |
 | Codex `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | none (session records; `state` `running`) | none |
+| Codex `PostModelRequest` (after every model request; any but `failed` ends the hook at once) | `auth` when the turn ends on a refused sign-in: from the turn's first failed request the hook reads the rollout (`transcript_path`) for 120 s at most, and the turn's `task_complete` with `codex_error_info` `unauthorized` or HTTP 401 is one `auth`. Nothing when a retry fixed it or for another error (Codex's own OSC 7501 shows that) | none |
 | Codex `SessionStart` (resumed or forked session), `PostCompact` | none (context) | none |
 | Codex `SessionEnd` (0.5.1) | `state` `ended` (SSH tunnel only) and the session record's `.ended`. Codex runs it when it exits normally (`/quit`, Ctrl+D, Ctrl+C, the end of `codex exec`), not when killed by a signal (an SSH drop); by default (its shared daemon) only when the conversation is closed there, about 30 minutes later, or the daemon stops. It gives the hook 3 seconds at most | none |
 | Gemini `Notification` (`ToolPermission`) | `question` (`approve <tool>: <command or file>`) | none |
@@ -289,20 +290,21 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | agy `PreToolUse` `ask_question` | `question` | none |
 | agy `PreToolUse`/`PostToolUse` `write_file` of a plan for review | none (the next `Stop` is the review) | none |
 | agy `PreInvocation` (the first of a turn, `invocationNum` 0) | `state` `running` (SSH tunnel only) | none |
-| agy `Stop` (fully idle) | `done` or `error`; after a plan for review a `question` (plan) | none |
+| agy `Stop` (fully idle) | `done` or `error` (`auth` when its error has `Error 401`, `UNAUTHENTICATED` or `API_KEY_INVALID`); after a plan for review a `question` (plan) | none |
 | agy `Stop` (not fully idle: a background command or a schedule left) | `state` `background` or `scheduled` (SSH tunnel only) | none |
 | Grok `Notification` `permission_prompt` (also "Plan approval requested"), `elicitation_dialog`, `idle_prompt` | `question`, with what is asked from the `PreToolUse` before it (`idle_prompt` only when no `done` was sent or is pending for the turn) | none |
 | Grok `SessionEnd`, `SubagentStart`, `SubagentStop` | `state` (SSH tunnel only) | none |
 | Grok `Stop` (`end_turn`) / `StopFailure` | `done` (none with `backgroundTasks` or `sessionCrons`, same rules as Claude) / `error` or `auth` | none |
 | Grok `StopCancelled` (instead of `Stop` when a turn ends without completing: Ctrl+C, a rejected permission) | `state` `idle` (`turn.end: interrupt`), as Claude Code's Esc | none |
 | OpenCode permission request | `permission` (waits up to 540 s) | none |
-| OpenCode turn finished / failed | `done` (none while a subagent of it runs; a background shell is judged as Claude Code's `background_tasks`) / `error` or `auth` | none |
+| OpenCode turn finished / failed | `done` (none while a subagent of it runs; a background shell is judged as Claude Code's `background_tasks`) / `error` or `auth` (1.x: an `APIError` with HTTP status 401 or 403 is `auth`, and the two `session.idle` after an error send no `done`) | none |
 | OpenCode 2.x input form | `question` | none |
 | OpenCode 1.19 question | `question` you can answer (`fmt=2`) | none |
 | Copilot `notification` (permission prompt, question) | `question` (an alert) | none |
 | Copilot `preToolUse` `exit_plan_mode` | `question` (plan) | none |
 | Copilot `agentStop` | `done` (none while background shells or subagents run, as for Claude Code; after a turn a `/every` or `/after` schedule started, none while a schedule is left, and the last one to the SSH tunnel only); a subagent's own stop: `state` `sub_stop` | none |
-| Copilot `userPromptSubmitted`, `sessionEnd`, `subagentStart`/`Stop` | `state` (SSH tunnel only); `error` when a session ends on one | none; on `sessionEnd` an OSC 7501 `clear` on the terminal (see below) |
+| Copilot `errorOccurred` of a model call (every try) | none at once; from the turn's first one the hook reads Copilot's own record (`<COPILOT_HOME or ~/.copilot>/session-state/<sessionId>/events.jsonl`) for 120 s at most, and the turn's `session.error` with `remediation` `sign_in` (or an authentication error with 401) is one `auth`. Nothing when a retry fixed it or for another error | none |
+| Copilot `userPromptSubmitted`, `sessionEnd`, `subagentStart`/`Stop` | `state` (SSH tunnel only); `error` when a session ends on one (`auth` when the turn's record says its sign-in was refused) | none; on `sessionEnd` an OSC 7501 `clear` on the terminal (see below) |
 | `simpleterm notify` | `notify` | OSC 777 notification instead |
 
 **States go to the SSH tunnel when they change.** A session's `state` (`running`, `background`,
