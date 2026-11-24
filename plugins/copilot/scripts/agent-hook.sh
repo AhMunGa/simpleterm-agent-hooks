@@ -959,6 +959,9 @@ function req(rk,   id, win, tool, wait, can, t, v, others, no, k, oc, aff) {
     if (win == "question") can = "answer deny deny_reason"
     else if (win == "plan") can = "plan_approve plan_refine deny"
     else { claude_scopes(); can = "allow" (NS > 0 ? " allow_scope" : "") " deny deny_reason" }
+    # A subagent approval request: its window opens after the hook ends
+    # (SimpleTerm spec/request-wait#hook-wait).
+    if (rk == "claude_perm" && win != "question" && fs("agent_id") != "") wait = "hidden"
   } else if (rk == "claude_notif") {
     t = P("ntype"); wait = "none"
     win = (t == "elicitation_dialog") ? "form" : (t == "elicitation_url_dialog") ? "login" : "other"
@@ -3039,45 +3042,28 @@ EOF
 # lives on: answered at the terminal (SimpleTerm if/ssh-tunnel-wait#window-closed).
 # Claude Code keeps a permission hook until the allowed tool ends [measured],
 # so the tool's end (answered_locally) can be minutes away, and a denial
-# signals the hook instead. The hook must have seen the window open and its
-# own (rq_window 0: RQ_SEEN), and two looks in a row must then say the session
-# waits on nothing (it went on). The first look is made before the request is
+# signals the hook instead. The hook must have seen its window open (rq_window
+# 0, or 1 with the window shared: RQ_SEEN), and two looks in a row must then
+# say the session waits on nothing (it went on). A window shared with other
+# permission hooks ("1 of 2", parallel tool calls) counts as well: its session
+# file stays as it is from one item to the next, and the session waits on
+# nothing only once every item is answered [measured 2.1.331] (SimpleTerm
+# hist/ssh-tunnel-http#d8). The first look is made before the request is
 # sent (request_flow): a link can take seconds to answer, and an answer at the
 # terminal in that time would leave no look with the window open. Another
-# window in its place (waiting, another statusUpdatedAt), a window shared with
-# another permission hook ("1 of 2": one that joins after the first look takes
-# RQ_SEEN back), one never seen, a file that cannot be read: nothing to tell
+# window in its place (waiting, another statusUpdatedAt), one never seen, a
+# file that cannot be read, a subagent's request (no mark): nothing to tell
 # by, and the wait goes on as before. Ending a request the user can still
 # answer in the app is the worse mistake, so only the plain reading ends it.
 rq_closed() {
   [ "$AGENT" = claude ] || return 1
   rq_window
   case $?:$RQ_WSTATE in
-    0:*)
+    0:* | 1:shared)
       RQ_SEEN=1 RQ_SHUT=0
       return 1
       ;;
-    1:closed)
-      # Another permission hook that saw the same window lives on (its mark
-      # holds the same statusUpdatedAt): the window was shared after all,
-      # even if no look found the two on it together. One that has not read
-      # its window yet: not known, and this look does not count.
-      rq_alone
-      case $? in
-        1)
-          RQ_SEEN=0 RQ_SHUT=0
-          return 1
-          ;;
-        2)
-          RQ_SHUT=0
-          return 1
-          ;;
-      esac
-      ;;
-    1:shared)
-      RQ_SEEN=0 RQ_SHUT=0
-      return 1
-      ;;
+    1:closed) ;;
     *)
       RQ_SHUT=0
       return 1
@@ -3243,6 +3229,9 @@ rq_fire() { # i rid
 held_prep() { # kind
   HB_KIND=$1 HB_APID='' HB_RESBASE=''
   [ -n "$1" ] && [ -n "$LINKS" ] && has_tunnel || return 0
+  # A Claude Code subagent's request is never told from the session file
+  # (SimpleTerm if/ssh-tunnel-wait#open-window): no agent pid, no record.
+  case $1 in claude_*) [ -z "$AGENTID" ] || return 0 ;; esac
   HB_APID=$(agent_pid)
   HB_RESBASE=$(cat "$RUN_DIR/$SID.res" 2>/dev/null)
 }
@@ -3571,6 +3560,14 @@ request_flow() { # ev mode
   RQ_EV=$1 RQ_MODE=$2
   # (The Antigravity hook's timeout is 120 seconds, hooks.json.)
   cap=$(conf_wait_cap "$AGENT")
+  # A Claude Code subagent's request (hidden): no window in the terminal
+  # while it waits, as for Codex, so at most 60 seconds (SimpleTerm
+  # spec/request-wait-link#send-order).
+  if [ "$AGENT" = claude ] && [ "$RQ_MODE" = hidden ]; then
+    sub_cap=60
+    [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && is_uint "${SIMPLETERM_HOOK_TEST_SUB_CAP:-}" && sub_cap=$SIMPLETERM_HOOK_TEST_SUB_CAP
+    [ "$cap" -le "$sub_cap" ] || cap=$sub_cap
+  fi
   POLL_WAIT=$(conf_poll_wait)
   # The cap counts from the hook's start (the tunnel's 5 seconds and the
   # relay's ingest included, SimpleTerm spec/request-wait-link#send-order).
@@ -3589,8 +3586,12 @@ request_flow() { # ev mode
   [ "$AGENT" = opencode ] && rq_sig=terminal
   RQ_AGAIN=$((start + 5)) RQ_WAT='' RQ_MISS=0 RQ_MARK='' RQ_FIRE='' RQ_UNK=''
   RQ_SEEN=0 RQ_SHUT=0 RQ_WSTATE=''
-  # This session's waiting permission hooks, for rq_alone.
-  if [ "$AGENT" = claude ]; then
+  # This session's waiting permission hooks, for rq_alone. A subagent's
+  # request (agent_id) has none and is never told from the session file: its
+  # window opens after its hook ends [measured 2.1.331], so a window the hook
+  # sees is another's (SimpleTerm if/ssh-tunnel-wait#open-window). Without a
+  # mark rq_window confirms nothing: no resend, no end by the file.
+  if [ "$AGENT" = claude ] && [ -z "$AGENTID" ]; then
     RQ_MARK=$RUN_DIR/perm.$SID.$$
     printf '' 2>/dev/null >"$RQ_MARK" || RQ_MARK=''
   fi
@@ -6678,9 +6679,12 @@ case $AGENT:$EVENT in
       [ -n "$d" ] || d=$DESC
       setmsg "approve $TOOL: $d"
       v2_prep "$RK_AT"
-      # Codex hides its prompt while the hook waits (SimpleTerm spec/request-wait#hook-wait).
+      # Codex hides its prompt while the hook waits, and so does Claude Code
+      # for a subagent's request (agent_id): its window opens after the hook
+      # ends [measured 2.1.331] (SimpleTerm spec/request-wait#hook-wait).
       w=shared
       [ "$AGENT" = codex ] && w=hidden
+      [ "$AGENT" = claude ] && [ -n "$AGENTID" ] && w=hidden
       [ -n "$LINKS" ] && request_flow permission "$w"
     fi
     ;;

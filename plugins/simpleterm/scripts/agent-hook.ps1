@@ -1056,6 +1056,8 @@ function SpReq([string]$rk) {
             if ($Script:NS -gt 0) { $can += ' allow_scope' }
             $can += ' deny deny_reason'
         }
+        # A subagent approval request: its window opens after the hook ends (SimpleTerm spec/request-wait#hook-wait).
+        if ($rk -ceq 'claude_perm' -and $win -cne 'question' -and (SpFs 'agent_id')) { $wait = 'hidden' }
     } elseif ($rk -ceq 'claude_notif') {
         $t = SpP 'ntype'
         $wait = 'none'
@@ -4744,6 +4746,9 @@ function Set-HeldPrep([string]$kind) {
     $Script:HbApid = ''
     $Script:HbRes = ''
     if (-not $kind -or $Script:LinkFiles.Count -eq 0 -or -not (Test-HasTunnel)) { return }
+    # A Claude Code subagent's request is never told from the session file
+    # (SimpleTerm if/ssh-tunnel-wait#open-window): no agent pid, no record.
+    if ($kind.StartsWith('claude_', $Ord) -and $Script:AgentId) { return }
     $Script:HbApid = [string](Get-AgentPid)
     $Script:HbRes = [string](Get-ResLineCount)
 }
@@ -5033,45 +5038,28 @@ function Get-RqWindow([int]$agentPid) {
 # lives on: answered at the terminal (SimpleTerm if/ssh-tunnel-wait#window-closed).
 # Claude Code keeps a permission hook until the allowed tool ends [measured],
 # so the tool's end (Test-AnsweredLocally) can be minutes away, and a denial
-# ends the hook instead. The hook must have seen the window open and its own
-# (Get-RqWindow 0: RqSeen), and two looks in a row must then say the session
-# waits on nothing (it went on). The first look is made before the request is
-# sent (Invoke-RequestFlow): a link can take seconds to answer, and an answer
-# at the terminal in that time would leave no look with the window open.
-# Another window in its place (waiting, another statusUpdatedAt), a window
-# shared with another permission hook ("1 of 2": one that joins after the
-# first look takes RqSeen back), one never seen, a file that cannot be read:
-# nothing to tell by, and the wait goes on as before. Ending a request the
-# user can still answer in the app is the worse mistake, so only the plain
-# reading ends it (rq_closed).
+# ends the hook instead. The hook must have seen its window open (Get-RqWindow
+# 0, or 1 with the window shared: RqSeen), and two looks in a row must then say
+# the session waits on nothing (it went on). A window shared with other
+# permission hooks ("1 of 2", parallel tool calls) counts as well: its session
+# file stays as it is from one item to the next, and the session waits on
+# nothing only once every item is answered [measured 2.1.331] (SimpleTerm
+# hist/ssh-tunnel-http#d8). The first look is made before the request is sent
+# (Invoke-RequestFlow): a link can take seconds to answer, and an answer at the
+# terminal in that time would leave no look with the window open. Another
+# window in its place (waiting, another statusUpdatedAt), one never seen, a
+# file that cannot be read, a subagent's request (no mark): nothing to tell by,
+# and the wait goes on as before. Ending a request the user can still answer in
+# the app is the worse mistake, so only the plain reading ends it (rq_closed).
 function Test-RqClosed([int]$agentPid) {
     if ($Script:Agent -cne 'claude') { return $false }
     $w = Get-RqWindow $agentPid
-    if ($w -eq 0) {
+    if ($w -eq 0 -or ($w -eq 1 -and $Script:RqWState -ceq 'shared')) {
         $Script:RqSeen = $true
         $Script:RqShut = 0
         return $false
     }
-    if ($w -eq 1 -and $Script:RqWState -ceq 'shared') {
-        $Script:RqSeen = $false
-        $Script:RqShut = 0
-        return $false
-    }
     if ($w -ne 1 -or $Script:RqWState -cne 'closed') {
-        $Script:RqShut = 0
-        return $false
-    }
-    # Another permission hook that saw the same window lives on (its mark
-    # holds the same statusUpdatedAt): the window was shared after all, even
-    # if no look found the two on it together. One that has not read its
-    # window yet: not known, and this look does not count.
-    $alone = Get-RqAlone
-    if ($alone -eq 1) {
-        $Script:RqSeen = $false
-        $Script:RqShut = 0
-        return $false
-    }
-    if ($alone -ne 0) {
         $Script:RqShut = 0
         return $false
     }
@@ -5258,6 +5246,13 @@ function Invoke-RequestFlow([string]$ev, [string]$mode) {
     $Script:RqEv = $ev
     $Script:RqMode = $mode
     $cap = Get-ConfWaitCap $Script:Agent
+    # A Claude Code subagent's request (hidden): no window in the terminal while it waits, as for
+    # Codex, so at most 60 seconds (SimpleTerm spec/request-wait-link#send-order).
+    if ($Script:Agent -ceq 'claude' -and $mode -ceq 'hidden') {
+        $subCap = 60
+        if ($env:SIMPLETERM_HOOK_TEST -eq '1' -and (Test-UInt $env:SIMPLETERM_HOOK_TEST_SUB_CAP)) { $subCap = [int64]$env:SIMPLETERM_HOOK_TEST_SUB_CAP }
+        if ($cap -gt $subCap) { $cap = $subCap }
+    }
     $pollWait = Get-ConfPollWait
     # The cap counts from the hook's start (the tunnel's 5 seconds and the
     # relay's ingest included, SimpleTerm spec/request-wait-link#send-order).
@@ -5287,9 +5282,12 @@ function Invoke-RequestFlow([string]$ev, [string]$mode) {
     $Script:RqShut = 0
     $Script:RqWState = ''
     $Script:RqHeldNext = [DateTime]::MinValue
-    # This session's waiting permission hooks, for Get-RqAlone.
+    # This session's waiting permission hooks, for Get-RqAlone. A subagent's request (agent_id) has
+    # none and is never told from the session file: its window opens after its hook ends [measured
+    # 2.1.331], so a window the hook sees is another's (SimpleTerm if/ssh-tunnel-wait#open-window).
+    # Without a mark Get-RqWindow confirms nothing: no resend, no end by the file.
     $Script:RqMark = ''
-    if ($Script:Agent -ceq 'claude') {
+    if ($Script:Agent -ceq 'claude' -and -not $Script:AgentId) {
         $mark = Join-Path $RunDir ('perm.' + $Sid + '.' + $PID)
         if (Write-FileB $mark '') { $Script:RqMark = $mark }
     }
@@ -6609,9 +6607,12 @@ function Invoke-Event {
             if (-not $d) { $d = $Script:Desc }
             Set-Msg ('approve ' + $Script:Tool + ': ' + $d)
             Initialize-V2 $Script:RkAt
-            # Codex hides its prompt while the hook waits (SimpleTerm spec/request-wait#hook-wait).
+            # Codex hides its prompt while the hook waits, and so does Claude Code for a subagent's
+            # request (agent_id): its window opens after the hook ends [measured 2.1.331]
+            # (SimpleTerm spec/request-wait#hook-wait).
             $w = 'shared'
             if ($Script:Agent -ceq 'codex') { $w = 'hidden' }
+            if ($Script:Agent -ceq 'claude' -and $Script:AgentId) { $w = 'hidden' }
             if ($Script:LinkFiles.Count -gt 0) { Invoke-RequestFlow 'permission' $w }
         }
         return
