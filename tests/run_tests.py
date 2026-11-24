@@ -3913,6 +3913,408 @@ def t_opencode_sh(s):
     s.check("opencode sh: ProviderAuthError -> auth", rec and rec[0]["body"]["ev"] == "auth", str(rec)[:200])
 
 
+def cop_line(kind, **data):
+    """One line of Copilot CLI's own session record (events.jsonl), in its compact shape (1.0.114)."""
+    return json.dumps({"type": kind, "data": data, "id": "ev-" + kind, "timestamp": "2026-11-24T08:17:08.940Z", "parentId": None},
+                      separators=(",", ":"))
+
+
+def cop_record(home, sid):
+    """<COPILOT_HOME>/session-state/<sid>/events.jsonl with the turn's user.message."""
+    p = Path(home) / "session-state" / sid / "events.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(cop_line("user.message", content="go", messageId="m-" + sid, turnId="0") + "\n")
+    return p
+
+
+def add_lines(path, *lines):
+    with open(path, "a") as f:
+        f.write("".join(line + "\n" for line in lines))
+
+
+def cx_line(tid, kind="task_complete", info=None, message=None):
+    """A line of a Codex rollout (0.172.0): the turn's task_complete, with an error when it failed."""
+    p = {"type": kind, "root_turn_id": tid, "turn_id": tid}
+    if kind == "task_complete":
+        p["last_agent_message"] = "Done." if info is None else None
+        if info is not None:
+            p["error"] = {"message": message or "failed", "codex_error_info": info}
+    return json.dumps({"timestamp": "2026-11-24T07:03:37.734Z", "ordinal": 9, "type": "event_msg", "payload": p}, separators=(",", ":"))
+
+
+def t_auth_end(s):
+    """A turn that failed on a refused sign-in is one `auth` (turn.end error, no req) for every agent that tells it,
+    a 401 that a retry fixed is nothing, and other errors stay as they were (SimpleTerm hist/hook-events#d11,
+    if/hook-events-turn#turn-end). Copilot CLI and Codex tell it only in their own record as the turn ends: the hook
+    watches it from the turn's first failure."""
+    s.setup([(LINK_A, {"push": "disabled", "fmt": 2})])
+
+    def evs():
+        return [r["body"]["ev"] for r in ingests(s) if r["body"]["ev"] in ("auth", "error", "done")]
+
+    def one_auth(label, msg):
+        rec = wait_for(lambda: ingests(s, "auth"), 10)
+        s.settle(label)
+        p = rec[0]["plain_json"] if rec else {}
+        s.check(label, evs() == ["auth"] and (p.get("turn") or {}).get("end") == "error" and "req" not in p
+                and str(p.get("msg", "")).startswith(msg), "%s %s" % (evs(), str(p)[:300]))
+
+    def nothing(label, want=()):
+        s.settle(label)
+        s.check(label, evs() == list(want), str(evs()))
+
+    def reset():
+        s.ctl("/_ctl/reset", {})
+
+    run_dir = s.home / ".simpleterm" / "run"
+
+    def ended(label, sid, want, msg=""):
+        """one_auth or nothing for a watch whose turn's end may already be in the record when the hook starts. A watch
+        that missed it (the hook before this was fixed: it read from the record's size then, on for 120 s) is stopped
+        before the check."""
+        if want:
+            wait_for(lambda: ingests(s, "auth"), 5)
+        else:
+            time.sleep(1.5)
+        (run_dir / (sid + ".aw")).unlink(missing_ok=True)
+        if want:
+            one_auth(label, msg)
+        else:
+            nothing(label)
+
+    # --- Codex (both hooks): PostModelRequest, once per try; the rollout's task_complete tells the turn's end ---
+    tid = "01a20c5e-02d5-7e21-8bf6-9d2ee505345a"
+    ro = s.tmp / "codex-auth" / "rollout.jsonl"
+
+    def cx_req(sid, status="failed", n=1, path=None):
+        return json.dumps({"kind": "sampling", "request_id": "req-%d" % n, "attempt_number": n, "session_id": sid, "thread_id": sid,
+                           "turn_id": tid, "cwd": "/w/repo", "transcript_path": str(path or ro), "model": "gpt-5.5",
+                           "hook_event_name": "PostModelRequest", "status": status,
+                           "error": "unexpected status 401 Unauthorized: Incorrect API key provided" if status == "failed" else None,
+                           "token_usage": None, "response_id": None})
+
+    cx401 = "unexpected status 401 Unauthorized: Incorrect API key provided: sk-stub***xxxx., url: http://127.0.0.1:52360/v1/responses"
+    for i, (label, end, want) in enumerate((
+            ("HTTP 401 -> one auth", cx_line(tid, info={"http_connection_failed": {"http_status_code": 401}}, message=cx401), "auth"),
+            ("unauthorized (a refused token refresh) -> one auth",
+             cx_line(tid, info="unauthorized", message="Your access token could not be refreshed because your refresh token has expired."), "auth"),
+            ("a retry fixed it (no error) -> nothing", cx_line(tid), None),
+            ("HTTP 403 -> nothing", cx_line(tid, info={"http_connection_failed": {"http_status_code": 403}}, message="unexpected status 403 Forbidden"), None),
+            ("another error (500) -> nothing", cx_line(tid, info="internal_server_error", message="high demand"), None),
+            ("the turn aborted -> nothing", cx_line(tid, kind="turn_aborted"), None))):
+        reset()
+        write(ro, cx_line(tid, kind="task_started") + "\n")
+        sid = "cx-auth-%d" % i
+        t0 = time.time()
+        for n in (1, 2):
+            rc, out, err, el = s.run("codex", cx_req(sid, n=n), args=("PostModelRequest",))
+        time.sleep(1.2)
+        s.check("codex auth: %s: nothing while it retries, the hook returns at once" % label,
+                not evs() and rc == 0 and out == "" and time.time() - t0 < 30, "%s %r" % (evs(), out))
+        add_lines(ro, end)
+        if want:
+            one_auth("codex auth: " + label, "Your access" if "unauthorized" in label else "unexpected status 401")
+        else:
+            nothing("codex auth: " + label)
+    # `codex exec`: SessionEnd right after the failed turn; the watch reads on.
+    reset()
+    write(ro, cx_line(tid, kind="task_started") + "\n")
+    s.run("codex", cx_req("cx-auth-exec"), args=("PostModelRequest",))
+    s.run("codex", json.dumps({"session_id": "cx-auth-exec", "hook_event_name": "SessionEnd", "cwd": "/w/repo"}))
+    add_lines(ro, cx_line(tid, info={"http_connection_failed": {"http_status_code": 401}}, message=cx401))
+    one_auth("codex auth: the session ends right after the failed turn (codex exec) -> one auth", "unexpected status 401")
+    # No retry (a refused token refresh, or request retries set to 0): the turn's task_complete can be in the rollout before
+    # its one failed request's hook reads it. The watch reads this turn's lines from the rollout's last MiB; the turn
+    # before's end is not this turn's.
+    reset()
+    write(ro, cx_line(tid, kind="task_started") + "\n"
+          + cx_line(tid, info="unauthorized", message="Your access token could not be refreshed because your refresh token has expired.") + "\n")
+    s.run("codex", cx_req("cx-auth-b1"), args=("PostModelRequest",))
+    ended("codex auth: one try, the turn's end written before the hook -> one auth", "cx-auth-b1", "auth", "Your access")
+    reset()
+    t0 = "01a20c5e-0000-7000-8000-0000000000b0"
+    write(ro, cx_line(t0, kind="task_started") + "\n" + cx_line(t0, info={"http_connection_failed": {"http_status_code": 401}}, message=cx401)
+          + "\n" + cx_line(tid, kind="task_started") + "\n")
+    s.run("codex", cx_req("cx-auth-b2"), args=("PostModelRequest",))
+    ended("codex auth: the turn before's refused sign-in is not this turn's", "cx-auth-b2", None)
+    # Any other request ends the hook at once: nothing watched, nothing written.
+    reset()
+    run_dir = s.home / ".simpleterm" / "run"
+    rc, out, err, el = s.run("codex", cx_req("cx-auth-ok", status="completed"), args=("PostModelRequest",))
+    s.check("codex auth: a completed request -> the hook ends at once, no watch", rc == 0 and out == ""
+            and not list(run_dir.glob("cx-auth-ok*")), str(list(run_dir.glob("cx-auth-ok*"))))
+    rc, out, err, el = s.run("codex", cx_req("cx-auth-gone", path=s.tmp / "no-such-rollout.jsonl"), args=("PostModelRequest",))
+    nothing("codex auth: no rollout -> nothing, no watch left")
+
+    # --- Claude Code (both hooks): an account or billing problem is no sign-in ---
+    for e in ("account_on_hold", "verification_required", "billing_error"):
+        reset()
+        s.run("claude", json.dumps({"session_id": "cc-auth", "cwd": "/w/repo", "hook_event_name": "StopFailure", "error": e,
+                                    "last_assistant_message": "x"}))
+        wait_for(lambda: evs(), 10)
+        nothing("claude: %s -> error, no auth" % e, ["error"])
+    if s.kind != "sh":
+        return
+
+    # --- the Codex hooks register PostModelRequest, quiet as the others ---
+    hooks = json.loads(CODEX_HOOKS.read_text())["hooks"]
+    pm = (hooks.get("PostModelRequest") or [{}])[0].get("hooks") or [{}]
+    s.check("codex hooks: PostModelRequest registered like Stop (sh and Windows)",
+            pm[0].get("command") == hooks["Stop"][0]["hooks"][0]["command"] and pm[0].get("commandWindows") == hooks["Stop"][0]["hooks"][0]["commandWindows"],
+            str(pm))
+
+    # --- Copilot CLI: errorOccurred for every try; its events.jsonl gets session.error when the turn failed ---
+    env = {"COPILOT_CLI": "1", "COPILOT_CLI_BINARY_VERSION": "1.0.114"}
+
+    def cop_err(sid):
+        return json.dumps({"sessionId": sid, "timestamp": 1795508226000, "cwd": "/w/proj", "errorContext": "model_call", "recoverable": True,
+                           "error": {"message": "{\"message\":\"unauthorized: token expired\",\"code\":\"unauthorized\"}", "name": "Error"}})
+
+    def sign_in(sid, status=401):
+        return cop_line("session.error", errorType="authorization", message="Authorization error. Your credentials may be expired or invalid.",
+                        statusCode=status, remediation="sign_in", originatingMessageId="m-" + sid)
+
+    turn_end = cop_line("assistant.turn_end", turnId="0")
+    rate = lambda sid: cop_line("session.error", errorType="rate_limit", message="Failed to get response from the AI model; retried 5 times",
+                                statusCode=429, providerErrorCode="rate_limit_exceeded", originatingMessageId="m-" + sid)
+    chome = s.tmp / "copilot-home"
+    for label, sid, cenv, lines, want in (
+            ("a refused sign-in (401) -> one auth", "cop-a1", {}, lambda sid: [turn_end, sign_in(sid)], "auth"),
+            ("a refused sign-in (403 with sign_in) under COPILOT_HOME -> one auth", "cop-a2", {"COPILOT_HOME": str(chome)},
+             lambda sid: [turn_end, sign_in(sid, 403)], "auth"),
+            ("a retry fixed it (assistant.message) -> nothing", "cop-a3", {},
+             lambda sid: [cop_line("assistant.message", messageId="am-1", originatingMessageId="m-" + sid, content="OK", toolRequests=[]), turn_end], None),
+            ("another error (429) -> nothing", "cop-a4", {}, lambda sid: [turn_end, rate(sid)], None),
+            ("a sign-in refused in the next turn is not this turn's", "cop-a5", {},
+             lambda sid: [cop_line("user.message", content="again", messageId="m-2-" + sid), sign_in("2-" + sid)], None)):
+        reset()
+        rec_file = cop_record(cenv.get("COPILOT_HOME") or s.home / ".copilot", sid)
+        for _ in range(3):
+            rc, out, err, el = s.run("copilot", cop_err(sid), dict(env, **cenv), args=("errorOccurred",))
+        time.sleep(1.2)
+        s.check("copilot auth: %s: nothing while it retries" % label, not evs(), str(evs()))
+        add_lines(rec_file, *lines(sid))
+        if want:
+            one_auth("copilot auth: " + label, "authorization: Authorization error")
+        else:
+            nothing("copilot auth: " + label)
+    reset()
+    s.run("copilot", cop_err("cop-none"), env, args=("errorOccurred",))
+    nothing("copilot auth: no record -> nothing, no watch left")
+    # One watch a turn: the next turn (userPromptSubmitted) watches again.
+    reset()
+    rec_file = cop_record(s.home / ".copilot", "cop-a6")
+    s.run("copilot", cop_err("cop-a6"), env, args=("errorOccurred",))
+    add_lines(rec_file, cop_line("assistant.message", messageId="am-1", originatingMessageId="m-cop-a6", content="OK", toolRequests=[]), turn_end)
+    s.settle("copilot's first watch")
+    s.run("copilot", json.dumps({"sessionId": "cop-a6", "timestamp": 1795508227000, "cwd": "/w/proj", "prompt": "again"}), env,
+          args=("userPromptSubmitted",))
+    add_lines(rec_file, cop_line("user.message", content="again", messageId="m-2-cop-a6"))
+    s.run("copilot", cop_err("cop-a6"), env, args=("errorOccurred",))
+    add_lines(rec_file, turn_end, sign_in("2-cop-a6"))
+    one_auth("copilot auth: the next turn's refused sign-in -> one auth", "authorization: Authorization error")
+    # A 403 is tried once: the turn's session.error comes right after its one errorOccurred (1.0.114: 1-5 ms after the
+    # hook ends), and before it when Copilot does not wait for the hook. The watch reads from the turn's last user.message
+    # (the record's last MiB); a session.error is the turn's when its originatingMessageId is that message's id, or by
+    # position (the first after it) in a record without the ids (hist/hook-events#d11 2).
+    reply = lambda sid: cop_line("assistant.message", messageId="am-0", originatingMessageId="m-" + sid, content="",
+                                 toolRequests=[{"toolCallId": "c1", "name": "bash"}])
+    no_ids = cop_line("session.error", errorType="authorization", message="Authorization error. Your credentials may be expired or invalid.",
+                      statusCode=403, remediation="sign_in")
+    for label, sid, head, before, after, want in (
+            ("one try (403), its session.error written before the hook -> one auth", "cop-b1", None,
+             lambda sid: [reply(sid), turn_end, sign_in(sid, 403)], (), "auth"),
+            ("one try (403), its session.error written 50 ms after the hook starts -> one auth", "cop-b2", None,
+             lambda sid: [reply(sid)], lambda sid: [turn_end, sign_in(sid, 403)], "auth"),
+            ("a record without the ids: the first session.error after the turn's user.message -> one auth", "cop-b3",
+             [cop_line("user.message", content="go", turnId="0")], lambda sid: [turn_end, no_ids], (), "auth"),
+            ("the turn before's refused sign-in is not this turn's", "cop-b4",
+             lambda sid: [cop_line("user.message", content="go", messageId="m-0-" + sid), turn_end, sign_in("0-" + sid),
+                          cop_line("user.message", content="again", messageId="m-" + sid)], lambda sid: [], (), None),
+            ("another message's refused sign-in (its originatingMessageId), written after the hook, is not this turn's", "cop-b5",
+             None, lambda sid: [], (), None)):
+        reset()
+        rec_file = cop_record(s.home / ".copilot", sid)
+        if head:
+            write(rec_file, "".join(x + "\n" for x in (head(sid) if callable(head) else head)))
+        add_lines(rec_file, *before(sid))
+        p = s.start("copilot", cop_err(sid), env, args=("errorOccurred",))
+        if after:
+            time.sleep(0.05)
+            add_lines(rec_file, *after(sid))
+        s.finish(p, 30)
+        if sid == "cop-b5":
+            add_lines(rec_file, sign_in("x-" + sid))
+        ended("copilot auth: " + label, sid, want, "authorization: Authorization error")
+    # -p: sessionEnd reason error, the record's session.error written just after the hook starts (1.0.114: 0.07 s).
+    for label, sid, line, want in (("a refused sign-in -> auth, no error", "cop-p1", sign_in, ["auth"]),
+                                   ("another error -> error, no auth", "cop-p2", rate, ["error"]),
+                                   ("another message's refused sign-in -> error, no auth", "cop-p3", lambda sid: sign_in("x-" + sid), ["error"])):
+        reset()
+        rec_file = cop_record(s.home / ".copilot", sid)
+        for _ in range(3):
+            s.run("copilot", cop_err(sid), env, args=("errorOccurred",))
+        p = s.start("copilot", json.dumps({"sessionId": sid, "timestamp": 1795508228000, "cwd": "/w/proj", "reason": "error"}), env,
+                    args=("sessionEnd",))
+        time.sleep(0.15)
+        add_lines(rec_file, turn_end, line(sid))
+        s.finish(p, 30)
+        wait_for(lambda: evs(), 10)
+        nothing("copilot -p auth: sessionEnd, " + label, want)
+    # -p, one try (403): the session.error already in the record when errorOccurred and sessionEnd start.
+    reset()
+    rec_file = cop_record(s.home / ".copilot", "cop-p4")
+    add_lines(rec_file, turn_end, sign_in("cop-p4", 403))
+    s.run("copilot", cop_err("cop-p4"), env, args=("errorOccurred",))
+    s.run("copilot", json.dumps({"sessionId": "cop-p4", "timestamp": 1795508228000, "cwd": "/w/proj", "reason": "error"}), env,
+          args=("sessionEnd",))
+    wait_for(lambda: evs(), 10)
+    (run_dir / "cop-p4.aw").unlink(missing_ok=True)
+    nothing("copilot -p auth: one try, the session.error written before both hooks -> auth, no error", ["auth"])
+
+    # --- Antigravity CLI: Stop with Google's API error text ---
+    for label, err, want in (
+            ("Error 401 (UNAUTHENTICATED)", "generating and executing: Error 401, Message: Request had invalid authentication credentials., "
+                                            "Status: UNAUTHENTICATED, Details: []", "auth"),
+            ("API_KEY_INVALID", "generating and executing: Error 400, Message: API key not valid. Please pass a valid API key., "
+                                "Status: INVALID_ARGUMENT, Details: [reason:API_KEY_INVALID]", "auth"),
+            ("Error 403 (PERMISSION_DENIED)", "generating and executing: Error 403, Message: The caller does not have permission, "
+                                              "Status: PERMISSION_DENIED, Details: []", "error"),
+            ("quota", "quota exceeded", "error")):
+        reset()
+        s.run("agy", agy_stop(error=err, terminationReason="ERROR"), args=("Stop",))
+        wait_for(lambda: evs(), 10)
+        nothing("agy auth: %s -> %s" % (label, want), [want])
+
+    # --- OpenCode 1.x: APIError with its HTTP status (statusCode, handed on as status_code) ---
+    for label, code, oc, want in (("401", 401, "1", "auth"), ("403", 403, "1", "auth"), ("500", 500, "1", "error"), ("no status", None, "1", "error")):
+        reset()
+        inp = {"hook_event_name": "StopFailure", "oc": oc, "session_id": "oc-auth", "cwd": "/w/ocproj", "error": "APIError",
+               "last_assistant_message": "Incorrect API key provided: stub-key."}
+        if code is not None:
+            inp["status_code"] = code
+        s.run("opencode", json.dumps(inp))
+        wait_for(lambda: evs(), 10)
+        nothing("opencode 1.x auth: APIError %s -> %s" % (label, want), [want])
+    if not NODE:
+        return
+
+    def st(sid, kind):
+        return {"event": {"type": "session.status", "properties": {"sessionID": sid, "status": {"type": kind}}}}
+
+    def idle(sid):
+        return {"event": {"type": "session.idle", "properties": {"sessionID": sid}}}
+
+    def failed(sid, code):
+        return {"event": {"type": "session.error", "properties": {"sessionID": sid, "error": {"name": "APIError", "data": {
+            "message": "Incorrect API key provided: stub-key.", "statusCode": code, "isRetryable": code >= 500}}}}}
+
+    d = str(s.tmp)
+    # 1.19.6: session.error, then status idle and session.idle twice (measured); the next turn starts with busy.
+    for code, want in ((401, ["auth"]), (500, ["error"])):
+        reset()
+        node_plugin(s, "v1", {"directory": d, "sessions": {"ses_1": {"title": "Fix the tests"}},
+                              "steps": [st("ses_1", "busy"), failed("ses_1", code), st("ses_1", "idle"), idle("ses_1"), st("ses_1", "idle"),
+                                        idle("ses_1"), {"sleep": 800}], "wait": 3000})
+        wait_for(lambda: evs(), 10)
+        nothing("opencode 1.x plugin: APIError %d, then session.idle twice -> %s, no done" % (code, want[0]), want)
+    reset()
+    node_plugin(s, "v1", {"directory": d, "sessions": {"ses_1": {"title": "Fix the tests"}},
+                          "steps": [st("ses_1", "busy"), failed("ses_1", 401), st("ses_1", "idle"), idle("ses_1"), idle("ses_1"),
+                                    {"sleep": 800}, st("ses_1", "busy"), st("ses_1", "idle"), idle("ses_1")], "wait": 3000})
+    wait_for(lambda: len(evs()) >= 2, 10)
+    nothing("opencode 1.x plugin: the next turn after the error -> its done", ["auth", "done"])
+
+
+def t_auth_end_state(s):
+    """A turn that ends in `auth` starts the state comparison over as every turn end does (SimpleTerm
+    if/event-v2-turn#state, hist/turn-state#d26): the next turn's `running` goes. The `auth` a watch sends late, after
+    the next turn has started, leaves that turn's state record alone (hist/hook-events#d11)."""
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})])
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown")}})
+        run_dir = s.home / ".simpleterm" / "run"
+
+        def states():
+            return [r["plain_json"].get("st") for r in ingests(s, "state", ctl=tctl)]
+
+        def check(label, sid):
+            ok = wait_for(lambda: states() == ["running", "running"] and len(ingests(s, "auth", ctl=tctl)) == 1, 10)
+            s.settle(label)
+            s.check(label, ok and states() == ["running", "running"] and len(ingests(s, "auth", ctl=tctl)) == 1,
+                    "%s auth=%d" % (states(), len(ingests(s, "auth", ctl=tctl))))
+
+        # Codex (both hooks): the watch reads the turn's end in the rollout.
+        ro = s.tmp / "codex-auth-state" / "rollout.jsonl"
+        t1, t2 = "01a20c5e-0000-7000-8000-000000000001", "01a20c5e-0000-7000-8000-000000000002"
+
+        def cx(sid, event, tid, **kw):
+            j = {"session_id": sid, "turn_id": tid, "cwd": "/w/repo", "transcript_path": str(ro), "hook_event_name": event}
+            j.update(kw)
+            return s.run("codex", json.dumps(j))
+
+        fail401 = cx_line(t1, info={"http_connection_failed": {"http_status_code": 401}}, message="unexpected status 401 Unauthorized")
+        tctl("/_ctl/reset", {})
+        write(ro, cx_line(t1, kind="task_started") + "\n")
+        cx("cxs-1", "UserPromptSubmit", t1, prompt="go")
+        cx("cxs-1", "PostModelRequest", t1, status="failed")
+        add_lines(ro, fail401)
+        wait_for(lambda: ingests(s, "auth", ctl=tctl), 10)
+        s.settle("codex: the watch's auth")
+        cx("cxs-1", "UserPromptSubmit", t2, prompt="go on")
+        check("codex: auth, then the next turn's running goes", "cxs-1")
+        # Late: the next turn started before the watch read the failed turn's end. Its running goes, and the auth after
+        # it keeps that turn's record (the record still says running).
+        tctl("/_ctl/reset", {})
+        write(ro, cx_line(t1, kind="task_started") + "\n")
+        cx("cxs-2", "UserPromptSubmit", t1, prompt="go")
+        cx("cxs-2", "PostModelRequest", t1, status="failed")
+        cx("cxs-2", "UserPromptSubmit", t2, prompt="go on")
+        add_lines(ro, fail401)
+        check("codex: a late auth after the next turn started -> that turn's running went", "cxs-2")
+        rec = (run_dir / "cxs-2.st").read_text().split() if (run_dir / "cxs-2.st").exists() else []
+        s.check("codex: the late auth keeps the next turn's state record", rec[:1] == ["running"], str(rec))
+        if s.kind != "sh":
+            return
+
+        # Antigravity: Stop with a refused sign-in.
+        tctl("/_ctl/reset", {})
+        pre = json.dumps({"conversationId": "agys-1", "workspacePaths": ["/w/agyproj"], "invocationNum": 0})
+        s.run("agy", pre, args=("PreInvocation",))
+        s.run("agy", agy_stop(conversationId="agys-1", terminationReason="ERROR",
+                              error="generating and executing: Error 401, Message: invalid credentials, Status: UNAUTHENTICATED"), args=("Stop",))
+        s.run("agy", pre, args=("PreInvocation",))
+        check("agy: auth, then the next turn's running goes", "agys-1")
+
+        # OpenCode 1.x: APIError 401.
+        tctl("/_ctl/reset", {})
+        oc = lambda **kw: s.run("opencode", json.dumps(dict({"session_id": "ocs-1", "cwd": "/w/ocproj", "oc": "1"}, **kw)))
+        oc(hook_event_name="UserPromptSubmit")
+        oc(hook_event_name="StopFailure", error="APIError", status_code=401, last_assistant_message="Incorrect API key provided")
+        oc(hook_event_name="UserPromptSubmit")
+        check("opencode 1.x: auth, then the next turn's running goes", "ocs-1")
+
+        # Copilot CLI: the watch reads session.error in its record.
+        tctl("/_ctl/reset", {})
+        env = {"COPILOT_CLI": "1", "COPILOT_CLI_BINARY_VERSION": "1.0.114"}
+        rec_file = cop_record(s.home / ".copilot", "cops-1")
+        prompt = json.dumps({"sessionId": "cops-1", "timestamp": 1795508226000, "cwd": "/w/proj", "prompt": "go"})
+        s.run("copilot", prompt, env, args=("userPromptSubmitted",))
+        s.run("copilot", json.dumps({"sessionId": "cops-1", "timestamp": 1795508226500, "cwd": "/w/proj", "errorContext": "model_call",
+                                     "recoverable": True, "error": {"message": "unauthorized", "name": "Error"}}), env, args=("errorOccurred",))
+        add_lines(rec_file, cop_line("assistant.turn_end", turnId="0"),
+                  cop_line("session.error", errorType="authorization", message="Authorization error.", statusCode=401,
+                           remediation="sign_in", originatingMessageId="m-cops-1"))
+        wait_for(lambda: ingests(s, "auth", ctl=tctl), 10)
+        s.settle("copilot: the watch's auth")
+        s.run("copilot", prompt, env, args=("userPromptSubmitted",))
+        check("copilot: auth, then the next turn's running goes", "cops-1")
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+
 NODE = shutil.which("node")
 
 
@@ -7801,7 +8203,7 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_tunnel, t_revoked, t_missing_deps, t_simpleterm_gating, t_local_answer, t_same_second_prompt, t_notifications, t_background_work, t_background_work_kinds, t_background_screen_values, t_background_screen_clear, t_question_while_background, t_copilot_session_end, t_usage_ask_deadline, t_service_shells, t_user_prompt_old_tasks, t_schedules, t_schedule_end, t_done_delay, t_background_events_and_badges, t_small_audit_fixes, t_codex_goal, t_agent_gone, t_events,
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
-         t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_schedule, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js, t_opencode_schedule,
+         t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_schedule, t_agy_paths, t_grok, t_opencode_sh, t_auth_end, t_auth_end_state, t_opencode_js, t_opencode_schedule,
          t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_usage_ask_gate, t_v2_usage_ask_refresh, t_usage_ask_refresh_vectors, t_conf_vectors, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_held, t_v2_held_bg, t_v2_not_sent,
          t_v2_state, t_v2_state_turns, t_v2_sessions, t_v2_mux, t_v2_tab, t_v2_opencode_js, t_copilot_hooks, t_copilot, t_copilot_schedules,
          t_v2_versions, t_v2_claude_question_once, t_hooks_removed_plugin]

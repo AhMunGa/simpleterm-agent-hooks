@@ -5155,14 +5155,16 @@ case $AGENT in
     WANT='hook_event_name,notification_type,tool_name,tool_input.command,tool_input.file_path,tool_input.url,tool_input.description,tool_input.questions.0.question,session_id,cwd,message,last_assistant_message,error,transcript_path,context_tokens,model,to_model,prompt,source,stop_hook_active,is_interrupt,agent_id'
     # v2 (SimpleTerm if/hook-events-identification#identification): turn, permission mode, the
     # subagent's type, a session's end; from the OpenCode bridge its request
-    # id, version family, parent session, message id, session title and who
-    # started the turn that ends (turn_by).
-    WANT=$WANT',prompt_id,permission_mode,agent_type,reason,request_id,oc,parent_session_id,message_id,title,cost,tokens_in,tokens_out,turn_by'
+    # id, version family, parent session, message id, session title, who
+    # started the turn that ends (turn_by) and a failed turn's HTTP status
+    # (status_code, 1.x).
+    WANT=$WANT',prompt_id,permission_mode,agent_type,reason,request_id,oc,parent_session_id,message_id,title,cost,tokens_in,tokens_out,turn_by,status_code'
     for i in 0 1 2 3 4 5 6 7 8 9; do WANT=$WANT,background_tasks.$i.id,background_tasks.$i.type,background_tasks.$i.description,background_tasks.$i.command; done
     for i in 0 1 2 3 4; do WANT=$WANT,session_crons.$i.id,session_crons.$i.schedule,session_crons.$i.prompt; done
     ;;
   codex)
-    WANT='hook_event_name,tool_name,tool_input.command,tool_input.file_path,tool_input.description,session_id,cwd,last_assistant_message,transcript_path,stop_hook_active,turn_id,permission_mode,prompt,source'
+    # status: PostModelRequest's (failed or completed).
+    WANT='hook_event_name,tool_name,tool_input.command,tool_input.file_path,tool_input.description,session_id,cwd,last_assistant_message,transcript_path,stop_hook_active,turn_id,permission_mode,prompt,source,status'
     ;;
   codex-notify) WANT='type,cwd,last-assistant-message,input-messages.0' ;;
   gemini)
@@ -5192,7 +5194,7 @@ EVENT='' NTYPE='' TOOL='' DETAIL='' DESC='' SID='' CWD='' LAST='' ERR='' QTEXT='
 HB_KIND='' HB_APID='' HB_RESBASE=''
 TPATH='' CTXTOK='' MODEL='' GTYPE='' FULLYIDLE='' TERMREASON='' EXTRA='' GKEY='' REASON=''
 PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS='' REQIDIN='' TOOLUSEID=''
-OCTITLE='' OCBY='' OCCOST='' OCTIN='' OCTOUT='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX='' AINV=''
+OCTITLE='' OCBY='' OCCOST='' OCTIN='' OCTOUT='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX='' AINV='' CXST='' OCSC=''
 BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_VAL=''
 BG_SVC=0 BG_IDMAP='' BG_KEEP='' BG_SHELLS='' BG_IDS='' BG_NOID=0 BG_M=''
 CRON_N=0 CRON_SCHED='' CRON_SUMS='' CRON_IDS='' PROMPT_SCHED='' COPILOT_SRC='' COPILOT_REP='' COPILOT_DET='' REPORT_ID=''
@@ -5724,6 +5726,8 @@ while IFS= read -r kv; do
     permission_mode=* | permissionMode=*) PMODE=${kv#*=} ;;
     request_id=*) REQIDIN=${kv#*=} ;;
     oc=*) OCV=${kv#*=} ;;
+    status=*) CXST=${kv#*=} ;;
+    status_code=*) OCSC=${kv#*=} ;;
     parent_session_id=*) SUBPAR_SESSION=${kv#*=} ;;
     cost=*) OCCOST=${kv#*=} ;;
     tokens_in=*) OCTIN=${kv#*=} ;;
@@ -5793,6 +5797,9 @@ EOF
 if [ "$AGENT:$EVENT" = agy:PreInvocation ]; then
   case $AINV in '' | 0) ;; *) finish ;; esac
 fi
+# Codex runs PostModelRequest after every model request: only a failed one
+# is read (codex:PostModelRequest below); any other ends here.
+[ "$AGENT:$EVENT" = codex:PostModelRequest ] && [ "$CXST" != failed ] && finish
 if [ "$AGENT" = grok ]; then
   case $EVENT in
     notification) EVENT=Notification ;;
@@ -6061,6 +6068,217 @@ codex_goal_later() { # rollout file
     rm -f "$RUN_DIR/$SID.goal" 2>/dev/null
     later_send done
   ) </dev/null >/dev/null 2>&1 &
+}
+
+# Copilot CLI and Codex tell a refused sign-in only in their own record, as
+# the turn ends; their failure hooks come for every try, a 401 that a retry
+# fixes too, with no field that tells the last (SimpleTerm
+# hist/hook-events#d11). From the turn's first failure the record is read
+# every half second, 120 seconds at most, from the turn's start in its last
+# MiB (auth_start: the end can be written before the hook reads the record):
+# a turn that ended on a refused sign-in is one `auth` (turn.end error, no
+# req). A retry
+# that worked, another error, another turn, no record or a record of another
+# shape ends the watch with nothing sent. A turn end it reads (with `auth` or
+# not: these turns end with no hook) starts the state comparison over
+# (st_end), unless a newer state went meanwhile (the next turn's `running`):
+# that record stays. One watch a turn: run/$SID.aw holds
+# its rid, the turn (Copilot's hooks name none: its user.message's messageId,
+# else `-`), its start and the offset; the watch renames it to .aw.sent when
+# it sends.
+#
+# AUTH_SCAN reads the record's lines from an offset (complete lines only: one
+# still being written is read next time) and prints the verdict (`-` none
+# yet), the bytes it read and, for `auth`, the error's text (JSON-escaped).
+# mode cx: Codex's task_complete of turn `turn`: `auth` for codex_error_info
+# "unauthorized" or http_status_code 401, `over` for any other end of the
+# turn (no error, another error, turn_aborted). mode cop: Copilot's
+# session.error of turn `turn` (its originatingMessageId is the turn's
+# user.message's messageId; by position, the first, when either has none):
+# `auth` for remediation sign_in, or errorType authentication or authorization
+# with statusCode 401, `over` for another error; `end` for a reply from byte
+# `cut` on (assistant.message: a retry worked, the turn goes on; one before is
+# the turn's own) or another turn (user.message). mode copend: the
+# session.error of turn `turn` that ends the last turn read, if any (`auth` or
+# `error`). `base` is the offset the lines start at.
+AUTH_SCAN='
+function emsg(s) {
+  if (match(s, /"message":"([^"\\]|\\.)*"/)) return substr(s, RSTART + 11, RLENGTH - 12)
+  return ""
+}
+function cop(s, at,   t) {
+  if (index(s, "\"type\":\"session.error\"")) {
+    if (turn != "" && turn != "-" && match(s, /"originatingMessageId":"[^"\\]*"/) && substr(s, RSTART + 24, RLENGTH - 25) != turn) return ""
+    m = emsg(s)
+    if (match(s, /"errorType":"[^"\\]*"/)) m = substr(s, RSTART + 13, RLENGTH - 14) ": " m
+    t = index(s, "\"remediation\":\"sign_in\"") || (s ~ /"errorType":"(authentication|authorization)"/ && s ~ /"statusCode":401[^0-9]/)
+    return t ? "auth" : "error"
+  }
+  if (index(s, "\"type\":\"user.message\"")) return "on"
+  if (index(s, "\"type\":\"assistant.message\"") && base + at >= cut) return "on"
+  return ""
+}
+function judge(s, at,   r) {
+  if (mode == "cx") {
+    if (!index(s, "\"turn_id\":\"" turn "\"")) return
+    if (index(s, "\"type\":\"task_complete\"")) {
+      v = (index(s, "\"codex_error_info\":\"unauthorized\"") || s ~ /"http_status_code":401[^0-9]/) ? "auth" : "over"
+      m = emsg(s)
+    } else if (index(s, "\"type\":\"turn_aborted\"")) v = "over"
+    return
+  }
+  r = cop(s, at)
+  if (r == "") return
+  if (mode == "cop") v = (r == "auth") ? "auth" : (r == "error") ? "over" : "end"
+  else if (r == "on") { last = ""; lm = "" }
+  else { last = r; lm = m }
+}
+{ if (NR > 1 && v == "") judge(p, ps); p = $0; ps = u; u += length($0) + 1 }
+END {
+  c = u
+  if (NR && v == "") { if (u <= avail) judge(p, ps); else c = u - length(p) - 1 }
+  if (mode == "copend") { v = last; m = lm }
+  printf "%s\t%.0f\t%s\n", (v == "" ? "-" : v), c, (v == "auth" ? m : "")
+}'
+
+# Where a watch of record $2 (size $3) reads from, and the turn: the record's
+# last MiB (its first line cut there skipped); for mode cop after the last
+# user.message there, with its messageId (empty when it has none). Prints
+# offset TAB id.
+AUTH_START='
+function see(s, at) {
+  if (mode != "cop" || !index(s, "\"type\":\"user.message\"")) return
+  o = at + length(s) + 1; id = ""
+  if (match(s, /"messageId":"[A-Za-z0-9._:-]+"/) && RLENGTH <= 142) id = substr(s, RSTART + 13, RLENGTH - 14)
+}
+{ if (NR > 1 && !(NR == 2 && cut)) see(p, ps); if (NR == 1 && cut) o = length($0) + 1; p = $0; ps = u; u += length($0) + 1 }
+END {
+  if (NR && !(NR == 1 && cut) && u <= avail) see(p, ps)
+  if (o > avail) o = avail
+  printf "%.0f\t%s\n", o, id
+}'
+
+auth_start() { # mode file size: offset TAB id
+  ab_b=0
+  [ "$3" -gt 1048576 ] && ab_b=$(($3 - 1048576))
+  ab_r=$(tail -c +$((ab_b + 1)) "$2" 2>/dev/null | head -c $(($3 - ab_b)) |
+    LC_ALL=C awk -v mode="$1" -v cut=$((ab_b > 0)) -v avail=$(($3 - ab_b)) "$AUTH_START" 2>/dev/null) || return 1
+  ab_o=${ab_r%%"$TAB"*}
+  is_uint "$ab_o" || return 1
+  printf '%s\t%s\n' $((ab_b + ab_o)) "${ab_r#*"$TAB"}"
+}
+
+auth_scan() { # mode file offset [turn [cut]]: verdict TAB next-offset TAB text
+  as_sz=$(wc -c <"$2" 2>/dev/null | tr -d ' ')
+  is_uint "$as_sz" && [ "$as_sz" -ge "$3" ] || return 1
+  as_n=$((as_sz - $3))
+  if [ "$as_n" = 0 ]; then
+    printf '%s\t%s\t\n' - "$3"
+    return 0
+  fi
+  as_r=$(tail -c +$(($3 + 1)) "$2" 2>/dev/null | head -c "$as_n" |
+    LC_ALL=C awk -v mode="$1" -v turn="${4:-}" -v base="$3" -v cut="${5:-0}" -v avail="$as_n" "$AUTH_SCAN" 2>/dev/null) || return 1
+  as_v=${as_r%%"$TAB"*} as_r=${as_r#*"$TAB"}
+  as_c=${as_r%%"$TAB"*}
+  is_uint "$as_c" || return 1
+  printf '%s\t%s\t%s\n' "$as_v" $(($3 + as_c)) "${as_r#*"$TAB"}"
+}
+
+# Copilot CLI's record of this session: <COPILOT_HOME, else ~/.copilot>/
+# session-state/<sessionId>/events.jsonl (measured on 1.0.114). Only an id
+# that is a plain folder name.
+cop_record() {
+  [ "$RAWSID" = "$SID" ] || return 1
+  cr_f=${COPILOT_HOME:-$HOME/.copilot}/session-state/$SID/events.jsonl
+  [ -f "$cr_f" ] && [ -r "$cr_f" ] || return 1
+  printf '%s' "$cr_f"
+}
+
+auth_watch() { # mode(cop|cx) record [turn]
+  [ -n "$LINKS" ] || return 0
+  aw_f=$RUN_DIR/$SID.aw aw_t=${3:--}
+  aw_now=$(date +%s)
+  is_uint "$aw_now" || return 0
+  # The record's size now: a reply written before it is the turn's own, not
+  # a retry that worked. Copilot's turn is its last user.message.
+  aw_cut=$(wc -c <"$2" 2>/dev/null | tr -d ' ')
+  is_uint "$aw_cut" || return 0
+  if [ "$1" = cop ]; then
+    aw_s=$(auth_start cop "$2" "$aw_cut") || return 0
+    aw_t=${aw_s#*"$TAB"}
+    aw_t=${aw_t:--}
+  fi
+  # A watch of this turn still runs (a token older than a watch lasts is one
+  # that died), or it sent already.
+  if [ -f "$aw_f" ]; then
+    read -r aw_r0 aw_t0 aw_s0 aw_o0 2>/dev/null <"$aw_f"
+    [ "$aw_t0" = "$aw_t" ] && is_uint "$aw_s0" && [ $((aw_now - aw_s0)) -lt 125 ] && return 0
+  fi
+  [ "$aw_t" != - ] && [ "$(cut -d' ' -f2 "$aw_f.sent" 2>/dev/null)" = "$aw_t" ] && return 0
+  if [ "$1" = cx ]; then aw_s=$(auth_start cx "$2" "$aw_cut") || return 0; fi
+  aw_off=${aw_s%%"$TAB"*}
+  LAST='' TLAST=''
+  turn_at error
+  v2_prep "$TURN_AT"
+  aw_st=$(cat "$RUN_DIR/$SID.st" 2>/dev/null)
+  { printf '%s %s %s %s\n' "$RID" "$aw_t" "$aw_now" "$aw_off" >"$aw_f.$$" && mv -f "$aw_f.$$" "$aw_f"; } 2>/dev/null || return 0
+  trap '' HUP
+  (
+    aw_v=- aw_m=''
+    while [ "$(date +%s)" -lt $((aw_now + 120)) ]; do
+      sleep 0.5 2>/dev/null || sleep 1
+      [ "$(cut -d' ' -f1 "$aw_f" 2>/dev/null)" = "$RID" ] || exit 0
+      aw_r=$(auth_scan "$1" "$2" "$aw_off" "$aw_t" "$aw_cut") || break
+      aw_v=${aw_r%%"$TAB"*} aw_r=${aw_r#*"$TAB"}
+      aw_off=${aw_r%%"$TAB"*} aw_m=${aw_r#*"$TAB"}
+      [ "$aw_v" = - ] || break
+    done
+    [ "$(cut -d' ' -f1 "$aw_f" 2>/dev/null)" = "$RID" ] || exit 0
+    if [ "$aw_v" = auth ]; then
+      mv -f "$aw_f" "$aw_f.sent" 2>/dev/null || exit 0
+      setmsg "$aw_m"
+      later_send auth
+    else
+      rm -f "$aw_f" 2>/dev/null
+    fi
+    case $aw_v in auth | over) [ "$(cat "$RUN_DIR/$SID.st" 2>/dev/null)" = "$aw_st" ] && st_end ;; esac
+  ) </dev/null >/dev/null 2>&1 &
+}
+
+# Copilot -p ends a failed session with sessionEnd reason error: `auth` and
+# the error's text when the turn's record says its sign-in was refused, nothing
+# when the watch sent that already, else `error` (SimpleTerm
+# hist/hook-events#d11). The watch stops either way. Copilot writes the turn's
+# session.error just after it starts this hook (0.07 s on 1.0.114): it is
+# waited for 2 seconds at most.
+cop_end() {
+  ce_f=$RUN_DIR/$SID.aw ce_t='' ce_off=''
+  if mv -f "$ce_f" "$ce_f.end" 2>/dev/null; then
+    read -r ce_r0 ce_t ce_s0 ce_off 2>/dev/null <"$ce_f.end"
+    rm -f "$ce_f.end" 2>/dev/null
+  elif [ -f "$ce_f.sent" ]; then
+    return 0
+  fi
+  if ! ce_rec=$(cop_record); then
+    printf 'error\t\n'
+    return 0
+  fi
+  if ! is_uint "$ce_off"; then
+    ce_s=$(wc -c <"$ce_rec" 2>/dev/null | tr -d ' ')
+    is_uint "$ce_s" && ce_s=$(auth_start cop "$ce_rec" "$ce_s") || { printf 'error\t\n'; return 0; }
+    ce_off=${ce_s%%"$TAB"*} ce_t=${ce_s#*"$TAB"}
+  fi
+  ce_i=0 ce_r=''
+  while [ "$ce_i" -lt 10 ]; do
+    ce_r=$(auth_scan copend "$ce_rec" "$ce_off" "$ce_t") || break
+    case $ce_r in auth"$TAB"* | error"$TAB"*) break ;; esac
+    ce_i=$((ce_i + 1))
+    sleep 0.2 2>/dev/null || { sleep 1; ce_i=$((ce_i + 4)); }
+  done
+  case $ce_r in
+    auth"$TAB"*) printf 'auth\t%s\n' "${ce_r#*"$TAB"*"$TAB"}" ;;
+    *) printf 'error\t\n' ;;
+  esac
 }
 
 # The status of a running turn: while a paused session's background
@@ -6858,15 +7076,26 @@ case $AGENT:$EVENT in
     ;;
   claude:SessionEnd | grok:SessionEnd | copilot:sessionEnd | codex:SessionEnd)
     if [ "$AGENT" = copilot ] && [ "$REASON" = error ]; then
-      # The session ended on an error (its last try, kept above).
-      e=$(cat "$RUN_DIR/$SID.cerr" 2>/dev/null)
-      setmsg "${e:-error: the session ended on an error}"
-      LAST='' TLAST=''
-      turn_at error
-      v2_prep "$TURN_AT"
-      send_bg error
+      # The session ended on an error: `auth` for a refused sign-in, none
+      # when the watch sent that already (cop_end), else `error` with the
+      # last try's message (kept above).
+      ce=$(cop_end)
+      ev=${ce%%"$TAB"*}
+      if [ "$ev" = auth ]; then e=${ce#*"$TAB"}; else e=$(cat "$RUN_DIR/$SID.cerr" 2>/dev/null); fi
+      if [ -n "$ev" ]; then
+        setmsg "${e:-error: the session ended on an error}"
+        LAST='' TLAST=''
+        turn_at error
+        v2_prep "$TURN_AT"
+        send_bg "$ev"
+        st_end
+      fi
     fi
-    rm -f "$RUN_DIR/$SID.cerr" "$RUN_DIR/$SID.schedtasks" "$RUN_DIR/$SID.cronids" 2>/dev/null
+    rm -f "$RUN_DIR/$SID.cerr" "$RUN_DIR/$SID.schedtasks" "$RUN_DIR/$SID.cronids" "$RUN_DIR/$SID.aw.sent" 2>/dev/null
+    # A watch for a refused sign-in (auth_watch) ends with a Copilot session.
+    # Codex keeps the children of a hook that ended in time (measured), so
+    # the watch of its last turn reads on: `codex exec` ends right after it.
+    [ "$AGENT" = codex ] || rm -f "$RUN_DIR/$SID.aw" 2>/dev/null
     bg_handoff out
     printf '' 2>/dev/null >"$RUN_DIR/t0.$$"
     # The record first: Codex gives this hook 3 seconds at most and then
@@ -6943,11 +7172,21 @@ case $AGENT:$EVENT in
     note turn
     prompt_origin
     turn_mark
+    # The turn before ended on a failure still watched (auth_watch), with no
+    # hook: the state comparison starts over, so this turn's running goes.
+    [ -f "$RUN_DIR/$SID.aw" ] && [ "$(cut -d' ' -f2 "$RUN_DIR/$SID.aw" 2>/dev/null)" != "$TID" ] && st_end
     send_state running
     sess_turn running "$PROMPT"
     ;;
   codex:PreToolUse | codex:PostToolUse)
     # Registered for the session record's heartbeat only (SimpleTerm if/session-record#files).
+    ;;
+  codex:PostModelRequest)
+    # A failed request (any other ended above), once per try: the turn's
+    # first starts the watch of its rollout for a refused sign-in
+    # (auth_watch).
+    gf=$(input_file "$TPATH")
+    [ -n "$gf" ] && is_id "$TID" && auth_watch cx "$gf" "$TID"
     ;;
   codex-notify:notify)
     [ "$NTYPE2" = agent-turn-complete ] || finish
@@ -7049,10 +7288,16 @@ case $AGENT:$EVENT in
     fi
     LAST=''
     if [ -n "$ERR" ] && [ "$ERR" != null ]; then
+      # A refused sign-in is `auth` (SimpleTerm hist/hook-events#d11): the
+      # text is Google's API error (`Error 401, Message: ..., Status:
+      # UNAUTHENTICATED`; a bad API key API_KEY_INVALID), and no field tells
+      # the kind.
+      ev=error
+      case $ERR in *'Error 401'* | *UNAUTHENTICATED* | *API_KEY_INVALID*) ev=auth ;; esac
       setmsg "${TERMREASON:-error}: $ERR"
       turn_at error
       v2_prep "$TURN_AT"
-      send_bg error
+      send_bg "$ev"
       st_end
     elif [ "$FULLYIDLE" = true ] || [ "$FULLYIDLE" = false ]; then
       # Who opened the turn and what is left, from the record (agy_turn;
@@ -7204,6 +7449,11 @@ case $AGENT:$EVENT in
     note turn
     ev=error
     case $ERR in ProviderAuthError | *[Aa]uth*) ev=auth ;; esac
+    # 1.x names a refused sign-in APIError with HTTP status 401 or 403
+    # (ProviderAuthError is a missing key; SimpleTerm hist/hook-events#d11).
+    if [ "$OCV" = 1 ] && [ "$ERR" = APIError ]; then
+      case $OCSC in 401 | 403) ev=auth ;; esac
+    fi
     setmsg "$ERR: $LAST"
     turn_at error
     v2_prep "$TURN_AT"
@@ -7247,6 +7497,11 @@ case $AGENT:$EVENT in
     ;;
   copilot:userPromptSubmitted)
     note turn
+    # A new turn: the next failure watches again (auth_watch). A watch still
+    # running means the turn before ended on a failure, with no hook: the
+    # state comparison starts over, so this turn's running goes.
+    [ -f "$RUN_DIR/$SID.aw" ] && st_end
+    rm -f "$RUN_DIR/$SID.aw" "$RUN_DIR/$SID.aw.sent" 2>/dev/null
     prompt_origin
     turn_mark
     send_state running
@@ -7271,10 +7526,12 @@ case $AGENT:$EVENT in
     # A failed tool is the model's to handle. Copilot retries a failed model
     # call and reports each try as recoverable (measured on 1.0.105: six
     # tries, all recoverable, then sessionEnd with reason error in -p mode):
-    # kept for that end, not an alert of its own.
+    # kept for that end, not an alert of its own. A failed model call starts
+    # the watch of the turn's record for a refused sign-in (auth_watch).
     [ "$ECTX" = tool_execution ] && finish
     if [ "$RECOV" = true ]; then
       printf '%s\n' "$(json_trim "${ERR:-error}: $LAST" 200 800)" >"$RUN_DIR/$SID.cerr" 2>/dev/null
+      [ "$ECTX" = model_call ] && cf=$(cop_record) && auth_watch cop "$cf"
       finish
     fi
     note turn

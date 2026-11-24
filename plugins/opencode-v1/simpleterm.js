@@ -123,6 +123,10 @@ export const SimpleTermAgentHooks = async ({ client, directory }) => {
   // OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS) the parent goes idle while a
   // child still works, and the child's report wakes the parent again.
   const busy = new Set();
+  // Sessions whose turn failed (session.error): 1.x runs session.idle twice
+  // after an error (measured on 1.19.6), which is no done. The next turn
+  // (busy or retry) ends it (SimpleTerm hist/hook-events#d11).
+  const failed = new Set();
 
   async function session(id) {
     try {
@@ -146,6 +150,7 @@ export const SimpleTermAgentHooks = async ({ client, directory }) => {
       const type = p.status && p.status.type;
       if (type === "busy" || type === "retry") {
         busy.add(p.sessionID);
+        failed.delete(p.sessionID);
         if (busy.size > 500) busy.delete(busy.values().next().value);
       } else if (type === "idle") busy.delete(p.sessionID);
     }
@@ -247,6 +252,7 @@ export const SimpleTermAgentHooks = async ({ client, directory }) => {
       }
       case "session.idle": {
         busy.delete(p.sessionID);
+        if (failed.has(p.sessionID)) return; // the failed turn's, no done
         const info = await session(p.sessionID);
         if (info.parentID) return; // a subagent's session
         if (await busyChild(p.sessionID)) return; // its report wakes this one
@@ -262,6 +268,12 @@ export const SimpleTermAgentHooks = async ({ client, directory }) => {
         busy.delete(p.sessionID);
         const e = p.error || {};
         if (e.name === "MessageAbortedError") return; // stopped by the user
+        if (p.sessionID) {
+          failed.add(p.sessionID);
+          if (failed.size > 500) failed.delete(failed.values().next().value);
+        }
+        // An APIError's HTTP status: 401 and 403 are a refused sign-in (auth).
+        const code = e.data && e.data.statusCode;
         await runHook(
           {
             hook_event_name: "StopFailure",
@@ -270,6 +282,7 @@ export const SimpleTermAgentHooks = async ({ client, directory }) => {
             cwd: directory,
             error: String(e.name || "error"),
             last_assistant_message: String((e.data && e.data.message) || ""),
+            ...(Number.isInteger(code) ? { status_code: code } : {}),
           },
           directory,
         );
