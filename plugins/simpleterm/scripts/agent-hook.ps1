@@ -1056,6 +1056,8 @@ function SpReq([string]$rk) {
             if ($Script:NS -gt 0) { $can += ' allow_scope' }
             $can += ' deny deny_reason'
         }
+        # A subagent approval request: its window opens after the hook ends (SimpleTerm spec/request-wait#hook-wait).
+        if ($rk -ceq 'claude_perm' -and $win -cne 'question' -and (SpFs 'agent_id')) { $wait = 'hidden' }
     } elseif ($rk -ceq 'claude_notif') {
         $t = SpP 'ntype'
         $wait = 'none'
@@ -1899,6 +1901,115 @@ function Test-LaterStillDue($job) {
     return $true
 }
 
+# Bytes $off.. of file $path as a byte string; $null when it cannot be read or
+# is shorter than $off.
+function Read-FromB([string]$path, [int64]$off) {
+    try {
+        $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+        try {
+            if ($fs.Length -lt $off) { return $null }
+            [void]$fs.Seek($off, 'Begin')
+            return (New-Object IO.StreamReader($fs, $Latin1)).ReadToEnd()
+        } finally { $fs.Dispose() }
+    } catch { return $null }
+}
+
+# Codex tells a refused sign-in only in its rollout, as the turn ends; its
+# PostModelRequest comes for every try, a 401 that a retry fixes too, with no
+# field that tells the last (SimpleTerm hist/hook-events#d11). As auth_watch in
+# agent-hook.sh: from the turn's first failed request a child reads the rollout
+# every half second from its last MiB (the turn's end can be written before
+# this hook reads it; only the turn's lines count), 120 seconds at most, and
+# sends one `auth` (turn.end error, no req) for the turn's task_complete with
+# codex_error_info "unauthorized" or http_status_code 401; any other end of
+# the turn, no rollout or another turn's watch ends it with nothing sent. A
+# turn end it reads (with `auth` or not: the turn ends with no hook) starts
+# the state comparison over (Reset-StateTurn), unless a newer state went
+# meanwhile (the next turn's `running`): that record stays. run/<sid>.aw holds
+# the watch's rid, turn, start and offset; renamed to .aw.sent when it sends.
+function Start-AuthWatch([string]$path, [string]$turn) {
+    if ($Script:LinkFiles.Count -eq 0) { return }
+    $tf = Join-Path $RunDir ($Script:Sid + '.aw')
+    $now = Now-Epoch
+    # A watch of this turn still runs (a token older than a watch lasts is one
+    # that died), or it sent already.
+    $f = (Read-LineB $tf 0).Split(' ')
+    if ($f.Length -ge 3 -and $f[1] -ceq $turn -and (Test-UInt $f[2]) -and ($now - [int64]$f[2]) -lt 125) { return }
+    $f = (Read-LineB ($tf + '.sent') 0).Split(' ')
+    if ($f.Length -ge 2 -and $f[1] -ceq $turn) { return }
+    try { $off = (New-Object IO.FileInfo($path)).Length } catch { return }
+    if ($off -gt 1048576) {
+        # The first line there is cut: the watch reads from the next.
+        $off -= 1048576
+        $text = Read-FromB $path $off
+        if ($null -eq $text) { return }
+        $n = $text.IndexOf([char]10)
+        if ($n -lt 0) { $off += $text.Length } else { $off += $n + 1 }
+    } else { $off = 0 }
+    $Script:Last = ''
+    Set-TurnAt 'error' '' ''
+    Initialize-V2 $Script:TurnAt
+    if (-not (Write-FileB $tf ($Script:Rid + ' ' + $turn + ' ' + $now + ' ' + $off + "`n"))) { return }
+    $job = New-Job 'authwatch'
+    $job.ev = 'auth'
+    $job.scope = 'all'
+    $job.lfile = BS $tf
+    $job.ltoken = $Script:Rid
+    $job.lpath = BS $path
+    $job.loff = [string]$off
+    $job.lturn = $turn
+    $job.lt0 = [string]$now
+    $job.lst = Read-LineB (Join-Path $RunDir ($Script:Sid + '.st')) 0
+    Start-Child $job
+}
+
+# The watch, in the child: 'auth' when the turn's task_complete says its
+# sign-in was refused (the token is then claimed, .aw.sent, and the error's
+# text set), 'over' for any other end of the turn, '' when the watch ends
+# without seeing one.
+function Get-AuthWatch($job) {
+    $tf = US $job.lfile
+    $path = US $job.lpath
+    $turn = [string]$job.lturn
+    if (-not (Test-UInt $job.loff) -or -not (Test-UInt $job.lt0) -or -not (Test-Id $turn)) { return '' }
+    $off = [int64]$job.loff
+    $until = [int64]$job.lt0 + 120
+    $tid = '"turn_id":"' + $turn + '"'
+    $verdict = ''
+    $msg = ''
+    while (-not $verdict -and (Now-Epoch) -lt $until) {
+        Start-Sleep -Milliseconds 500
+        if ((Read-LineB $tf 0).Split(' ')[0] -cne $job.ltoken) { return '' }
+        $text = Read-FromB $path $off
+        if ($null -eq $text) { $verdict = 'end'; break }
+        # Complete lines only: one still being written is read next time.
+        $n = $text.LastIndexOf([char]10)
+        if ($n -lt 0) { continue }
+        $off += $n + 1
+        foreach ($line in $text.Substring(0, $n).Split([char]10)) {
+            if (-not $line.Contains($tid)) { continue }
+            if ($line.Contains('"type":"task_complete"')) {
+                $verdict = 'over'
+                if ($line.Contains('"codex_error_info":"unauthorized"') -or $line -cmatch '"http_status_code":401[^0-9]') {
+                    $verdict = 'auth'
+                    $m = [regex]::Match($line, '"message":"((?:[^"\\]|\\.)*)"')
+                    if ($m.Success) { $msg = $m.Groups[1].Value }
+                }
+                break
+            }
+            if ($line.Contains('"type":"turn_aborted"')) { $verdict = 'over'; break }
+        }
+    }
+    if ((Read-LineB $tf 0).Split(' ')[0] -cne $job.ltoken) { return '' }
+    if ($verdict -cne 'auth') { Remove-FileQ $tf; return $verdict }
+    try {
+        Remove-FileQ ($tf + '.sent')
+        [IO.File]::Move($tf, $tf + '.sent')
+    } catch { return '' }
+    Set-Msg $msg
+    return 'auth'
+}
+
 # later_send: the event made now (fresh rid, time and, v2, tms) and sent.
 function Send-Later([string]$ev, [string]$scope) {
     $Script:Now = Now-Epoch
@@ -1923,6 +2034,11 @@ function Invoke-Child([string]$name) {
             Send-Now $job.ev $job.rid $job.scope $mark ([string]$job.marktext)
         }
         'later' { if (Test-LaterStillDue $job) { Send-Later $job.ev $job.scope } }
+        'authwatch' {
+            $v = Get-AuthWatch $job
+            if ($v -ceq 'auth') { Send-Later 'auth' 'all' }
+            if (($v -ceq 'auth' -or $v -ceq 'over') -and (Read-LineB (Join-Path $RunDir ($Script:Sid + '.st')) 0) -ceq [string]$job.lst) { Reset-StateTurn }
+        }
         'state' {
             Start-Sleep -Seconds 1
             $f = (Read-LineB (Join-Path $RunDir ($Script:Sid + '.st')) 0).Split(' ')
@@ -4744,6 +4860,9 @@ function Set-HeldPrep([string]$kind) {
     $Script:HbApid = ''
     $Script:HbRes = ''
     if (-not $kind -or $Script:LinkFiles.Count -eq 0 -or -not (Test-HasTunnel)) { return }
+    # A Claude Code subagent's request is never told from the session file
+    # (SimpleTerm if/ssh-tunnel-wait#open-window): no agent pid, no record.
+    if ($kind.StartsWith('claude_', $Ord) -and $Script:AgentId) { return }
     $Script:HbApid = [string](Get-AgentPid)
     $Script:HbRes = [string](Get-ResLineCount)
 }
@@ -5033,45 +5152,28 @@ function Get-RqWindow([int]$agentPid) {
 # lives on: answered at the terminal (SimpleTerm if/ssh-tunnel-wait#window-closed).
 # Claude Code keeps a permission hook until the allowed tool ends [measured],
 # so the tool's end (Test-AnsweredLocally) can be minutes away, and a denial
-# ends the hook instead. The hook must have seen the window open and its own
-# (Get-RqWindow 0: RqSeen), and two looks in a row must then say the session
-# waits on nothing (it went on). The first look is made before the request is
-# sent (Invoke-RequestFlow): a link can take seconds to answer, and an answer
-# at the terminal in that time would leave no look with the window open.
-# Another window in its place (waiting, another statusUpdatedAt), a window
-# shared with another permission hook ("1 of 2": one that joins after the
-# first look takes RqSeen back), one never seen, a file that cannot be read:
-# nothing to tell by, and the wait goes on as before. Ending a request the
-# user can still answer in the app is the worse mistake, so only the plain
-# reading ends it (rq_closed).
+# ends the hook instead. The hook must have seen its window open (Get-RqWindow
+# 0, or 1 with the window shared: RqSeen), and two looks in a row must then say
+# the session waits on nothing (it went on). A window shared with other
+# permission hooks ("1 of 2", parallel tool calls) counts as well: its session
+# file stays as it is from one item to the next, and the session waits on
+# nothing only once every item is answered [measured 2.1.331] (SimpleTerm
+# hist/ssh-tunnel-http#d8). The first look is made before the request is sent
+# (Invoke-RequestFlow): a link can take seconds to answer, and an answer at the
+# terminal in that time would leave no look with the window open. Another
+# window in its place (waiting, another statusUpdatedAt), one never seen, a
+# file that cannot be read, a subagent's request (no mark): nothing to tell by,
+# and the wait goes on as before. Ending a request the user can still answer in
+# the app is the worse mistake, so only the plain reading ends it (rq_closed).
 function Test-RqClosed([int]$agentPid) {
     if ($Script:Agent -cne 'claude') { return $false }
     $w = Get-RqWindow $agentPid
-    if ($w -eq 0) {
+    if ($w -eq 0 -or ($w -eq 1 -and $Script:RqWState -ceq 'shared')) {
         $Script:RqSeen = $true
         $Script:RqShut = 0
         return $false
     }
-    if ($w -eq 1 -and $Script:RqWState -ceq 'shared') {
-        $Script:RqSeen = $false
-        $Script:RqShut = 0
-        return $false
-    }
     if ($w -ne 1 -or $Script:RqWState -cne 'closed') {
-        $Script:RqShut = 0
-        return $false
-    }
-    # Another permission hook that saw the same window lives on (its mark
-    # holds the same statusUpdatedAt): the window was shared after all, even
-    # if no look found the two on it together. One that has not read its
-    # window yet: not known, and this look does not count.
-    $alone = Get-RqAlone
-    if ($alone -eq 1) {
-        $Script:RqSeen = $false
-        $Script:RqShut = 0
-        return $false
-    }
-    if ($alone -ne 0) {
         $Script:RqShut = 0
         return $false
     }
@@ -5258,6 +5360,13 @@ function Invoke-RequestFlow([string]$ev, [string]$mode) {
     $Script:RqEv = $ev
     $Script:RqMode = $mode
     $cap = Get-ConfWaitCap $Script:Agent
+    # A Claude Code subagent's request (hidden): no window in the terminal while it waits, as for
+    # Codex, so at most 60 seconds (SimpleTerm spec/request-wait-link#send-order).
+    if ($Script:Agent -ceq 'claude' -and $mode -ceq 'hidden') {
+        $subCap = 60
+        if ($env:SIMPLETERM_HOOK_TEST -eq '1' -and (Test-UInt $env:SIMPLETERM_HOOK_TEST_SUB_CAP)) { $subCap = [int64]$env:SIMPLETERM_HOOK_TEST_SUB_CAP }
+        if ($cap -gt $subCap) { $cap = $subCap }
+    }
     $pollWait = Get-ConfPollWait
     # The cap counts from the hook's start (the tunnel's 5 seconds and the
     # relay's ingest included, SimpleTerm spec/request-wait-link#send-order).
@@ -5287,9 +5396,12 @@ function Invoke-RequestFlow([string]$ev, [string]$mode) {
     $Script:RqShut = 0
     $Script:RqWState = ''
     $Script:RqHeldNext = [DateTime]::MinValue
-    # This session's waiting permission hooks, for Get-RqAlone.
+    # This session's waiting permission hooks, for Get-RqAlone. A subagent's request (agent_id) has
+    # none and is never told from the session file: its window opens after its hook ends [measured
+    # 2.1.331], so a window the hook sees is another's (SimpleTerm if/ssh-tunnel-wait#open-window).
+    # Without a mark Get-RqWindow confirms nothing: no resend, no end by the file.
     $Script:RqMark = ''
-    if ($Script:Agent -ceq 'claude') {
+    if ($Script:Agent -ceq 'claude' -and -not $Script:AgentId) {
         $mark = Join-Path $RunDir ('perm.' + $Sid + '.' + $PID)
         if (Write-FileB $mark '') { $Script:RqMark = $mark }
     }
@@ -6565,6 +6677,7 @@ function Read-HookFields($kv) {
         elseif ($p -ceq 'context_tokens') { $Script:CtxTok = $v }
         elseif ($p -ceq 'model' -or $p -ceq 'to_model') { $Script:Model = $v }
         elseif ($p -ceq 'reason') { $Script:Reason = $v }
+        elseif ($p -ceq 'status') { $Script:CxSt = $v }
         elseif ($p -ceq 'promptId') { $Script:PromptId = $v; $Script:GKey += '.' + $v; $Script:Tid = $v }
         elseif ($p -ceq 'timestamp') { $Script:GKey += '.' + $v }
     }
@@ -6609,9 +6722,12 @@ function Invoke-Event {
             if (-not $d) { $d = $Script:Desc }
             Set-Msg ('approve ' + $Script:Tool + ': ' + $d)
             Initialize-V2 $Script:RkAt
-            # Codex hides its prompt while the hook waits (SimpleTerm spec/request-wait#hook-wait).
+            # Codex hides its prompt while the hook waits, and so does Claude Code for a subagent's
+            # request (agent_id): its window opens after the hook ends [measured 2.1.331]
+            # (SimpleTerm spec/request-wait#hook-wait).
             $w = 'shared'
             if ($Script:Agent -ceq 'codex') { $w = 'hidden' }
+            if ($Script:Agent -ceq 'claude' -and $Script:AgentId) { $w = 'hidden' }
             if ($Script:LinkFiles.Count -gt 0) { Invoke-RequestFlow 'permission' $w }
         }
         return
@@ -6712,6 +6828,9 @@ function Invoke-Event {
         $since = [DateTime]::UtcNow
         Remove-FileQ (Join-Path $RunDir ($Script:Sid + '.schedtasks'))
         Remove-FileQ (Join-Path $RunDir ($Script:Sid + '.cronids'))
+        # A watch for a refused sign-in (Start-AuthWatch) reads on: `codex exec`
+        # ends right after its turn.
+        Remove-FileQ (Join-Path $RunDir ($Script:Sid + '.aw.sent'))
         Move-BgClear 'out'
         # The record first: Codex gives this hook 3 seconds at most and then
         # ends it (0.165.0, measured).
@@ -6801,12 +6920,27 @@ function Invoke-Event {
         Add-Note 'turn' ''
         Set-PromptOrigin
         Write-TurnMark
+        if ($Script:Agent -ceq 'codex') {
+            # The turn before ended on a failure still watched (Start-AuthWatch),
+            # with no hook: the state comparison starts over, so this turn's
+            # running goes.
+            $aw = (Read-LineB (Join-Path $RunDir ($Script:Sid + '.aw')) 0).Split(' ')
+            if ($aw.Length -ge 2 -and $aw[1] -cne $Script:Tid) { Reset-StateTurn }
+        }
         Send-State 'running' ''
         Write-SessTurn 'running' $Script:Prompt
         return
     }
     if ($ev -ceq 'codex:PreToolUse' -or $ev -ceq 'codex:PostToolUse') {
         # Registered for the session record's heartbeat only (SimpleTerm if/session-record#files).
+        return
+    }
+    if ($ev -ceq 'codex:PostModelRequest') {
+        # A failed request (any other ended before), once per try: the turn's
+        # first starts the watch of its rollout for a refused sign-in
+        # (Start-AuthWatch).
+        $gf = Get-InputFile $Script:TPath
+        if ($gf -and (Test-Id $Script:Tid)) { Start-AuthWatch $gf $Script:Tid }
         return
     }
     if ($ev -ceq 'codex-notify:notify') {
@@ -7077,7 +7211,7 @@ try {
         foreach ($i in 0..4) { foreach ($k in @('id', 'schedule', 'prompt')) { $want += 'session_crons.' + $i + '.' + $k } }
     } elseif ($Agent -ceq 'codex') {
         $want = @('hook_event_name', 'tool_name', 'tool_input.command', 'tool_input.file_path', 'tool_input.description', 'session_id', 'cwd',
-            'last_assistant_message', 'transcript_path', 'stop_hook_active', 'turn_id', 'permission_mode', 'prompt', 'source')
+            'last_assistant_message', 'transcript_path', 'stop_hook_active', 'turn_id', 'permission_mode', 'prompt', 'source', 'status')
     } elseif ($Agent -ceq 'codex-notify') {
         $want = @('type', 'cwd', 'last-assistant-message', 'input-messages.0')
     } elseif ($Agent -ceq 'grok') {
@@ -7092,7 +7226,7 @@ try {
     }
     foreach ($v in @('HookEvent', 'NType', 'Tool', 'Detail', 'Desc', 'Sid', 'Cwd', 'Last', 'Err', 'QText', 'FirstIn', 'NType2', 'TPath',
             'CtxTok', 'Model', 'GKey', 'Reason', 'Prompt', 'Src', 'StopAct', 'IsInt', 'AgentId', 'PromptId', 'ToolUseId', 'SubType', 'SubPar',
-            'Tid', 'PMode', 'BgPick', 'BgType', 'BgDesc', 'BgCmd', 'BgShells', 'BgSvcIdx', 'BgIds', 'CronSched', 'CronSums', 'CronIds', 'PromptSched', 'PromptReport', 'BgM')) {
+            'Tid', 'PMode', 'BgPick', 'BgType', 'BgDesc', 'BgCmd', 'BgShells', 'BgSvcIdx', 'BgIds', 'CronSched', 'CronSums', 'CronIds', 'PromptSched', 'PromptReport', 'BgM', 'CxSt')) {
         Set-Variable -Name $v -Value '' -Scope Script
     }
     $Script:BgN = 0
@@ -7127,6 +7261,9 @@ try {
     $Script:CwdBaseF = Limit-Json $Script:Cwd 100000 400000 -Base
     $Script:Fp = (Get-Sha256Hex ($Script:Tool + "`t" + (Limit-Json $Script:Detail 200 800))).Substring(0, 16)
     $Sid = $Script:Sid
+    # Codex runs PostModelRequest after every model request: only a failed one
+    # is read (Invoke-Event); any other ends here.
+    if ($Agent -ceq 'codex' -and $Script:HookEvent -ceq 'PostModelRequest' -and $Script:CxSt -cne 'failed') { Trim-Log; exit 0 }
 
     # A done waits done_delay seconds (Send-DoneLater) in case another Stop
     # hook keeps the agent going; any later event of the main thread ends that

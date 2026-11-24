@@ -48,6 +48,31 @@
   on a Mac).
   Tested against stand-ins of the six agents, and with agy 1.5.16 and 1.5.5 in an isolated home with
   a model stub and a stand-in tunnel; the PowerShell hook was not run (no `pwsh` on the test machine).
+- **A turn that failed on a refused sign-in is one `auth` for Antigravity CLI, Copilot CLI, Codex and
+  OpenCode 1.x too** (SimpleTerm `hist/hook-events#d11`, issue AhMunGa/simple-term#667). agy: a `Stop` error with
+  `Error 401`, `UNAUTHENTICATED` or `API_KEY_INVALID`. Copilot and Codex run their failure hook for every try,
+  a 401 a retry fixes too, so from a turn's first failure the hook reads the turn in the agent's own record (Copilot's
+  `events.jsonl` from the turn's `user.message`, its `session.error` by `originatingMessageId`; Codex's
+  rollout, the turn's lines) for 120 s at most and sends `auth` only when the turn ended there on a refused
+  sign-in, also when the turn's end was written before the hook read it; Codex now registers `PostModelRequest` (both hooks). OpenCode 1.x: an `APIError` with HTTP
+  status 401 or 403, and the two `done` after any error are gone. Claude Code's account and billing errors stay
+  `error`. Such a turn end restarts the `state` comparison as every other does (the next turn's `running`
+  goes), and a late `auth` leaves alone a next turn that already started. Tested against stand-ins built from records of Copilot 1.0.114, Codex 0.172.0, agy 1.5.16 and
+  OpenCode 1.19.6; Codex 0.165.0, the oldest the README names, loads the hooks file with `PostModelRequest` and
+  runs its other hooks as before (isolated install, model stub); the PowerShell hook was not run (no `pwsh` on
+  the test machine).
+- **A Claude Code subagent's approval request no longer keeps its window off the terminal**
+  (SimpleTerm `spec/request-wait#hook-wait`, `if/ssh-tunnel-wait#window-closed`, issue AhMunGa/simple-term#895).
+  Claude Code 2.1.331 (the latest) runs every subagent in the background and opens a subagent's
+  approval window only after its `PermissionRequest` hook ends, so a hook that waited for the app
+  left the terminal without the window for up to `claude_wait` (540 s). A request whose hook input
+  has `agent_id` now goes as `wait: hidden`, as Codex's: with the app connected the hook does not
+  wait and the window opens at once; on relay links alone it waits at most 60 seconds, or
+  `claude_wait` when that is shorter. Such a request is never judged from the session file (no mark,
+  no resend, no end when the main thread's window closes). A window shared by parallel tool calls
+  ("1 of 2") now also ends as answered at the terminal once the session waits on nothing, which it
+  does only after every item is answered (measured on 2.1.331). Both hooks (sh, PowerShell); the
+  PowerShell hook was not run (no `pwsh` on the test machine).
 
 ## 0.9.0 - 2026-11-24
 
