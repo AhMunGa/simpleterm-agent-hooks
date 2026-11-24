@@ -2577,9 +2577,12 @@ function Test-HasTunnel {
 
 # A state event (SimpleTerm if/event-v2-turn#state) to the tunnels, when the session's state
 # changed, one a second at most (a change within the second goes a second later
-# unless another replaced it). A subagent's start or stop is an event of its
-# own: sent each time, at once, and it neither replaces a session state nor is
-# replaced by one. $extra: extra parameter lines (the turn).
+# unless another replaced it). A turn's end starts the comparison over: a state
+# that ends a turn ($extra, the turn's lines: background, scheduled, idle) is
+# followed by whatever state comes next, as every other turn end is
+# (Reset-StateTurn). A subagent's start or stop is an event of its own: sent
+# each time, at once, and it neither replaces a session state nor is replaced
+# by one. $extra: extra parameter lines (the turn).
 # -Sync sends from this process (the agent is exiting: the send finishes
 # before the hook does).
 function Send-State([string]$st, [string]$extra, [switch]$Sync) {
@@ -2602,7 +2605,13 @@ function Send-State([string]$st, [string]$extra, [switch]$Sync) {
         $srid = New-RandomHex 8
         if (-not (Test-Hex $srid 16)) { return }
     }
-    if (-not $sub) { [void](Write-FileB $sf ($st + ' ' + $Script:Now + ' ' + $srid + "`n")) }
+    if (-not $sub) {
+        # The state to compare with ('-' after a turn's end: none), its second,
+        # its rid (a state waiting for its second goes only while this is its rid).
+        $sv = $st
+        if ($extra) { $sv = '-' }
+        [void](Write-FileB $sf ($sv + ' ' + $Script:Now + ' ' + $srid + "`n"))
+    }
     $ss = $Script:Spec
     $sx = $Script:V2X
     $sm = $Script:NoMsg
@@ -2631,6 +2640,21 @@ function Send-State([string]$st, [string]$extra, [switch]$Sync) {
     $Script:Spec = $ss
     $Script:V2X = $sx
     $Script:NoMsg = $sm
+}
+
+# A turn ended without a state event (done, a question, error, auth): the
+# comparison of Send-State starts over (SimpleTerm if/event-v2-turn#state), so the next
+# turn's running goes though it was the last state sent. A state still waiting
+# for its second is dropped: the turn's end replaced it, and it must not reach
+# the app after that end. Its second stays, so the limit of one state a second
+# counts states only. The same as st_end in agent-hook.sh.
+function Reset-StateTurn {
+    $sf = Join-Path $RunDir ($Script:Sid + '.st')
+    if (-not [IO.File]::Exists($sf)) { return }
+    $f = (Read-LineB $sf 0).Split(' ')
+    $t = ''
+    if ($f.Length -ge 2) { $t = $f[1] }
+    [void](Write-FileB $sf ('- ' + $t + " -`n"))
 }
 
 # A result event (SimpleTerm if/ssh-tunnel-wait#resolved) to the tunnel $link: scope, out, the request
@@ -6280,6 +6304,7 @@ function Invoke-BgPause([bool]$ask) {
         Set-TurnAt 'background' 'true' ''
         Initialize-V2 $Script:TurnAt
         Send-Background 'question'
+        Reset-StateTurn
         Write-State 'waiting' $Script:Last
         return
     }
@@ -6357,6 +6382,7 @@ function Invoke-StopDone([string]$what) {
     } else {
         Send-DoneLater
     }
+    Reset-StateTurn
     # The turn's done is sent (or pending): Claude Code's idle_prompt, 60 s
     # later, repeats it (the next turn note takes the mark back).
     [void](Write-FileB (Join-Path $RunDir ($Script:Sid + '.done')) '')
@@ -6722,6 +6748,7 @@ function Invoke-Event {
                 Set-RkAt 'codex_plan' ('@.plan' + $Tab + 's' + $Tab + $plan + $Nl)
                 Initialize-V2 $Script:RkAt
                 Send-Background 'question'
+                Reset-StateTurn
                 Invoke-UsageReport
                 Invoke-TurnEnd
                 Write-SessTurn 'idle' ''
@@ -6753,6 +6780,7 @@ function Invoke-Event {
         Set-TurnAt $te '' ''
         Initialize-V2 $Script:TurnAt
         Send-Background $e
+        Reset-StateTurn
         Invoke-UsageReport
         # The turn failed (SimpleTerm spec/turn-state): the error badge and its
         # alert, which the event above pairs with. 'idle' first: an app older
@@ -6850,6 +6878,7 @@ function Invoke-Event {
             Set-TurnAt $te '' ''
             Initialize-V2 $Script:TurnAt
             Send-Background $e
+            Reset-StateTurn
             Invoke-TurnEnd
             Close-TurnMark
         }

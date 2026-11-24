@@ -166,8 +166,15 @@ plugin's hooks in the plugin's own folder and gives them no `PLUGIN_ROOT` (measu
 workspace plugin), so that folder counts, but only when its `plugin.json` names
 `simpleterm-antigravity`: a workspace's own `scripts/agent-hook.sh` never runs. If none is there,
 `PreToolUse` answers `{"decision":"allow"}`, as the script does when the device did not decide, and
-`Stop` prints nothing; all exit 0 (agy reads `{}` from `PreToolUse` as a denial and a failed or
+`PreInvocation` and `Stop` print nothing; all exit 0 (agy reads `{}` from `PreToolUse` as a denial and a failed or
 timed-out hook as a failed tool call, measured).
+
+agy has no hook for a prompt either. The plugin takes its `PreInvocation` hook, which runs before
+every model call, as a turn's start when `invocationNum` is 0: a person's prompt, a background
+command's report and a scheduled run all start that way (measured on 1.5.16 and 1.5.5). It sends the SSH
+tunnel `state` `running`; at a later call of the turn the script ends at once. agy waits for this
+hook before it calls the model: 0.28 to 0.39 s at a turn's start and 0.06 to 0.08 s at each later
+call (1.5.16, measured on a Mac).
 
 agy has no "waiting for permission" event: its `PreToolUse` hook runs before every tool call,
 before agy decides whether to ask. So by default the plugin only alerts for agy's own questions
@@ -281,7 +288,9 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | agy `PreToolUse` `run_command`, `write_file`, `edit_file`, `call_mcp_tool`, `read_file` outside the workspace (only with `agy_wait` and no app connected) | `permission` | none |
 | agy `PreToolUse` `ask_question` | `question` | none |
 | agy `PreToolUse`/`PostToolUse` `write_file` of a plan for review | none (the next `Stop` is the review) | none |
+| agy `PreInvocation` (the first of a turn, `invocationNum` 0) | `state` `running` (SSH tunnel only) | none |
 | agy `Stop` (fully idle) | `done` or `error`; after a plan for review a `question` (plan) | none |
+| agy `Stop` (not fully idle: a background command or a schedule left) | `state` `background` or `scheduled` (SSH tunnel only) | none |
 | Grok `Notification` `permission_prompt` (also "Plan approval requested"), `elicitation_dialog`, `idle_prompt` | `question`, with what is asked from the `PreToolUse` before it (`idle_prompt` only when no `done` was sent or is pending for the turn) | none |
 | Grok `SessionEnd`, `SubagentStart`, `SubagentStop` | `state` (SSH tunnel only) | none |
 | Grok `Stop` (`end_turn`) / `StopFailure` | `done` (none with `backgroundTasks` or `sessionCrons`, same rules as Claude) / `error` or `auth` | none |
@@ -295,6 +304,15 @@ tunnel is gone the hook stops waiting there at once. The server must allow TCP f
 | Copilot `agentStop` | `done` (none while background shells or subagents run, as for Claude Code; after a turn a `/every` or `/after` schedule started, none while a schedule is left, and the last one to the SSH tunnel only); a subagent's own stop: `state` `sub_stop` | none |
 | Copilot `userPromptSubmitted`, `sessionEnd`, `subagentStart`/`Stop` | `state` (SSH tunnel only); `error` when a session ends on one | none; on `sessionEnd` an OSC 7501 `clear` on the terminal (see below) |
 | `simpleterm notify` | `notify` | OSC 777 notification instead |
+
+**States go to the SSH tunnel when they change.** A session's `state` (`running`, `background`,
+`scheduled`, `idle`, `ended`) goes only when it is not the one sent before, one a second at most: a
+change within the second goes a second later unless a newer one replaced it. A turn's end starts
+this over. After a `done`, a `question`, an `error` or an `auth` that ends a turn, and after a
+`background`, `scheduled` or `idle` state, the next state goes even when it is the one sent
+before, so the next turn's `running` always arrives; a state still waiting for its second is
+dropped then, so that it does not arrive after the turn's end. `sub_start` and `sub_stop` go each
+time, at once.
 
 **Background work is not done.** Claude Code (2.1.145+), Grok Build and OpenCode end a turn while a
 shell, subagent or monitor started in the background still runs, and take the turn up again when

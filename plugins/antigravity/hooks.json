@@ -24,6 +24,13 @@
         ]
       }
     ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "sh -c 'for d in \"${PLUGIN_ROOT}\" \"${CLAUDE_PLUGIN_ROOT}\" \"$HOME/.gemini/config/plugins/simpleterm-antigravity\" \"$HOME/.gemini/antigravity-cli/plugins/simpleterm-antigravity\" \"$HOME/.simpleterm/src/plugins/simpleterm\"; do [ -n \"$d\" ] && [ -f \"$d/scripts/agent-hook.sh\" ] && exec sh \"$d/scripts/agent-hook.sh\" agy PreInvocation; done; case $(head -c 4096 ./plugin.json 2>/dev/null) in *'\"'\"'\"simpleterm-antigravity\"'\"'\"'*) [ -f ./scripts/agent-hook.sh ] && exec sh ./scripts/agent-hook.sh agy PreInvocation ;; esac; exit 0'",
+        "timeout": 30
+      }
+    ],
     "Stop": [
       {
         "type": "command",
