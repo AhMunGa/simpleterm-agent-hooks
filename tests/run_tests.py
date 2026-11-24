@@ -3527,6 +3527,14 @@ def t_agy(s):
     rc, out, err, el = s.run("agy", agy_stop(), args=("Stop",))
     rec = wait_for(lambda: ingests(s, "done"), 20)
     s.check("agy: Stop fully idle -> done, {}", out.strip() == "{}" and rec and rec[0]["plain_json"].get("app") == "antigravity", out)
+    # PreInvocation: {} as Stop (agy 1.5.5 went on with it, measured); nothing to the relay (state is the tunnels').
+    s.ctl("/_ctl/reset", {})
+    for n in (0, 1):
+        rc, out, err, el = s.run("agy", json.dumps({"conversationId": "conv-1", "workspacePaths": ["/w/agyproj"], "invocationNum": n}),
+                                 args=("PreInvocation",))
+        s.check("agy: PreInvocation (invocationNum %d) -> {}, exit 0" % n, rc == 0 and out.strip() == "{}", out + err)
+    s.settle("the agy PreInvocation hooks' background work")
+    s.check("agy: PreInvocation -> nothing to the relay", not ingests(s), str(ingests(s))[:200])
     s.ctl("/_ctl/reset", {})
     s.run("agy", agy_stop(error="quota exceeded", terminationReason="ERROR"), args=("Stop",))
     rec = wait_for(lambda: ingests(s), 20)
@@ -3700,7 +3708,7 @@ def t_agy_paths(s):
     shutil.rmtree(places["clone"])
     # Nothing installed: PreToolUse still ends with a decision (as the script does), Stop
     # prints nothing, and the workspace's own scripts/agent-hook.sh does not run.
-    for event, want in (("PreToolUse", '{"decision":"allow"}\n'), ("Stop", "")):
+    for event, want in (("PreToolUse", '{"decision":"allow"}\n'), ("PreInvocation", ""), ("Stop", "")):
         for where in (workspace, elsewhere):
             rc, out = run(event, where)
             s.check("agy paths: no script installed -> %s, exit 0 (%s from %s)" % (want.strip() or "no output", event, where.name),
@@ -3711,7 +3719,7 @@ def t_agy_paths(s):
     pf = tmp / "plugin-folder"
     write(pf / "scripts" / "agent-hook.sh", STUB % "cwd-plugin")
     write(pf / "plugin.json", '{"name": "simpleterm-antigravity", "version": "x"}')
-    for event in ("PreToolUse", "PostToolUse", "Stop"):
+    for event in ("PreToolUse", "PostToolUse", "PreInvocation", "Stop"):
         rc, out = run(event, pf)
         s.check("agy paths: run in this plugin's folder -> its script (%s)" % event, rc == 0 and out.strip() == "cwd-plugin agy %s" % event, "%d %r" % (rc, out))
     write(workspace / "plugin.json", '{"name": "a-workspace-plugin"}')
@@ -3723,6 +3731,9 @@ def t_agy_paths(s):
             hj["PreToolUse"][0]["matcher"] == "run_command|ask_question|write_file|edit_file|read_file|call_mcp_tool", str(hj["PreToolUse"][0]["matcher"]))
     s.check("agy hooks: write_file's PostToolUse (a plan for review), Stop timeout above agy_wait (110)",
             hj["PostToolUse"][0]["matcher"] == "write_file" and hj["Stop"][0]["timeout"] > 110 and hj["PreToolUse"][0]["hooks"][0]["timeout"] > 110, str(hj)[:300])
+    # agy waits for PreInvocation before every model call (measured on 1.5.5): a short timeout.
+    s.check("agy hooks: PreInvocation (a turn's start), timeout 30 s at most",
+            0 < hj["PreInvocation"][0]["timeout"] <= 30 and "agy PreInvocation" in hj["PreInvocation"][0]["command"], str(hj.get("PreInvocation"))[:300])
     # The real plugin installed where agy puts it, run from the workspace. The device's answer
     # shows that the plugin's script ran (with nothing found the command answers allow too).
     shutil.copytree(ROOT / "plugins" / "antigravity", places["installed"])
@@ -6147,6 +6158,215 @@ def t_v2_state(s):
         tun.wait(5)
 
 
+def t_v2_state_turns(s):
+    """SimpleTerm if/event-v2-turn#state: a turn's end starts the state comparison over (issue #805). After each kind
+    of turn end of the six agents the next turn's `running` reaches the tunnel, and a state that ends a turn goes even
+    when it is the last one sent (Antigravity's second pause in one session, with or without its turn start).
+    Antigravity's turn starts at the first `PreInvocation` of a turn (`invocationNum` 0); a later one sends nothing.
+    One state a second still holds: a state that waits for its second is replaced by a newer state and dropped by a
+    turn end that came meanwhile (it must not arrive after it), and `sub_start` / `sub_stop` neither reset nor wait."""
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})])
+        tctl("/_ctl/reset", {})
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown")}})
+
+        def evs(sid):
+            """The session's tunnel events in the order they came: the state for a `state`, else the event (not
+            the `resolved` of a request)."""
+            out = []
+            for r in tctl("/_ctl/records")["records"]:
+                p = r.get("plain_json") or {}
+                if r["path"] == "/v1/ingest" and p.get("sid") == sid and r["body"]["ev"] != "resolved":
+                    out.append(p.get("st") if r["body"]["ev"] == "state" else r["body"]["ev"])
+            return out
+
+        task = [{"id": "sh_1", "type": "shell", "command": "sleep 30"}]
+        cron = [{"id": "c1", "schedule": "*/5 * * * *", "recurring": True, "prompt": "check the deploy"}]
+        ask = "Should I use A or B?"
+
+        # --- the steps: (agent, input, env, argv, the event it sends or None)
+        def cc(sid, name, want, **kw):
+            return ("claude", cc_event(sid, name, **kw), {}, (), want)
+
+        def cc_stop(sid, want, last="All tests pass.", tasks=(), crons=()):
+            return cc(sid, "Stop", want, stop_hook_active=False, last_assistant_message=last, background_tasks=list(tasks),
+                      session_crons=list(crons))
+
+        def cc_start(sid, **kw):
+            return cc(sid, "UserPromptSubmit", "running", **dict({"prompt": "go on"}, **kw))
+
+        def cx(sid, name, want, **kw):
+            return ("codex", json.dumps(dict({"session_id": sid, "cwd": "/w/repo", "hook_event_name": name}, **kw)), {}, (), want)
+
+        tid = "11111111-2222-4333-8444-555555555555"
+
+        def cx_start(sid):
+            return cx(sid, "UserPromptSubmit", "running", prompt="go on", turn_id=tid)
+
+        def gk(sid, n, event, want, **kw):
+            inp, env = grok_input(event, sessionId=sid, session_id=sid, promptId="%s-p%d" % (sid, n),
+                                  timestamp="2026-11-24T10:00:%02d.000Z" % (n * 2 + (event != "UserPromptSubmit")), **kw)
+            return ("claude", inp, env, (), want)
+
+        def gk_stop(sid, n, want, last="Done.", tasks=()):
+            return gk(sid, n, "Stop", want, reason="end_turn", stopHookActive=False, lastAssistantMessage=last,
+                      backgroundTasks=list(tasks))
+
+        def oc(sid, name, want, **kw):
+            return ("opencode", json.dumps(dict({"hook_event_name": name, "session_id": sid, "cwd": "/w/o", "oc": "2"}, **kw)), {}, (), want)
+
+        cop_env = {"COPILOT_CLI": "1", "COPILOT_CLI_BINARY_VERSION": "1.0.109"}
+
+        def cop(sid, hook, want, **kw):
+            return ("copilot", json.dumps(dict({"sessionId": sid, "timestamp": 1793635914148, "cwd": "/w/proj"}, **kw)), cop_env, (hook,), want)
+
+        def agy_pre(sid, n=0):
+            j = {"conversationId": sid, "workspacePaths": ["/w/agyproj"], "transcriptPath": "/x/t.jsonl", "modelName": "m",
+                 "artifactDirectoryPath": "/x/art", "invocationNum": n, "initialNumSteps": 1 + 2 * n, "lastUserInput": "go on"}
+            return ("agy", json.dumps(j), {}, ("PreInvocation",), "running" if n == 0 else None)
+
+        def agy_end(sid, want, **kw):
+            return ("agy", agy_stop(conversationId=sid, **kw), {}, ("Stop",), want)
+
+        rollout = write(s.tmp / "rollout-plan.jsonl", json.dumps({"type": "event_msg", "payload": {
+            "type": "item_completed", "turn_id": tid, "item": {"type": "Plan", "id": "p1", "text": "1. Add the test"}}},
+            separators=(",", ":")) + "\n")
+        plan_write = agy_input("write_file", {"Path": "/w/agyproj/plan.md", "Content": "1. x", "ArtifactMetadata": {"RequestFeedback": True}})
+
+        def turn(start, end, sid):
+            """start, end, start: the end's event, then the next turn's running."""
+            return [start(sid), end(sid), start(sid)]
+
+        claude = [
+            ("done", lambda sid: turn(cc_start, lambda x: cc_stop(x, "done"), sid)),
+            ("done asking", lambda sid: turn(cc_start, lambda x: cc_stop(x, "done", last=ask), sid)),
+            ("question with work left", lambda sid: turn(cc_start, lambda x: cc_stop(x, "question", last=ask, tasks=task), sid)),
+            ("background", lambda sid: turn(cc_start, lambda x: cc_stop(x, "background", last="Started it.", tasks=task), sid)),
+            ("error", lambda sid: turn(cc_start, lambda x: cc(x, "StopFailure", "error", error="server_error", last_assistant_message="x"), sid)),
+            ("auth", lambda sid: turn(cc_start, lambda x: cc(x, "StopFailure", "auth", error="authentication_failed", last_assistant_message="x"), sid)),
+            ("Esc", lambda sid: turn(cc_start, lambda x: cc(x, "PostToolUseFailure", "idle", tool_name="Bash", is_interrupt=True), sid)),
+            ("scheduled", lambda sid: [cc_start(sid, prompt="check the deploy", source="schedule_wakeup"),
+                                       cc_stop(sid, "scheduled", last="Still deploying.", crons=cron), cc_start(sid)]),
+            ("scheduled, the last", lambda sid: [cc_start(sid, prompt="check the deploy", source="schedule_wakeup"),
+                                                 cc_stop(sid, "done", last="Deployed."), cc_start(sid)]),
+            # A subagent's start and stop go each time and leave the comparison alone.
+            ("done with a subagent around it", lambda sid: [
+                cc_start(sid), cc(sid, "SubagentStart", "sub_start", agent_id="ag1", agent_type="explore"), cc_stop(sid, "done"),
+                cc(sid, "SubagentStop", "sub_stop", agent_id="ag1", agent_type="explore"), cc_start(sid)]),
+        ]
+        codex = [
+            ("done", lambda sid: turn(cx_start, lambda x: cx(x, "Stop", "done", last_assistant_message="Done.", turn_id=tid), sid)),
+            ("plan", lambda sid: turn(cx_start, lambda x: cx(x, "Stop", "question", last_assistant_message="Plan.", turn_id=tid,
+                                                              transcript_path=str(rollout)), sid)),
+        ]
+        grok = [
+            ("done", lambda sid: [gk(sid, 1, "UserPromptSubmit", "running", prompt="go"), gk_stop(sid, 1, "done"),
+                                  gk(sid, 2, "UserPromptSubmit", "running", prompt="go")]),
+            ("done asking", lambda sid: [gk(sid, 1, "UserPromptSubmit", "running", prompt="go"), gk_stop(sid, 1, "done", last=ask),
+                                         gk(sid, 2, "UserPromptSubmit", "running", prompt="go")]),
+            ("question with work left", lambda sid: [gk(sid, 1, "UserPromptSubmit", "running", prompt="go"),
+                                                     gk_stop(sid, 1, "question", last=ask, tasks=task),
+                                                     gk(sid, 2, "UserPromptSubmit", "running", prompt="go")]),
+            ("background", lambda sid: [gk(sid, 1, "UserPromptSubmit", "running", prompt="go"), gk_stop(sid, 1, "background", tasks=task),
+                                        gk(sid, 2, "UserPromptSubmit", "running", prompt="go")]),
+            ("error", lambda sid: [gk(sid, 1, "UserPromptSubmit", "running", prompt="go"),
+                                   gk(sid, 1, "StopFailure", "error", error="server_error", lastAssistantMessage="x"),
+                                   gk(sid, 2, "UserPromptSubmit", "running", prompt="go")]),
+            ("auth", lambda sid: [gk(sid, 1, "UserPromptSubmit", "running", prompt="go"),
+                                  gk(sid, 1, "StopFailure", "auth", error="authentication_failed", lastAssistantMessage="x"),
+                                  gk(sid, 2, "UserPromptSubmit", "running", prompt="go")]),
+            ("Ctrl+C", lambda sid: [gk(sid, 1, "UserPromptSubmit", "running", prompt="go"),
+                                    gk(sid, 1, "StopCancelled", "idle", reason="user_interrupt", cancelTrigger="ctrl_c"),
+                                    gk(sid, 2, "UserPromptSubmit", "running", prompt="go")]),
+        ]
+        opencode = [
+            ("done", lambda sid: turn(lambda x: oc(x, "UserPromptSubmit", "running"), lambda x: oc(x, "Stop", "done", last_assistant_message="t"), sid)),
+            ("background", lambda sid: turn(lambda x: oc(x, "UserPromptSubmit", "running"),
+                                            lambda x: oc(x, "Stop", "background", last_assistant_message="t", background_tasks=task), sid)),
+            ("error", lambda sid: turn(lambda x: oc(x, "UserPromptSubmit", "running"), lambda x: oc(x, "StopFailure", "error", error="APIError", message="x"), sid)),
+            ("auth", lambda sid: turn(lambda x: oc(x, "UserPromptSubmit", "running"), lambda x: oc(x, "StopFailure", "auth", error="ProviderAuthError", message="x"), sid)),
+        ]
+        copilot = [
+            ("done", lambda sid: turn(lambda x: cop(x, "userPromptSubmitted", "running", prompt="go on"),
+                                      lambda x: cop(x, "agentStop", "done", stopReason="end_turn"), sid)),
+            ("error", lambda sid: turn(lambda x: cop(x, "userPromptSubmitted", "running", prompt="go on"),
+                                       lambda x: cop(x, "errorOccurred", "error", errorContext="model_call", recoverable=False,
+                                                     error={"message": "boom", "name": "Error"}), sid)),
+        ]
+        agy = [
+            ("done", lambda sid: turn(agy_pre, lambda x: agy_end(x, "done"), sid)),
+            ("background", lambda sid: turn(agy_pre, lambda x: agy_end(x, "background", fullyIdle=False), sid)),
+            ("error", lambda sid: turn(agy_pre, lambda x: agy_end(x, "error", error="quota exceeded", terminationReason="ERROR"), sid)),
+            ("plan", lambda sid: [agy_pre(sid), ("agy", json.dumps(dict(json.loads(plan_write), conversationId=sid)), {}, ("PostToolUse",), None),
+                                  agy_end(sid, "question"), agy_pre(sid)]),
+            # The second pause of a session (#805): its report's turn, done, then a new turn that pauses again. A later
+            # model call of a turn (invocationNum 1) sends nothing.
+            ("second pause", lambda sid: [agy_pre(sid), agy_pre(sid, 1), agy_end(sid, "background", fullyIdle=False), agy_pre(sid),
+                                          agy_end(sid, "done"), agy_pre(sid), agy_pre(sid, 1), agy_end(sid, "background", fullyIdle=False)]),
+            # Without the turn start (a hooks file of 0.9.0 and older) the second pause still goes.
+            ("second pause, no turn start", lambda sid: [agy_end(sid, "background", fullyIdle=False), agy_end(sid, "done"),
+                                                         agy_end(sid, "background", fullyIdle=False)]),
+        ]
+        groups = [("claude", claude), ("codex", codex), ("grok", grok)]
+        if s.kind == "sh":
+            groups += [("opencode", opencode), ("copilot", copilot), ("agy", agy)]
+
+        def run_group(name, cases):
+            for i, (label, make) in enumerate(cases):
+                sid = "stt-%s-%d" % (name, i)
+                steps = make(sid)
+                want = []
+                for agent, inp, env, argv, ev in steps:
+                    s.run(agent, inp, env, args=argv)
+                    if ev:
+                        want.append(ev)
+                        # One state a second: the next turn's running may wait a second.
+                        wait_for(lambda: len(evs(sid)) >= len(want), 6)
+                cases[i] = (label, sid, want)
+
+        threads = [threading.Thread(target=run_group, args=g) for g in groups]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(300)
+        s.settle("the hooks' state sends")
+        for name, cases in groups:
+            for label, sid, want in cases:
+                got = evs(sid)
+                s.check("state turns: %s %s -> %s" % (name, label, ", ".join(want)), got == want, "%s: %s" % (sid, got))
+
+        if s.kind != "sh":  # SIMPLETERM_HOOK_TEST_NOW is the sh hook's
+            return
+        # One second, pinned (SIMPLETERM_HOOK_TEST_NOW): the state of the second turn start waits for its second.
+        pin = {"SIMPLETERM_HOOK_TEST": "1", "SIMPLETERM_HOOK_TEST_NOW": str(int(time.time()))}
+        # The turn ends before that second is over (Codex sends done at once): the waiting running is dropped, so no
+        # running comes after the turn's done.
+        sid = "stt-pin-codex"
+        for name, extra in (("UserPromptSubmit", {"prompt": "a"}), ("Stop", {"last_assistant_message": "A."}),
+                            ("UserPromptSubmit", {"prompt": "b"}), ("Stop", {"last_assistant_message": "B."})):
+            s.run("codex", json.dumps(dict({"session_id": sid, "cwd": "/w/repo", "hook_event_name": name, "turn_id": tid}, **extra)), pin)
+        wait_for(lambda: len(evs(sid)) >= 3, 6)
+        s.settle("the hooks' state sends (a second's wait)")
+        got = evs(sid)
+        s.check("state turns: a running that waits for its second and a done before it -> no running after the done",
+                got == ["running", "done", "done"], str(got))
+        # Esc and the next prompt within the second: the next state replaces the waiting idle and goes a second later.
+        sid = "stt-pin-claude"
+        for step in (cc_start(sid), cc(sid, "PostToolUseFailure", None, tool_name="Bash", is_interrupt=True), cc_start(sid)):
+            s.run(step[0], step[1], pin)
+        t0 = time.time()
+        wait_for(lambda: len(evs(sid)) >= 2, 6)
+        el = time.time() - t0
+        s.settle("the hooks' state sends (a second's wait)")
+        got = evs(sid)
+        s.check("state turns: Esc then a prompt within one second -> the running replaces the waiting idle, a second later",
+                got == ["running", "running"] and el > 0.3, "%s %.2fs" % (got, el))
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+
 def t_v2_sessions(s):
     """SimpleTerm if/session-record#files: the session records of SimpleTerm sessions."""
     s.setup([(LINK_A, {"push": "disabled"})])
@@ -7400,7 +7620,7 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_schedule, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js, t_opencode_schedule,
          t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_usage_ask_gate, t_v2_usage_ask_refresh, t_usage_ask_refresh_vectors, t_conf_vectors, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_held, t_v2_held_bg, t_v2_not_sent,
-         t_v2_state, t_v2_sessions, t_v2_mux, t_v2_tab, t_v2_opencode_js, t_copilot_hooks, t_copilot, t_copilot_schedules,
+         t_v2_state, t_v2_state_turns, t_v2_sessions, t_v2_mux, t_v2_tab, t_v2_opencode_js, t_copilot_hooks, t_copilot, t_copilot_schedules,
          t_v2_versions, t_v2_claude_question_once, t_hooks_removed_plugin]
 
 # The cases where the shell and openssl meet (the compat set): the openssl calls (random hex, SHA-256 read

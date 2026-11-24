@@ -2065,9 +2065,12 @@ EOF
 
 # A state event (SimpleTerm if/event-v2-turn#state) to the tunnels, when the session's state
 # changed, one a second at most (a change within the second goes a second
-# later unless another replaced it). A subagent's start or stop is an event
-# of its own: sent each time, at once, and it neither replaces a session
-# state nor is replaced by one. $2: extra parameter lines (the turn).
+# later unless another replaced it). A turn's end starts the comparison over:
+# a state that ends a turn ($2, the turn's lines: background, scheduled, idle)
+# is followed by whatever state comes next, as every other turn end is
+# (st_end). A subagent's start or stop is an event of its own: sent each
+# time, at once, and it neither replaces a session state nor is replaced by
+# one. $2: extra parameter lines (the turn).
 send_state() { # st [extra]
   [ -n "$LINKS" ] && has_tunnel || return 0
   sf=$RUN_DIR/$SID.st sl=''
@@ -2093,7 +2096,11 @@ send_state() { # st [extra]
       return 0
       ;;
   esac
-  printf '%s %s %s\n' "$1" "$NOW" "$srid" >"$sf" 2>/dev/null
+  # Line: the state to compare with (`-` after a turn's end: none), its second,
+  # its rid (a state waiting for its second goes only while this is its rid).
+  sv=$1
+  [ -n "${2:-}" ] && sv=-
+  printf '%s %s %s\n' "$sv" "$NOW" "$srid" >"$sf" 2>/dev/null
   if [ "${sl#* }" != "$sl" ] && [ "$(printf '%s' "$sl" | cut -d' ' -f2)" = "$NOW" ]; then
     trap '' HUP
     (
@@ -2105,6 +2112,19 @@ send_state() { # st [extra]
     send_bg state "$srid" tunnel
   fi
   SPEC=$ss V2X=$sx NOMSG=$sm
+}
+
+# A turn ended without a state event (`done`, a question, `error`, `auth`):
+# the comparison of send_state starts over (SimpleTerm if/event-v2-turn#state), so the
+# next turn's `running` goes though it was the last state sent. A state still
+# waiting for its second is dropped: the turn's end replaced it, and it must
+# not reach the app after that end. Its second stays, so the limit of one
+# state a second counts states only.
+st_end() {
+  se_f=$RUN_DIR/$SID.st
+  [ -f "$se_f" ] || return 0
+  se_t=$(cut -d' ' -f2 "$se_f" 2>/dev/null)
+  printf '%s %s %s\n' - "$se_t" - >"$se_f" 2>/dev/null
 }
 
 # --- session records (SimpleTerm if/session-record#files) --------------------------------------------
@@ -5026,6 +5046,9 @@ NOW=$TS
 if [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ]; then
   [ -n "${SIMPLETERM_HOOK_TEST_RID:-}" ] && RID=$SIMPLETERM_HOOK_TEST_RID
   [ -n "${SIMPLETERM_HOOK_TEST_TS:-}" ] && TS=$SIMPLETERM_HOOK_TEST_TS
+  # The second the state limit counts in (send_state), pinned so that a test
+  # can put several hooks in one second.
+  case ${SIMPLETERM_HOOK_TEST_NOW:-} in '' | *[!0-9]*) ;; *) NOW=$SIMPLETERM_HOOK_TEST_NOW ;; esac
 fi
 is_hex "$RID" 16 || RID=''
 is_uint "$TS" || TS=0
@@ -5083,7 +5106,7 @@ case $AGENT in
     ;;
   agy)
     # toolCall.args has no Cwd in 1.4.12 (the workspace is workspacePaths).
-    WANT='conversationId,workspacePaths.0,workspacePaths.1,workspacePaths.2,workspacePaths.3,workspacePaths.4,workspacePaths.5,workspacePaths.6,workspacePaths.7,toolCall.name,toolCall.args.CommandLine,toolCall.args.questions.0.question,toolCall.args.Path,toolCall.args.ServerName,toolCall.args.ToolName,toolCall.args.ArtifactMetadata.RequestFeedback,terminationReason,error,fullyIdle,executionNum,stepIdx,transcriptPath,lastUserInput'
+    WANT='conversationId,workspacePaths.0,workspacePaths.1,workspacePaths.2,workspacePaths.3,workspacePaths.4,workspacePaths.5,workspacePaths.6,workspacePaths.7,toolCall.name,toolCall.args.CommandLine,toolCall.args.questions.0.question,toolCall.args.Path,toolCall.args.ServerName,toolCall.args.ToolName,toolCall.args.ArtifactMetadata.RequestFeedback,terminationReason,error,fullyIdle,executionNum,stepIdx,transcriptPath,lastUserInput,invocationNum'
     ;;
   grok)
     # backgroundTasks (Grok's Stop, camelCase): the first ten tasks.
@@ -5105,7 +5128,7 @@ EVENT='' NTYPE='' TOOL='' DETAIL='' DESC='' SID='' CWD='' LAST='' ERR='' QTEXT='
 HB_KIND='' HB_APID='' HB_RESBASE=''
 TPATH='' CTXTOK='' MODEL='' GTYPE='' FULLYIDLE='' TERMREASON='' EXTRA='' GKEY='' REASON=''
 PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS='' REQIDIN='' TOOLUSEID=''
-OCTITLE='' OCBY='' OCCOST='' OCTIN='' OCTOUT='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX=''
+OCTITLE='' OCBY='' OCCOST='' OCTIN='' OCTOUT='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX='' AINV=''
 BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_VAL=''
 BG_SVC=0 BG_IDMAP='' BG_KEEP='' BG_SHELLS='' BG_IDS='' BG_NOID=0 BG_M=''
 CRON_N=0 CRON_SCHED='' CRON_SUMS='' CRON_IDS='' PROMPT_SCHED='' COPILOT_SRC='' COPILOT_REP='' COPILOT_DET='' REPORT_ID=''
@@ -5651,6 +5674,7 @@ while IFS= read -r kv; do
     toolCall.args.ServerName=*) AMS=${kv#*=} ;;
     toolCall.args.ToolName=*) AMT=${kv#*=} ;;
     lastUserInput=*) LASTIN=${kv#*=} ;;
+    invocationNum=*) AINV=${kv#*=} ;;
     hookName=*) [ -n "$EVENT" ] || EVENT=${kv#*=} ;;
     error.name=*) ERR=${kv#*=} ;;
     error.message=*) LAST=${kv#*=} ;;
@@ -5699,6 +5723,12 @@ EOF
 [ "$AGENT" = codex-notify ] && EVENT=notify
 # Antigravity hooks name their event on the command line.
 [ "$AGENT" = agy ] && EVENT=$MODE
+# Antigravity runs PreInvocation before every model call. Only the first of a
+# turn (invocationNum 0, or none given) is the turn's start (agy:PreInvocation
+# below); a later one ends here.
+if [ "$AGENT:$EVENT" = agy:PreInvocation ]; then
+  case $AINV in '' | 0) ;; *) finish ;; esac
+fi
 if [ "$AGENT" = grok ]; then
   case $EVENT in
     notification) EVENT=Notification ;;
@@ -5848,6 +5878,7 @@ bg_pause() {
     turn_at background true
     v2_prep "$TURN_AT"
     send_bg question
+    st_end
     print_state waiting "$LAST"
     return 0
   fi
@@ -6255,6 +6286,7 @@ stop_done() {
   else
     done_later
   fi
+  st_end
   # The turn's done is sent (or pending): Claude Code's idle_prompt, 60 s
   # later, repeats it (the next turn note takes the mark back).
   # (printf, not `:`: a failed redirection of a special builtin ends the shell.)
@@ -6799,6 +6831,7 @@ case $AGENT:$EVENT in
       rk_at codex_plan "@.plan${TAB}s$TAB$plan$NL"
       v2_prep "$RK_AT"
       send_bg question
+      st_end
       usage_report
       turn_end
       sess_turn idle
@@ -6826,6 +6859,7 @@ case $AGENT:$EVENT in
     turn_at "$te"
     v2_prep "$TURN_AT"
     send_bg "$ev"
+    st_end
     usage_report
     # The turn failed (SimpleTerm spec/turn-state): the error badge and its
     # alert, which the event above pairs with. `idle` first: an app older
@@ -6921,6 +6955,14 @@ case $AGENT:$EVENT in
         ;;
     esac
     ;;
+  agy:PreInvocation)
+    # A turn's first model call (later ones ended above): Antigravity has no
+    # prompt hook, and this one comes for a person's prompt, a background
+    # task's report and a scheduled run alike (SimpleTerm if/event-v2-turn#state).
+    note turn
+    send_state running
+    sess_turn running "$LASTIN"
+    ;;
   agy:Stop)
     # Only a fully idle agent is done (background tasks may still run).
     # Cancelling (Esc) sends no Stop at all.
@@ -6933,6 +6975,7 @@ case $AGENT:$EVENT in
       rk_at agy_plan
       v2_prep "$RK_AT"
       [ -n "$LINKS" ] && request_flow question agyplan
+      st_end
       turn_end
       sess_turn idle
       finish
@@ -6943,6 +6986,7 @@ case $AGENT:$EVENT in
       turn_at error
       v2_prep "$TURN_AT"
       send_bg error
+      st_end
     elif [ "$FULLYIDLE" = true ] || [ "$FULLYIDLE" = false ]; then
       # Who opened the turn and what is left, from the record (agy_turn;
       # fullyIdle true: nothing is left, measured on 1.5.5). A turn a schedule
@@ -6956,6 +7000,7 @@ case $AGENT:$EVENT in
         turn_at done
         v2_prep "$TURN_AT"
         if [ "$TURN_BY" = schedule ]; then send_bg done "" tunnel; else send_bg done; fi
+        st_end
       elif [ "$AGY_CMD" -eq 0 ] && [ "$AGY_SCHED" -gt 0 ]; then
         CRON_N=$AGY_SCHED CRON_SCHED=$AGY_DESC
         bg_pause
@@ -7030,6 +7075,7 @@ case $AGENT:$EVENT in
       turn_at "$te"
       v2_prep "$TURN_AT"
       send_bg "$ev"
+      st_end
       turn_end
       turn_close
     fi
@@ -7095,6 +7141,7 @@ case $AGENT:$EVENT in
     turn_at error
     v2_prep "$TURN_AT"
     send_bg "$ev"
+    st_end
     sess_turn idle
     ;;
   copilot:permissionRequest)
@@ -7168,6 +7215,7 @@ case $AGENT:$EVENT in
     turn_at error
     v2_prep "$TURN_AT"
     send_bg error
+    st_end
     sess_turn idle
     ;;
 esac
