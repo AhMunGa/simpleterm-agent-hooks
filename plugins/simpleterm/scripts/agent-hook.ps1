@@ -4951,6 +4951,10 @@ function Get-HeldOpenGrok {
 # (statusUpdatedAt unchanged), and no other permission hook of this session
 # waits on that same window (Get-RqAlone) (rq_window).
 function Get-RqWindow([int]$agentPid) {
+    # RqWState, for Test-RqClosed: closed when this session no longer waits on
+    # anything (it went on), shared when its window is open with another
+    # permission hook on it; empty for every other answer.
+    $Script:RqWState = ''
     if ($Script:Agent -cne 'claude' -or $agentPid -le 0 -or -not $Script:RqMark) { return 1 }
     $dir = $env:CLAUDE_CONFIG_DIR
     if (-not $dir) { $dir = Join-Path $HOME '.claude' }
@@ -4972,6 +4976,10 @@ function Get-RqWindow([int]$agentPid) {
         elseif ($wfor -ceq 'input needed' -and $Script:Tool -ceq 'AskUserQuestion') { $kind = 0 }
         else { $kind = 3 }
     }
+    # gone: this session waits on nothing now. Another window in the place of
+    # the one first seen (waiting, another statusUpdatedAt) is not that: the
+    # file does not say whose it is.
+    $gone = [bool]($Script:RawSid -and $wsid -ceq $Script:RawSid -and $wst -cne 'waiting')
     if (-not $Script:RqWat) {
         if ($kind -eq 1) { return 2 }
         # The window shown when the hook started (it starts 5 to 45 ms after
@@ -4983,10 +4991,69 @@ function Get-RqWindow([int]$agentPid) {
         $Script:RqWat = $wat
         if ($Script:RqMark) { [void](Write-FileB $Script:RqMark ($wat + "`n")) }
     }
-    if ($wat -cne $Script:RqWat) { return 1 }
+    if ($wat -cne $Script:RqWat) {
+        if ($gone) { $Script:RqWState = 'closed' }
+        return 1
+    }
     if ($kind -eq 3) { Set-RqUnknown $wfor; return 3 }
-    if ($kind -ne 0) { return 1 }
-    return (Get-RqAlone)
+    if ($kind -ne 0) {
+        if ($gone) { $Script:RqWState = 'closed' }
+        return 1
+    }
+    $alone = Get-RqAlone
+    if ($alone -eq 1) { $Script:RqWState = 'shared' }
+    return $alone
+}
+
+# True when the agent's own window for this request closed while the hook
+# lives on: answered at the terminal (SimpleTerm if/ssh-tunnel-wait#window-closed).
+# Claude Code keeps a permission hook until the allowed tool ends [measured],
+# so the tool's end (Test-AnsweredLocally) can be minutes away, and a denial
+# ends the hook instead. The hook must have seen the window open and its own
+# (Get-RqWindow 0: RqSeen), and two looks in a row must then say the session
+# waits on nothing (it went on). The first look is made before the request is
+# sent (Invoke-RequestFlow): a link can take seconds to answer, and an answer
+# at the terminal in that time would leave no look with the window open.
+# Another window in its place (waiting, another statusUpdatedAt), a window
+# shared with another permission hook ("1 of 2": one that joins after the
+# first look takes RqSeen back), one never seen, a file that cannot be read:
+# nothing to tell by, and the wait goes on as before. Ending a request the
+# user can still answer in the app is the worse mistake, so only the plain
+# reading ends it (rq_closed).
+function Test-RqClosed([int]$agentPid) {
+    if ($Script:Agent -cne 'claude') { return $false }
+    $w = Get-RqWindow $agentPid
+    if ($w -eq 0) {
+        $Script:RqSeen = $true
+        $Script:RqShut = 0
+        return $false
+    }
+    if ($w -eq 1 -and $Script:RqWState -ceq 'shared') {
+        $Script:RqSeen = $false
+        $Script:RqShut = 0
+        return $false
+    }
+    if ($w -ne 1 -or $Script:RqWState -cne 'closed') {
+        $Script:RqShut = 0
+        return $false
+    }
+    # Another permission hook that saw the same window lives on (its mark
+    # holds the same statusUpdatedAt): the window was shared after all, even
+    # if no look found the two on it together. One that has not read its
+    # window yet: not known, and this look does not count.
+    $alone = Get-RqAlone
+    if ($alone -eq 1) {
+        $Script:RqSeen = $false
+        $Script:RqShut = 0
+        return $false
+    }
+    if ($alone -ne 0) {
+        $Script:RqShut = 0
+        return $false
+    }
+    if (-not $Script:RqSeen) { return $false }
+    $Script:RqShut = $Script:RqShut + 1
+    return ($Script:RqShut -ge 2)
 }
 
 # The waitingFor value for the log (SimpleTerm if/ssh-tunnel-wait#open-window): only ASCII letters, digits,
@@ -5192,6 +5259,9 @@ function Invoke-RequestFlow([string]$ev, [string]$mode) {
     $Script:RqWat = ''
     $Script:RqUnk = ''
     $Script:RqMiss = 0
+    $Script:RqSeen = $false
+    $Script:RqShut = 0
+    $Script:RqWState = ''
     $Script:RqHeldNext = [DateTime]::MinValue
     # This session's waiting permission hooks, for Get-RqAlone.
     $Script:RqMark = ''
@@ -5199,6 +5269,8 @@ function Invoke-RequestFlow([string]$ev, [string]$mode) {
         $mark = Join-Path $RunDir ('perm.' + $Sid + '.' + $PID)
         if (Write-FileB $mark '') { $Script:RqMark = $mark }
     }
+    # The first look at the agent's window, before anything is sent (rq_closed).
+    [void](Test-RqClosed $agentPid)
     function Get-Remain { $r = $deadline - (Now-Epoch); if ($r -lt 1) { $r = 1 }; if ($r -gt 20) { $r = 20 }; return $r }
     if ($mode -ceq 'shared') {
         Send-RqPass $links 'all' $true '' $ev 20 $Script:Rid
@@ -5253,6 +5325,11 @@ function Invoke-RequestFlow([string]$ev, [string]$mode) {
             $nextCheck = [DateTime]::UtcNow.AddSeconds(1)
             if (Test-AnsweredLocally $start $Script:Fp) {
                 Write-Log 'permission answered-at-terminal'
+                $out = 'terminal'
+                break
+            }
+            if (Test-RqClosed $agentPid) {
+                Write-Log 'permission answered-at-terminal (window closed)'
                 $out = 'terminal'
                 break
             }

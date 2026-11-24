@@ -5499,6 +5499,163 @@ def t_v2_held(s):
             s.check("held: %s: not told again, one log line with the value" % name,
                     done and out.strip() == "" and len(asks()) == 1 and s.log_text().count(line) - n0 == 1,
                     "%d %r %s" % (len(asks()), line, s.log_text()[-400:]))
+        # Answered at the terminal while the app shows the request (the tunnel answered sent and the hook
+        # waits on it). Claude Code keeps a permission hook until the allowed tool ends [measured], which can
+        # be minutes, and until 0.8.0 the hook learnt of the answer only then (PostToolUse). The session file
+        # says the prompt closed at once: a hook that saw its window open and its own, and then twice in a
+        # row that the session waits on nothing, ends with the result terminal (SimpleTerm
+        # if/ssh-tunnel-wait#window-closed, issue AhMunGa/simple-term#895).
+        def polls():
+            return [r for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/decision"]
+
+        def answered():
+            return s.log_text().count("permission answered-at-terminal")
+
+        for name, change in (("the prompt closed (busy)", {"status": "busy", "waiting_for": None, "at": 1793232009000}),
+                             ("the prompt closed (idle)", {"status": "idle", "waiting_for": None, "at": 1793232009000})):
+            setup(["sent"])
+            n0 = answered()
+            agent, hook = start()
+            s.check("closed: %s: the hook waits on the tunnel" % name, wait_for(lambda: polls(), 20), s.log_text()[-300:])
+            # (A set time on purpose: the hook looks once a second, and that it went on waiting is all there
+            # is to see. 3.5 s is three looks with the prompt open.)
+            time.sleep(3.5)
+            s.check("closed: %s: the prompt open: it goes on waiting" % name, agent.poll() is None and answered() == n0)
+            t = time.time()
+            state(agent.pid, **change)
+            done, out = finished(agent, 20)
+            el = time.time() - t
+            # (At least a second: one look that says closed is not enough, the second comes a second on.)
+            s.check("closed: %s: the hook ends with no decision, as answered at the terminal, after two looks" % name,
+                    done and out.strip() == "" and 1.0 <= el < 12 and answered() - n0 == 1,
+                    "%r %.1fs %s" % (out, el, s.log_text()[-300:]))
+            s.check("closed: %s: the request's result says terminal" % name,
+                    wait_for(lambda: results(), 5) and results()[-1].get("out") == "terminal", str(results())[:300])
+        # Another window in its place (waiting, another statusUpdatedAt): the file does not say whose it
+        # is, and a request the user can still answer in the app is not ended on a guess. When the session
+        # then waits on nothing, every window of it is closed, this one too.
+        setup(["sent"])
+        n0 = answered()
+        agent, hook = start()
+        s.check("closed: another window: the hook waits on the tunnel", wait_for(lambda: polls(), 20), s.log_text()[-300:])
+        time.sleep(2.5)  # (two looks with its own window open, as above)
+        state(agent.pid, at=1793232011111)
+        time.sleep(4.5)  # (four looks at the other window)
+        s.check("closed: another window in its place (waiting, another statusUpdatedAt): ends nothing",
+                agent.poll() is None and answered() == n0, s.log_text()[-300:])
+        state(agent.pid, status="idle", waiting_for=None, at=1793232015000)
+        done, out = finished(agent, 20)
+        s.check("closed: another window, then the session waits on nothing: answered at the terminal",
+                done and out.strip() == "" and answered() - n0 == 1
+                and wait_for(lambda: results(), 5) and results()[-1].get("out") == "terminal",
+                "%r %s %s" % (out, str(results())[:200], s.log_text()[-300:]))
+        # Nothing to tell by — the window never seen open and its own: no session file, another session's
+        # file, another permission hook on the same window ("1 of 2": the file stays as it is when the first
+        # item is answered), a window recorded after the hook's start + 2 s. The session file then ends
+        # nothing, whatever it says later; the wait goes on as in 0.8.0 (here until the agent is gone).
+        run = s.home / ".simpleterm" / "run"
+        for name, st, sibling in (("no session file", {"status": "none"}, False), ("another session's file", {"file_session": "other"}, False),
+                                  ("another permission hook on the window", {}, True),
+                                  ("a window recorded late", {"late": True}, False)):
+            setup(["sent"])
+            run.mkdir(parents=True, exist_ok=True)
+            for old in run.glob("perm.*"):
+                old.unlink()
+            if sibling:
+                (run / ("perm.held-1.%d" % os.getpid())).write_text("1793232000123\n")
+            n0 = answered()
+            if st.pop("late", False):
+                st["at"] = int(time.time() + 30) * 1000
+            agent, hook = start(**st)
+            s.check("closed: %s: the hook waits on the tunnel" % name, wait_for(lambda: polls(), 20), s.log_text()[-300:])
+            if st.get("status") != "none":
+                state(agent.pid, session=st.get("file_session") or "held-1", status="busy", waiting_for=None, at=1793232009000)
+            # (A set time on purpose, as above: four looks at a file that says the prompt is not open.)
+            time.sleep(4.5)
+            s.check("closed: %s: the session file ends nothing" % name, agent.poll() is None and answered() == n0,
+                    s.log_text()[-300:])
+            agent.kill()
+            finished(agent, 10)
+            for mark in run.glob("perm.held-1.%d" % os.getpid()):
+                mark.unlink()
+            s.settle("the hook's end")
+        # Another permission hook joins the window after this hook's first look (the hooks of parallel
+        # tool calls start a moment apart): the window is shared from then on, and what the hook saw
+        # alone no longer counts. The session file ends nothing.
+        setup(["sent"])
+        run.mkdir(parents=True, exist_ok=True)
+        for old in run.glob("perm.*"):
+            old.unlink()
+        n0 = answered()
+        agent, hook = start()
+        s.check("closed: a hook that joins later: the hook waits on the tunnel", wait_for(lambda: polls(), 20), s.log_text()[-300:])
+        (run / ("perm.held-1.%d" % os.getpid())).write_text("1793232000123\n")
+        time.sleep(2.5)  # (two looks at the shared window)
+        state(agent.pid, status="busy", waiting_for=None, at=1793232009000)
+        time.sleep(4.5)  # (four looks at a file that says the prompt is not open)
+        s.check("closed: a hook that joins later: the session file ends nothing", agent.poll() is None and answered() == n0,
+                s.log_text()[-300:])
+        agent.kill()
+        finished(agent, 10)
+        for mark in run.glob("perm.held-1.%d" % os.getpid()):
+            mark.unlink()
+        s.settle("the hook's end")
+        # The other hook's mark comes and the session goes on before this hook looks again (it does not
+        # look while it sends, and a look can fall between the two): no look found the two hooks on the
+        # open window together, but a live hook that holds the same statusUpdatedAt shared it.
+        setup(["sent"])
+        run.mkdir(parents=True, exist_ok=True)
+        for old in run.glob("perm.*"):
+            old.unlink()
+        n0 = answered()
+        agent, hook = start()
+        s.check("closed: a hook that joined unseen: the hook waits on the tunnel", wait_for(lambda: polls(), 20), s.log_text()[-300:])
+        time.sleep(1.5)  # (a look with the window open and its own)
+        (run / ("perm.held-1.%d" % os.getpid())).write_text("1793232000123\n")
+        state(agent.pid, status="busy", waiting_for=None, at=1793232009000)
+        time.sleep(4.5)  # (four looks at a file that says the prompt is not open)
+        s.check("closed: a hook that joined unseen: the session file ends nothing", agent.poll() is None and answered() == n0,
+                s.log_text()[-300:])
+        agent.kill()
+        finished(agent, 10)
+        for mark in run.glob("perm.held-1.%d" % os.getpid()):
+            mark.unlink()
+        s.settle("the hook's end")
+        # Answered while the request is on its way to a slow link (the relay answers a request it will
+        # wait on about 4 seconds later): the hook looked at the window before it sent anything, so it
+        # has seen it open, and the answer is told from the session file once the links have answered.
+        # (No set time before the answer: the hook's mark holds the window's statusUpdatedAt once the
+        # hook has looked.)
+        s.setup([(LINK_A, {"ingest_delay": 4}), (LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})],
+                conf={"claude_wait": 40})
+        tctl("/_ctl/reset", {})
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown", max_body=65536, push="sent", push_seq=["sent"])}})
+        shutil.rmtree(sessions, ignore_errors=True)
+        sessions.mkdir(parents=True)
+        run.mkdir(parents=True, exist_ok=True)
+        for old in run.glob("perm.*"):
+            old.unlink()
+        n0 = answered()
+
+        def looked():
+            try:
+                return any(p.read_text().strip() for p in run.glob("perm.held-1.*"))
+            except OSError:
+                return False
+
+        agent, hook = start()
+        t = time.time()
+        seen = wait_for(looked, 3.5)
+        state(agent.pid, status="busy", waiting_for=None, at=1793232009000)
+        early = time.time() - t
+        done, out = finished(agent, 25)
+        s.check("closed: answered before a slow link took the request: the hook had looked first (%.2f s)" % early,
+                bool(seen) and early < 3.5, "%.2f s %s" % (early, s.log_text()[-300:]))
+        s.check("closed: answered before a slow link took the request: answered at the terminal",
+                done and out.strip() == "" and answered() - n0 == 1
+                and wait_for(lambda: results(), 5) and results()[-1].get("out") == "terminal",
+                "%r %s %s" % (out, str(results())[:200], s.log_text()[-300:]))
+        s.settle("the hook's end")
         # Two tunnels hold it: one round is one rid for both, sent at once (the slower tunnel's answer
         # does not hold back the other's copy; its link file sorts first).
         tun2, tctl2 = s.spawn_mock()

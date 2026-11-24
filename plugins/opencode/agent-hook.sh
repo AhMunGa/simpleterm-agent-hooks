@@ -2953,6 +2953,10 @@ rq_reject() { # i bad|changed
 # question, 2.1.316 and 2.1.317 wrote `permission prompt` [measured]. Only a
 # measured pair of tool and value counts; the version is not read.
 rq_window() {
+  # RQ_WSTATE, for rq_closed: closed when this session no longer waits on
+  # anything (it went on), shared when its window is open with another
+  # permission hook on it; empty for every other answer.
+  RQ_WSTATE=''
   [ "$AGENT" = claude ] && [ -n "$AGENT_PID" ] && [ -n "$RQ_MARK" ] || return 1
   wv=$(head -c 8192 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/$AGENT_PID.json" 2>/dev/null |
     awk -v want=sessionId,status,waitingFor,statusUpdatedAt "$JSON_GET" 2>/dev/null)
@@ -2980,6 +2984,11 @@ EOF
       *) wopen=3 ;;
     esac
   fi
+  # wgone: this session waits on nothing now. Another window in the place of
+  # the one first seen (waiting, another statusUpdatedAt) is not that: the file
+  # does not say whose it is.
+  wgone=0
+  [ -n "$RAWSID" ] && [ "$wsid" = "$RAWSID" ] && [ "$wst" != waiting ] && wgone=1
   if [ -z "$RQ_WAT" ]; then
     [ "$wopen" = 1 ] && return 2
     # The window shown when the hook started (it starts 5 to 45 ms after
@@ -2991,10 +3000,72 @@ EOF
     RQ_WAT=$wat
     [ -n "$RQ_MARK" ] && printf '%s\n' "$wat" 2>/dev/null >"$RQ_MARK"
   fi
-  [ "$wat" = "$RQ_WAT" ] || return 1
+  if [ "$wat" != "$RQ_WAT" ]; then
+    [ "$wgone" = 1 ] && RQ_WSTATE=closed
+    return 1
+  fi
   [ "$wopen" = 3 ] && { rq_unknown "$wfor"; return 3; }
-  [ "$wopen" = 0 ] || return 1
+  if [ "$wopen" != 0 ]; then
+    [ "$wgone" = 1 ] && RQ_WSTATE=closed
+    return 1
+  fi
   rq_alone
+  wal=$?
+  [ "$wal" = 1 ] && RQ_WSTATE=shared
+  return "$wal"
+}
+
+# True when the agent's own window for this request closed while the hook
+# lives on: answered at the terminal (SimpleTerm if/ssh-tunnel-wait#window-closed).
+# Claude Code keeps a permission hook until the allowed tool ends [measured],
+# so the tool's end (answered_locally) can be minutes away, and a denial
+# signals the hook instead. The hook must have seen the window open and its
+# own (rq_window 0: RQ_SEEN), and two looks in a row must then say the session
+# waits on nothing (it went on). The first look is made before the request is
+# sent (request_flow): a link can take seconds to answer, and an answer at the
+# terminal in that time would leave no look with the window open. Another
+# window in its place (waiting, another statusUpdatedAt), a window shared with
+# another permission hook ("1 of 2": one that joins after the first look takes
+# RQ_SEEN back), one never seen, a file that cannot be read: nothing to tell
+# by, and the wait goes on as before. Ending a request the user can still
+# answer in the app is the worse mistake, so only the plain reading ends it.
+rq_closed() {
+  [ "$AGENT" = claude ] || return 1
+  rq_window
+  case $?:$RQ_WSTATE in
+    0:*)
+      RQ_SEEN=1 RQ_SHUT=0
+      return 1
+      ;;
+    1:closed)
+      # Another permission hook that saw the same window lives on (its mark
+      # holds the same statusUpdatedAt): the window was shared after all,
+      # even if no look found the two on it together. One that has not read
+      # its window yet: not known, and this look does not count.
+      rq_alone
+      case $? in
+        1)
+          RQ_SEEN=0 RQ_SHUT=0
+          return 1
+          ;;
+        2)
+          RQ_SHUT=0
+          return 1
+          ;;
+      esac
+      ;;
+    1:shared)
+      RQ_SEEN=0 RQ_SHUT=0
+      return 1
+      ;;
+    *)
+      RQ_SHUT=0
+      return 1
+      ;;
+  esac
+  [ "$RQ_SEEN" = 1 ] || return 1
+  RQ_SHUT=$((RQ_SHUT + 1))
+  [ "$RQ_SHUT" -ge 2 ]
 }
 
 # The waitingFor value for the log (SimpleTerm if/ssh-tunnel-wait#open-window): only ASCII letters,
@@ -3497,12 +3568,15 @@ request_flow() { # ev mode
   rq_sig=gone
   [ "$AGENT" = opencode ] && rq_sig=terminal
   RQ_AGAIN=$((start + 5)) RQ_WAT='' RQ_MISS=0 RQ_MARK='' RQ_FIRE='' RQ_UNK=''
+  RQ_SEEN=0 RQ_SHUT=0 RQ_WSTATE=''
   # This session's waiting permission hooks, for rq_alone.
   if [ "$AGENT" = claude ]; then
     RQ_MARK=$RUN_DIR/perm.$SID.$$
     printf '' 2>/dev/null >"$RQ_MARK" || RQ_MARK=''
   fi
   trap 'rq_finish $rq_sig; log "permission signal"; finish' TERM INT HUP
+  # The first look at the agent's window, before anything is sent (rq_closed).
+  rq_closed
 
   while IFS= read -r f; do
     [ -n "$f" ] || continue
@@ -3582,6 +3656,11 @@ EOF
     [ "$waiting" = 1 ] || break
     if answered_locally "$start" "$FP"; then
       log "permission answered-at-terminal"
+      rq_out=terminal
+      break
+    fi
+    if rq_closed; then
+      log "permission answered-at-terminal (window closed)"
       rq_out=terminal
       break
     fi

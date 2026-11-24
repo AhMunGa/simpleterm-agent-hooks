@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **A Claude Code request answered in the terminal ends at once** (SimpleTerm `if/ssh-tunnel-wait#window-closed`,
+  issue AhMunGa/simple-term#895). Claude Code keeps a `PermissionRequest` hook alive until the tool it allowed
+  has ended, and the waiting hook learnt of the answer only from that tool's `PostToolUse`: the app went on
+  showing the request (its card, "waiting", its alerts) for as long as the tool ran, up to `claude_wait`. The
+  waiting hook now reads Claude's session record (`sessions/<pid>.json`) once a second for every request it
+  waits on, not only for a held one, and once before it sends the request. Once it has seen its own prompt
+  open, alone on it, and two reads in a row then say the session waits on nothing, it ends every wait and sends
+  `resolved` with `out: terminal` (log: `permission answered-at-terminal (window closed)`): about 2 seconds
+  after the answer, or after every link has taken the request when that is later (the relay takes about 4
+  seconds).
+  Nothing to tell by ends nothing: a prompt shared with another permission hook ("1 of 2"), no record, another
+  session's record, a prompt recorded later than the hook's start plus 2 s. The wait then ends as before, at
+  the tool's end. Another prompt in its place (the session still `waiting`, another `statusUpdatedAt`) ends
+  nothing while it is there; once the session then waits on nothing, the wait ends as above. Ending a request
+  the user can still answer in the app would be the worse mistake.
+  Not measured: what the record says while a prompt is open and a subagent of the session works.
+  Both hooks (sh, PowerShell). Tested against a stand-in agent and session record; the PowerShell hook was not
+  run (no `pwsh` on the test machine), and neither hook was run under a real Claude Code.
+
 ## 0.8.0 - 2026-11-24
 
 Which terminal tab a hook runs for (SimpleTerm `if/hook-tab-identity` phase 1, `if/event-v2#common-fields`,
