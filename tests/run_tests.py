@@ -5803,8 +5803,17 @@ def t_v2_held(s):
             return [r for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and r["body"]["ev"] == "permission"]
 
         def results():
-            return [((r.get("plain_json") or {}).get("res") or {}) for r in tctl("/_ctl/records")["records"]
-                    if r["path"] == "/v1/ingest" and r["body"]["ev"] == "resolved"]
+            # Only the results of this step's requests (their req.id): a hook posts its result in the
+            # background after it ends (rq_finish), so under load the result of the step before can
+            # land after this step's reset. Its window result once read as this step's last one.
+            # (A wait on them ends when this step's result comes; 30 s only bounds a machine too loaded
+            # for that background post to land at once.)
+            recs = tctl("/_ctl/records")["records"]
+            reqs = {((r.get("plain_json") or {}).get("req") or {}).get("id") for r in recs
+                    if r["path"] == "/v1/ingest" and r["body"]["ev"] in ("permission", "question")}
+            res = [((r.get("plain_json") or {}).get("res") or {}) for r in recs
+                   if r["path"] == "/v1/ingest" and r["body"]["ev"] == "resolved"]
+            return [x for x in res if x.get("req") and x.get("req") in reqs]
 
         def state(pid, session="held-1", status="waiting", waiting_for="permission prompt", at=1793232000123, raw=False):
             # raw: non-ASCII text as UTF-8, the way Claude Code (JSON.stringify) writes it
@@ -5857,7 +5866,7 @@ def t_v2_held(s):
                 and len({(p.get("req") or {}).get("id") for p in plains}) == 1 and all(r["body"].get("nh") for r in got),
                 str(plains)[:400])
         res = results()
-        s.check("held: the request's result names the last rid", wait_for(lambda: results(), 5)
+        s.check("held: the request's result names the last rid", wait_for(lambda: results(), 30)
                 and results()[-1].get("out") == "applied" and results()[-1].get("rrid") == got[-1]["body"]["rid"], str(res)[:300])
 
         # Answered at the terminal (the prompt closes: busy): nothing again; the hook ends at once.
@@ -5874,7 +5883,7 @@ def t_v2_held(s):
                 done and out.strip() == "" and n == n0 and len(perms()) == n0 and "held: the window is not open" in s.log_text(),
                 "%r n=%d of %d %s" % (out, n, n0, s.log_text()[-300:]))
         s.check("held: its result says window (not terminal: the prompt may be the session's next one)",
-                wait_for(lambda: results(), 5) and results()[-1].get("out") == "window", str(results())[:300])
+                wait_for(lambda: results(), 30) and results()[-1].get("out") == "window", str(results())[:300])
 
         # Another prompt in its place (statusUpdatedAt changed): stop.
         setup(["held"])
@@ -5987,7 +5996,7 @@ def t_v2_held(s):
                     done and out.strip() == "" and 1.0 <= el < 12 and answered() - n0 == 1,
                     "%r %.1fs %s" % (out, el, s.log_text()[-300:]))
             s.check("closed: %s: the request's result says terminal" % name,
-                    wait_for(lambda: results(), 5) and results()[-1].get("out") == "terminal", str(results())[:300])
+                    wait_for(lambda: results(), 30) and results()[-1].get("out") == "terminal", str(results())[:300])
         # Another window in its place (waiting, another statusUpdatedAt): the file does not say whose it
         # is, and a request the user can still answer in the app is not ended on a guess. When the session
         # then waits on nothing, every window of it is closed, this one too.
@@ -6004,7 +6013,7 @@ def t_v2_held(s):
         done, out = finished(agent, 20)
         s.check("closed: another window, then the session waits on nothing: answered at the terminal",
                 done and out.strip() == "" and answered() - n0 == 1
-                and wait_for(lambda: results(), 5) and results()[-1].get("out") == "terminal",
+                and wait_for(lambda: results(), 30) and results()[-1].get("out") == "terminal",
                 "%r %s %s" % (out, str(results())[:200], s.log_text()[-300:]))
         # Nothing to tell by — the window never seen open and its own: no session file, another session's
         # file, a window recorded after the hook's start + 2 s. The session file then ends nothing, whatever
@@ -6077,7 +6086,7 @@ def t_v2_held(s):
             el = time.time() - t
             s.check("closed: %s: every item answered (the session waits on nothing): answered at the terminal" % name,
                     done and out.strip() == "" and 1.0 <= el < 12 and answered() - n0 == 1
-                    and wait_for(lambda: results(), 5) and results()[-1].get("out") == "terminal",
+                    and wait_for(lambda: results(), 30) and results()[-1].get("out") == "terminal",
                     "%r %.1fs %s %s" % (out, el, str(results())[-200:], s.log_text()[-300:]))
             if other is not None:
                 other.kill()
@@ -6164,7 +6173,7 @@ def t_v2_held(s):
                 bool(seen) and early < 3.5, "%.2f s %s" % (early, s.log_text()[-300:]))
         s.check("closed: answered before a slow link took the request: answered at the terminal",
                 done and out.strip() == "" and answered() - n0 == 1
-                and wait_for(lambda: results(), 5) and results()[-1].get("out") == "terminal",
+                and wait_for(lambda: results(), 30) and results()[-1].get("out") == "terminal",
                 "%r %s %s" % (out, str(results())[:200], s.log_text()[-300:]))
         s.settle("the hook's end")
         # Two tunnels hold it: one round is one rid for both, sent at once (the slower tunnel's answer
