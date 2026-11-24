@@ -6964,7 +6964,17 @@ def t_v2_tab(s):
             ("/opt/homebrew/lib/node_modules/@openai/codex/vendor/aarch64-apple-darwin/codex/codex -C /w resume 019a-x --no-daemon", True),
             ("codex fork --last", True),
             ("codex -m gpt-5.5 -c model_reasoning_effort=high --search -s workspace-write fix the failing test", True),
-            ("codex --model=gpt-5.5 -cfoo=1 -a never -- exec the plan", True),
+            ("codex --model=gpt-5.5 -cfoo=1 -a never -- fix the plan", True),
+            # ps joins the arguments with blanks: a value with a blank comes split, and a command
+            # anywhere among the words left after the options keeps it no screen (also after --).
+            ("codex -c k=a b fix the bug", True),
+            ("codex -c k=a b resume x", True),
+            ("codex -c k=a b exec foo", False),
+            ("codex --cd /tmp/a b exec foo", False),
+            ("codex -c k=a resume exec foo", False),
+            ("codex -c k=a -- b exec foo", False),
+            ("codex -a never -- exec the plan", False),
+            ("codex please review this change", False),
             ("codex --enable x --disable y --add-dir /tmp -p work --no-alt-screen", True),
             ("codex -i shot.png", True),
             ("codex exec fix the failing test", False),

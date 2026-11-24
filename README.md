@@ -970,9 +970,12 @@ Not tested on Windows yet.
   not an option is absent, `resume`, `fork` or a prompt of two words or more (the options of `codex
   --help` skipped with their values); `codex exec`, any other command, a single word, an option the
   hook does not know and Windows send none (SimpleTerm `if/hook-events-identification#identification`).
-  `ps` joins the arguments with blanks, so a value with a blank (`-c 'k=a b'`) can hide a screen,
-  and a later Codex command that takes words of its own could read as a prompt until the hook
-  learns it. SimpleTerm `if/hook-tab-identity#shared-host`,
+  `ps` joins the arguments with blanks, so a value with a blank comes split (`-c 'k=a b' exec foo`
+  reads `-c k=a b exec foo`): a Codex command anywhere among the words left after the options
+  makes it no screen, so a screen started with a prompt that holds one (`review`, the alias `a`)
+  sends no pane; such a value can also hide a screen (`-c 'k=a b'` alone), and a later Codex
+  command that takes words of its own could read as a prompt until the hook learns it.
+  SimpleTerm `if/hook-tab-identity#shared-host`,
   `if/session-record#scope`, issue #447.
 - **The tab of an agent is not always known.** Inside screen, abduco and dtach the hook says only
   that it is inside a multiplexer; a tmux or herdr client that runs inside another multiplexer is

@@ -2454,8 +2454,9 @@ function Find-IdHost {
 # option is absent, resume, fork, or a prompt with a blank (two words or more as ps joins them, not a
 # command of codex --help 0.172.0). The program is its command name when the arguments start with it,
 # else the first word whose last part is codex; options are skipped with their values as that help
-# lists them. False for any other command or one word, an option not in the list or without its value,
-# and an argument after -i.
+# lists them. False for any other command or one word, an option in neither list or without its value,
+# an argument after -i, and a command anywhere among the words left after the options (ps splits a
+# value with a blank).
 function Test-IdCodexScreen([string]$comm, [string]$hargs) {
     $s = $hargs
     if ($s.StartsWith(' ', $Ord)) { $s = $s.Substring(1) }
@@ -2498,10 +2499,10 @@ function Test-IdCodexScreen([string]$comm, [string]$hargs) {
     }
     if ($i -ge $w.Count) { return $true }
     if ($img) { return $false }
-    if (-not $dd) {
-        if ($w[$i] -ceq 'resume' -or $w[$i] -ceq 'fork') { return $true }
-        if ($cmds -ccontains $w[$i]) { return $false }
-    }
+    # A command anywhere among the words left, also after --: ps joins the arguments with blanks, so a
+    # value with a blank comes split and the command after it would read as a prompt.
+    for ($j = $i; $j -lt $w.Count; $j++) { if ($cmds -ccontains $w[$j]) { return $false } }
+    if (-not $dd -and ($w[$i] -ceq 'resume' -or $w[$i] -ceq 'fork')) { return $true }
     return ($w.Count - $i) -ge 2
 }
 # Codex's daemon: the TUI of this session, by arguments only (id_codex_bind). $Script:IdTui: the one TUI

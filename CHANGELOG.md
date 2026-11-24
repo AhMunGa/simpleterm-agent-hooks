@@ -43,7 +43,10 @@
   arguments: no argument that is not an option, `resume`, `fork`, or a prompt of two words or
   more, the options of `codex --help` (0.172.0) skipped with their values. The managed daemon, an
   IDE's `app-server`, `exec` and every other command, a single word, an option not in that list,
-  an ancestor that cannot be read, and Windows send none. The notify program (`agent-hook.sh
+  an ancestor that cannot be read, and Windows send none. A command anywhere among the words left
+  after the options counts too, also after `--`: `ps` joins the arguments with blanks, so
+  `-c 'k=a b' exec foo` reads `-c k=a b exec foo`; a screen started with a prompt that holds such
+  a word (`review`, the alias `a`) sends no pane. The notify program (`agent-hook.sh
   codex-notify`) follows the same rule; up to 0.9.0 it sent the daemon's pane from the daemon.
   `mux`, `tab` and the session record are as before. Both hooks (sh, PowerShell).
   Measured with Codex 0.172.0 (the latest) in an isolated home with a model stub, in two panes of

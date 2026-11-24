@@ -1876,8 +1876,9 @@ id_host() {
 # absent, resume, fork, or a prompt with a blank (two words or more as ps joins them, not a command of
 # codex --help 0.172.0). The program is its command name when the arguments start with it (a path may
 # hold a blank), else the first word whose last part is codex; options are skipped with their values
-# as that help lists them. False for any other command or one word, an option not in the list or
-# without its value, and an argument after -i (it takes several files, so the rest may be images).
+# as that help lists them. False for any other command or one word, an option in neither list or
+# without its value, an argument after -i (it takes several files, so the rest may be images), and a
+# command anywhere among the words left after the options (ps splits a value with a blank).
 codex_screen() {
   csa=${ID_HARGS# }
   case $csa in
@@ -1919,11 +1920,15 @@ codex_screen() {
   done
   [ $# -gt 0 ] || return 0
   [ -z "$csi" ] || return 1
-  if [ -z "$csd" ]; then
-    case $1 in
-      resume | fork) return 0 ;;
+  # A command anywhere among the words left, also after --: ps joins the arguments with blanks, so a
+  # value with a blank comes split and the command after it would read as a prompt.
+  for csw in "$@"; do
+    case $csw in
       agents | exec | e | review | login | logout | mcp | mcp-server | plugin | app-server | remote-control | app | completion | update | doctor | sandbox | debug | apply | a | queue | archive | delete | migrate-rollouts | migrate-nfs-db | unarchive | cloud | exec-server | features | help) return 1 ;;
     esac
+  done
+  if [ -z "$csd" ]; then
+    case $1 in resume | fork) return 0 ;; esac
   fi
   [ $# -ge 2 ]
 }
