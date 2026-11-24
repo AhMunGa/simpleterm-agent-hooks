@@ -5719,6 +5719,49 @@ def t_v2_link_waits(s):
         # allow would be printed: the cut ingest and the empty output show it, whatever the machine's load.
         s.check("waits: hidden: the cap counts from the hook's start (relay ingest cut to the time left)",
                 out.strip() == "" and el < 30 and "http=000" in s.log_text(), "%.2fs %s" % (el, s.log_text()[-300:]))
+        # A Claude Code subagent's request (agent_id in the hook input): its window opens after its hook ends
+        # [measured 2.1.331], so it goes as wait hidden, as Codex's (SimpleTerm spec/request-wait#hook-wait,
+        # hist/request-wait#d2). The app's tunnel answers suppressed: the hook does not wait and prints
+        # nothing, and the relay gets a question without buttons.
+        sub = v2_perm(session="sub", agent_id="a42a3936ffcdae563", agent_type="general-purpose")
+
+        def tun_of(sid):  # (by session: a tunnel that answers late records after the next case's reset)
+            return [r for r in tun_ingests("permission") if (r.get("plain_json") or {}).get("sid") == sid]
+        setup({"push": "suppressed"}, {"push": "sent"})
+        rc, out, err, el = s.run("claude", sub)
+        rel = wait_for(lambda: s.records("/v1/ingest"), 15) or []
+        tp = tun_of("sub")
+        s.check("waits: a Claude Code subagent's request goes as wait hidden",
+                tp and ((tp[0].get("plain_json") or {}).get("req") or {}).get("wait") == "hidden", str(tp)[:300])
+        s.check("waits: a subagent's request: the tunnel's suppressed ends it at once, nothing printed",
+                out.strip() == "" and el < 15 and not s.records("/v1/decision")
+                and not [r for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/decision"],
+                "%r %.2fs %s" % (out, el, s.log_text()[-300:]))
+        s.check("waits: a subagent's request: the relay gets a question without nonce, same rid",
+                rel and rel[0]["body"]["ev"] == "question" and "nh" not in rel[0]["body"]
+                and (rel[0].get("plain_json") or {}).get("req", {}).get("wait") == "none"
+                and tp and rel[0]["body"]["rid"] == tp[0]["body"]["rid"], str(rel)[:400])
+        # Its wait on the relay alone (no tunnel answered) is at most 60 seconds, or claude_wait when that is
+        # shorter, counted from the hook's start (SimpleTerm spec/request-wait-link#send-order). As for Codex
+        # above: after the tunnel's 5 s, a cap the relay's ingest (4 s) does not fit in leaves the output
+        # empty. The 60 is stood in for by 6 (SIMPLETERM_HOOK_TEST_SUB_CAP): a test of 60 s otherwise.
+        short = {"SIMPLETERM_HOOK_TEST": "1", "SIMPLETERM_HOOK_TEST_SUB_CAP": "6"}
+        setup({"ingest_delay": 7}, {"ingest_delay": 4, "decision": "allow"})
+        rc, out, err, el = s.run("claude", sub, short)
+        s.check("waits: a subagent's request, relay only: its cap (60 s; 6 here) when claude_wait (15) is longer",
+                out.strip() == "" and el < 30 and "http=000" in s.log_text(), "%r %.2fs %s" % (out, el, s.log_text()[-300:]))
+        setup({"ingest_delay": 7}, {"ingest_delay": 4, "decision": "allow"}, conf={"claude_wait": 6})
+        rc, out, err, el = s.run("claude", sub)
+        s.check("waits: a subagent's request, relay only: claude_wait (6) when it is shorter than 60",
+                out.strip() == "" and el < 30 and "http=000" in s.log_text(), "%r %.2fs %s" % (out, el, s.log_text()[-300:]))
+        # The main thread's request (shared) keeps claude_wait: the relay's allow after its 4 s is applied.
+        setup({"ingest_delay": 7}, {"ingest_delay": 4, "decision": "allow"})
+        rc, out, err, el = s.run("claude", v2_perm(session="main"), short)
+        tp = wait_for(lambda: tun_of("main"), 15) or []
+        s.check("waits: the main thread's request stays wait shared, under claude_wait",
+                behavior(out).get("behavior") == "allow"
+                and tp and ((tp[0].get("plain_json") or {}).get("req") or {}).get("wait") == "shared",
+                "%r %s %s" % (out, [(r.get("plain_json") or {}).get("req") for r in tp] or str(tp)[:300], s.log_text()[-300:]))
         # A relay that lost R1 (SimpleTerm hist/relay-http#r-changes): the question again, same rid, without nonce, not waited.
         q = json.dumps({"session_id": "sq", "cwd": "/w", "hook_event_name": "PermissionRequest", "tool_name": "AskUserQuestion",
                         "tool_input": {"questions": [{"question": "Which DB?", "options": [{"label": "A"}]}]}})
@@ -5745,12 +5788,12 @@ def t_v2_held(s):
     tun, tctl = s.spawn_mock()
     sessions = s.home / ".claude" / "sessions"
     try:
-        def setup(push_seq, fmt=2, decision=None):
+        def setup(push_seq, fmt=2, decision=None, after=0):
             s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": fmt})], conf={"claude_wait": 40})
             tctl("/_ctl/reset", {})
             opts = dict(LINK_T, unknown_error="unknown", max_body=65536, push=push_seq[-1], push_seq=list(push_seq))
             if decision:
-                opts.update(decision=decision, after=0)
+                opts.update(decision=decision, after=after)
             tctl("/_ctl/config", {"links": {LINK_T["id"]: opts}})
             shutil.rmtree(sessions, ignore_errors=True)
             sessions.mkdir(parents=True)
@@ -5963,19 +6006,15 @@ def t_v2_held(s):
                 and wait_for(lambda: results(), 5) and results()[-1].get("out") == "terminal",
                 "%r %s %s" % (out, str(results())[:200], s.log_text()[-300:]))
         # Nothing to tell by — the window never seen open and its own: no session file, another session's
-        # file, another permission hook on the same window ("1 of 2": the file stays as it is when the first
-        # item is answered), a window recorded after the hook's start + 2 s. The session file then ends
-        # nothing, whatever it says later; the wait goes on as in 0.8.0 (here until the agent is gone).
+        # file, a window recorded after the hook's start + 2 s. The session file then ends nothing, whatever
+        # it says later; the wait goes on as in 0.8.0 (here until the agent is gone).
         run = s.home / ".simpleterm" / "run"
-        for name, st, sibling in (("no session file", {"status": "none"}, False), ("another session's file", {"file_session": "other"}, False),
-                                  ("another permission hook on the window", {}, True),
-                                  ("a window recorded late", {"late": True}, False)):
+        for name, st in (("no session file", {"status": "none"}), ("another session's file", {"file_session": "other"}),
+                         ("a window recorded late", {"late": True})):
             setup(["sent"])
             run.mkdir(parents=True, exist_ok=True)
             for old in run.glob("perm.*"):
                 old.unlink()
-            if sibling:
-                (run / ("perm.held-1.%d" % os.getpid())).write_text("1793232000123\n")
             n0 = answered()
             if st.pop("late", False):
                 st["at"] = int(time.time() + 30) * 1000
@@ -5989,50 +6028,108 @@ def t_v2_held(s):
                     s.log_text()[-300:])
             agent.kill()
             finished(agent, 10)
-            for mark in run.glob("perm.held-1.%d" % os.getpid()):
-                mark.unlink()
             s.settle("the hook's end")
-        # Another permission hook joins the window after this hook's first look (the hooks of parallel
-        # tool calls start a moment apart): the window is shared from then on, and what the hook saw
-        # alone no longer counts. The session file ends nothing.
-        setup(["sent"])
+
+        # A window shared with other permission hooks ("1 of 2": parallel tool calls of one answer). Claude
+        # Code keeps the session file as it is from one item to the next, and the session waits on nothing
+        # only once every item is answered [measured 2.1.331]: the hook then ends as answered at the
+        # terminal, whether the other hooks were on the window at its first look, joined after it, or joined
+        # unseen (between two looks, with the answer). Until then it goes on (SimpleTerm
+        # if/ssh-tunnel-wait#window-closed, hist/ssh-tunnel-http#d8). Until 0.9.0 a shared window ended nothing.
+        def mark(pid, at="1793232000123"):  # a live hook of the session that first saw the window at `at`
+            (run / ("perm.held-1.%d" % pid)).write_text(at + "\n")
+
+        for name in ("three hooks on the window, two items answered", "a hook that joins later", "a hook that joined unseen"):
+            setup(["sent"])
+            run.mkdir(parents=True, exist_ok=True)
+            for old in run.glob("perm.*"):
+                old.unlink()
+            n0 = answered()
+            other = None
+            if name.startswith("three"):
+                # Two other hooks: this runner and a process that stays alive.
+                other = s.popen([sys.executable, "-I", "-c", "import time; time.sleep(60)"])
+                mark(os.getpid())
+                mark(other.pid)
+            agent, hook = start()
+            s.check("closed: %s: the hook waits on the tunnel" % name, wait_for(lambda: polls(), 20), s.log_text()[-300:])
+            if name.startswith("three"):
+                # (Set times on purpose: three looks at the window open with two other hooks on it, then two
+                # more after one of those hooks ended, its tool done: items answered, one still open.)
+                time.sleep(3.5)
+                went_on = agent.poll() is None and answered() == n0
+                (run / ("perm.held-1.%d" % os.getpid())).unlink()
+                time.sleep(2.5)
+                s.check("closed: %s: the window still open: it goes on" % name,
+                        went_on and agent.poll() is None and answered() == n0, s.log_text()[-300:])
+            elif name == "a hook that joins later":
+                mark(os.getpid())
+                time.sleep(2.5)  # (two looks at the shared window)
+                s.check("closed: %s: the window still open: it goes on" % name, agent.poll() is None and answered() == n0,
+                        s.log_text()[-300:])
+            else:
+                time.sleep(1.5)  # (a look with the window open and its own)
+                mark(os.getpid())
+            t = time.time()
+            state(agent.pid, status="busy", waiting_for=None, at=1793232009000)
+            done, out = finished(agent, 20)
+            el = time.time() - t
+            s.check("closed: %s: every item answered (the session waits on nothing): answered at the terminal" % name,
+                    done and out.strip() == "" and 1.0 <= el < 12 and answered() - n0 == 1
+                    and wait_for(lambda: results(), 5) and results()[-1].get("out") == "terminal",
+                    "%r %.1fs %s %s" % (out, el, str(results())[-200:], s.log_text()[-300:]))
+            if other is not None:
+                other.kill()
+                other.wait(5)
+            for m in run.glob("perm.held-1.*"):
+                m.unlink()
+            s.settle("the hook's end")
+
+        # A Claude Code subagent's request (agent_id in the hook input): its window opens after its hook ends
+        # [measured 2.1.331], so the window its hook sees is another's, here the main thread's with that
+        # hook's mark. It goes as wait hidden; its hook writes no mark, and the main window closing ends
+        # nothing: the wait goes on (here on an older app's tunnel that answered sent) until the decision
+        # (SimpleTerm if/ssh-tunnel-wait#open-window, hist/ssh-tunnel-http#d8). Until 0.9.0 it took the main
+        # window for one it shared and ended with it.
+        sub = {"agent_id": "a42a3936ffcdae563", "agent_type": "general-purpose"}
+        setup(["sent"], decision="allow", after=12)
         run.mkdir(parents=True, exist_ok=True)
         for old in run.glob("perm.*"):
             old.unlink()
+        mark(os.getpid())
         n0 = answered()
-        agent, hook = start()
-        s.check("closed: a hook that joins later: the hook waits on the tunnel", wait_for(lambda: polls(), 20), s.log_text()[-300:])
-        (run / ("perm.held-1.%d" % os.getpid())).write_text("1793232000123\n")
-        time.sleep(2.5)  # (two looks at the shared window)
+        agent, hook = start(perm=sub)
+        s.check("subagent: the hook waits on the tunnel", wait_for(lambda: polls(), 20), s.log_text()[-300:])
+        sent = perms()
+        s.check("subagent: the request goes as wait hidden",
+                sent and ((sent[0].get("plain_json") or {}).get("req") or {}).get("wait") == "hidden", str(sent)[:300])
+        time.sleep(1.5)  # (a look at the main window)
+        s.check("subagent: its hook writes no mark", not list(run.glob("perm.held-1.%d" % hook)),
+                str(sorted(p.name for p in run.glob("perm.*"))))
         state(agent.pid, status="busy", waiting_for=None, at=1793232009000)
-        time.sleep(4.5)  # (four looks at a file that says the prompt is not open)
-        s.check("closed: a hook that joins later: the session file ends nothing", agent.poll() is None and answered() == n0,
-                s.log_text()[-300:])
-        agent.kill()
-        finished(agent, 10)
-        for mark in run.glob("perm.held-1.%d" % os.getpid()):
-            mark.unlink()
+        time.sleep(4.5)  # (four looks at a file that says the main window closed)
+        s.check("subagent: the main window closing ends nothing", agent.poll() is None and answered() == n0, s.log_text()[-300:])
+        done, out = finished(agent, 30)
+        s.check("subagent: the decision from the device applies", done and behavior(out).get("behavior") == "allow",
+                "%r %s" % (out, s.log_text()[-300:]))
+        (run / ("perm.held-1.%d" % os.getpid())).unlink()
         s.settle("the hook's end")
-        # The other hook's mark comes and the session goes on before this hook looks again (it does not
-        # look while it sends, and a look can fall between the two): no look found the two hooks on the
-        # open window together, but a live hook that holds the same statusUpdatedAt shared it.
-        setup(["sent"])
-        run.mkdir(parents=True, exist_ok=True)
+        # The main thread's request while a subagent's hook waits in the same session (the same window
+        # value in its stand-in's file): that hook has no mark, so the main window is its own hook's alone
+        # and told again (held). Until 0.9.0 the subagent's hook marked the window and the main one was
+        # taken for shared: not told again.
+        setup(["sent", "held", "held"])
         for old in run.glob("perm.*"):
             old.unlink()
-        n0 = answered()
+        sub_agent, sub_hook = start(perm=sub)
+        s.check("subagent and main: the subagent's hook waits on the tunnel", wait_for(lambda: polls(), 20), s.log_text()[-300:])
         agent, hook = start()
-        s.check("closed: a hook that joined unseen: the hook waits on the tunnel", wait_for(lambda: polls(), 20), s.log_text()[-300:])
-        time.sleep(1.5)  # (a look with the window open and its own)
-        (run / ("perm.held-1.%d" % os.getpid())).write_text("1793232000123\n")
+        s.check("subagent and main: the main request is told again", wait_for(lambda: len(perms()) >= 3, 30),
+                "%d %s" % (len(perms()), s.log_text()[-300:]))
         state(agent.pid, status="busy", waiting_for=None, at=1793232009000)
-        time.sleep(4.5)  # (four looks at a file that says the prompt is not open)
-        s.check("closed: a hook that joined unseen: the session file ends nothing", agent.poll() is None and answered() == n0,
-                s.log_text()[-300:])
-        agent.kill()
-        finished(agent, 10)
-        for mark in run.glob("perm.held-1.%d" % os.getpid()):
-            mark.unlink()
+        finished(agent, 15)
+        sub_agent.kill()
+        finished(sub_agent, 10)
         s.settle("the hook's end")
         # Answered while the request is on its way to a slow link (the relay answers a request it will
         # wait on about 4 seconds later): the hook looked at the window before it sent anything, so it
@@ -6112,6 +6209,14 @@ def t_v2_held(s):
                             "tool_name": "Bash", "tool_input": {"command": "make"}})
         rc, out, err, el = s.run("codex", codex)
         s.check("held: a Codex (hidden) request is not told again", len(perms()) == 1 and el < 15, "%d %.1fs" % (len(perms()), el))
+        # Nor a Claude Code subagent's (hidden): a held answer to a hidden request is not kept.
+        setup(["held"])
+        t0 = time.time()
+        agent, hook = start(perm={"agent_id": "a42a3936ffcdae563", "agent_type": "general-purpose"})
+        done, out = finished(agent, 20)
+        el = time.time() - t0
+        s.check("held: a Claude Code subagent's (hidden) request is not told again",
+                done and out.strip() == "" and len(perms()) == 1 and el < 15, "%d %r %.1fs %s" % (len(perms()), out, el, s.log_text()[-300:]))
         if s.kind == "sh":
             # No ps (some containers): the agent's pid from /proc instead (Linux).
             nops = s.tmp / "nops"
