@@ -551,10 +551,11 @@ fields and skip the rest). The contract is in the SimpleTerm app's specs (`index
   seen its own prompt open (alone on it) and the record then says twice in a row that the session
   waits on nothing, it ends the wait and tells the app the request was answered in the terminal
   (`resolved`, `terminal`), about 2 seconds after the answer (or after every link has taken the
-  request, when that is later). Another prompt in its place, a prompt
-  shared by parallel tool calls ("1 of 2") or a record that cannot be read end nothing: the wait
-  then ends as before, when the tool has ended (SimpleTerm `if/ssh-tunnel-wait#window-closed`,
-  issue AhMunGa/simple-term#895).
+  request, when that is later). A prompt shared by parallel tool calls ("1 of 2") or a record that
+  cannot be read ends nothing: the wait then ends as before, when the tool has ended. Another
+  prompt in its place ends nothing while it is there; once the session then waits on nothing, the
+  wait ends as above (SimpleTerm `if/ssh-tunnel-wait#window-closed`, issue
+  AhMunGa/simple-term#895).
 - **Ends and states**: a turn's end carries how it ended, who started it, whether its last message
   asks you something, its last message (tunnel), the background work still running (new this turn
   or older, services), the schedules and an active Codex goal. To the SSH tunnel only: `state`

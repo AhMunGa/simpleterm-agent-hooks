@@ -5600,6 +5600,27 @@ def t_v2_held(s):
         for mark in run.glob("perm.held-1.%d" % os.getpid()):
             mark.unlink()
         s.settle("the hook's end")
+        # The other hook's mark comes and the session goes on before this hook looks again (it does not
+        # look while it sends, and a look can fall between the two): no look found the two hooks on the
+        # open window together, but a live hook that holds the same statusUpdatedAt shared it.
+        setup(["sent"])
+        run.mkdir(parents=True, exist_ok=True)
+        for old in run.glob("perm.*"):
+            old.unlink()
+        n0 = answered()
+        agent, hook = start()
+        s.check("closed: a hook that joined unseen: the hook waits on the tunnel", wait_for(lambda: polls(), 20), s.log_text()[-300:])
+        time.sleep(1.5)  # (a look with the window open and its own)
+        (run / ("perm.held-1.%d" % os.getpid())).write_text("1793232000123\n")
+        state(agent.pid, status="busy", waiting_for=None, at=1793232009000)
+        time.sleep(4.5)  # (four looks at a file that says the prompt is not open)
+        s.check("closed: a hook that joined unseen: the session file ends nothing", agent.poll() is None and answered() == n0,
+                s.log_text()[-300:])
+        agent.kill()
+        finished(agent, 10)
+        for mark in run.glob("perm.held-1.%d" % os.getpid()):
+            mark.unlink()
+        s.settle("the hook's end")
         # Answered while the request is on its way to a slow link (the relay answers a request it will
         # wait on about 4 seconds later): the hook looked at the window before it sent anything, so it
         # has seen it open, and the answer is told from the session file once the links have answered.

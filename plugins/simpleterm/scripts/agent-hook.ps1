@@ -5037,6 +5037,20 @@ function Test-RqClosed([int]$agentPid) {
         $Script:RqShut = 0
         return $false
     }
+    # Another permission hook that saw the same window lives on (its mark
+    # holds the same statusUpdatedAt): the window was shared after all, even
+    # if no look found the two on it together. One that has not read its
+    # window yet: not known, and this look does not count.
+    $alone = Get-RqAlone
+    if ($alone -eq 1) {
+        $Script:RqSeen = $false
+        $Script:RqShut = 0
+        return $false
+    }
+    if ($alone -ne 0) {
+        $Script:RqShut = 0
+        return $false
+    }
     if (-not $Script:RqSeen) { return $false }
     $Script:RqShut = $Script:RqShut + 1
     return ($Script:RqShut -ge 2)

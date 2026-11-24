@@ -3037,7 +3037,23 @@ rq_closed() {
       RQ_SEEN=1 RQ_SHUT=0
       return 1
       ;;
-    1:closed) ;;
+    1:closed)
+      # Another permission hook that saw the same window lives on (its mark
+      # holds the same statusUpdatedAt): the window was shared after all,
+      # even if no look found the two on it together. One that has not read
+      # its window yet: not known, and this look does not count.
+      rq_alone
+      case $? in
+        1)
+          RQ_SEEN=0 RQ_SHUT=0
+          return 1
+          ;;
+        2)
+          RQ_SHUT=0
+          return 1
+          ;;
+      esac
+      ;;
     1:shared)
       RQ_SEEN=0 RQ_SHUT=0
       return 1

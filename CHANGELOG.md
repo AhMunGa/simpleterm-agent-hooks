@@ -12,10 +12,11 @@
   `resolved` with `out: terminal` (log: `permission answered-at-terminal (window closed)`): about 2 seconds
   after the answer, or after every link has taken the request when that is later (the relay takes about 4
   seconds).
-  Nothing to tell by ends nothing: another prompt in its place (the session still `waiting`, another
-  `statusUpdatedAt`), a prompt shared with another permission hook ("1 of 2"), no record, another session's
-  record, a prompt recorded later than the hook's start plus 2 s. The wait then ends as before, at the tool's
-  end. Ending a request the user can still answer in the app would be the worse mistake.
+  Nothing to tell by ends nothing: a prompt shared with another permission hook ("1 of 2"), no record, another
+  session's record, a prompt recorded later than the hook's start plus 2 s. The wait then ends as before, at
+  the tool's end. Another prompt in its place (the session still `waiting`, another `statusUpdatedAt`) ends
+  nothing while it is there; once the session then waits on nothing, the wait ends as above. Ending a request
+  the user can still answer in the app would be the worse mistake.
   Not measured: what the record says while a prompt is open and a subagent of the session works.
   Both hooks (sh, PowerShell). Tested against a stand-in agent and session record; the PowerShell hook was not
   run (no `pwsh` on the test machine), and neither hook was run under a real Claude Code.
