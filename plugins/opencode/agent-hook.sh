@@ -6010,15 +6010,18 @@ codex_goal_later() { # rollout file
 # the turn ends; their failure hooks come for every try, a 401 that a retry
 # fixes too, with no field that tells the last (SimpleTerm
 # hist/hook-events#d11). From the turn's first failure the record is read
-# every half second from where it was then, 120 seconds at most: a turn that
-# ended on a refused sign-in is one `auth` (turn.end error, no req). A retry
+# every half second, 120 seconds at most, from the turn's start in its last
+# MiB (auth_start: the end can be written before the hook reads the record):
+# a turn that ended on a refused sign-in is one `auth` (turn.end error, no
+# req). A retry
 # that worked, another error, another turn, no record or a record of another
 # shape ends the watch with nothing sent. A turn end it reads (with `auth` or
 # not: these turns end with no hook) starts the state comparison over
 # (st_end), unless a newer state went meanwhile (the next turn's `running`):
 # that record stays. One watch a turn: run/$SID.aw holds
-# its rid, the turn (`-` for Copilot, whose hooks name none), its start and
-# the offset; the watch renames it to .aw.sent when it sends.
+# its rid, the turn (Copilot's hooks name none: its user.message's messageId,
+# else `-`), its start and the offset; the watch renames it to .aw.sent when
+# it sends.
 #
 # AUTH_SCAN reads the record's lines from an offset (complete lines only: one
 # still being written is read next time) and prints the verdict (`-` none
@@ -6026,27 +6029,32 @@ codex_goal_later() { # rollout file
 # mode cx: Codex's task_complete of turn `turn`: `auth` for codex_error_info
 # "unauthorized" or http_status_code 401, `over` for any other end of the
 # turn (no error, another error, turn_aborted). mode cop: Copilot's
-# session.error: `auth` for remediation sign_in, or errorType authentication
-# or authorization with statusCode 401, `over` for another error; `end` for a
-# reply (assistant.message: a retry worked, the turn goes on) or another turn
-# (user.message). mode copend: the session.error that ends the last turn read,
-# if any (`auth` or `error`).
+# session.error of turn `turn` (its originatingMessageId is the turn's
+# user.message's messageId; by position, the first, when either has none):
+# `auth` for remediation sign_in, or errorType authentication or authorization
+# with statusCode 401, `over` for another error; `end` for a reply from byte
+# `cut` on (assistant.message: a retry worked, the turn goes on; one before is
+# the turn's own) or another turn (user.message). mode copend: the
+# session.error of turn `turn` that ends the last turn read, if any (`auth` or
+# `error`). `base` is the offset the lines start at.
 AUTH_SCAN='
 function emsg(s) {
   if (match(s, /"message":"([^"\\]|\\.)*"/)) return substr(s, RSTART + 11, RLENGTH - 12)
   return ""
 }
-function cop(s,   t) {
+function cop(s, at,   t) {
   if (index(s, "\"type\":\"session.error\"")) {
+    if (turn != "" && turn != "-" && match(s, /"originatingMessageId":"[^"\\]*"/) && substr(s, RSTART + 24, RLENGTH - 25) != turn) return ""
     m = emsg(s)
     if (match(s, /"errorType":"[^"\\]*"/)) m = substr(s, RSTART + 13, RLENGTH - 14) ": " m
     t = index(s, "\"remediation\":\"sign_in\"") || (s ~ /"errorType":"(authentication|authorization)"/ && s ~ /"statusCode":401[^0-9]/)
     return t ? "auth" : "error"
   }
-  if (index(s, "\"type\":\"user.message\"") || index(s, "\"type\":\"assistant.message\"")) return "on"
+  if (index(s, "\"type\":\"user.message\"")) return "on"
+  if (index(s, "\"type\":\"assistant.message\"") && base + at >= cut) return "on"
   return ""
 }
-function judge(s,   r) {
+function judge(s, at,   r) {
   if (mode == "cx") {
     if (!index(s, "\"turn_id\":\"" turn "\"")) return
     if (index(s, "\"type\":\"task_complete\"")) {
@@ -6055,21 +6063,48 @@ function judge(s,   r) {
     } else if (index(s, "\"type\":\"turn_aborted\"")) v = "over"
     return
   }
-  r = cop(s)
+  r = cop(s, at)
   if (r == "") return
   if (mode == "cop") v = (r == "auth") ? "auth" : (r == "error") ? "over" : "end"
   else if (r == "on") { last = ""; lm = "" }
   else { last = r; lm = m }
 }
-{ if (NR > 1 && v == "") judge(p); p = $0; u += length($0) + 1 }
+{ if (NR > 1 && v == "") judge(p, ps); p = $0; ps = u; u += length($0) + 1 }
 END {
   c = u
-  if (NR && v == "") { if (u <= avail) judge(p); else c = u - length(p) - 1 }
+  if (NR && v == "") { if (u <= avail) judge(p, ps); else c = u - length(p) - 1 }
   if (mode == "copend") { v = last; m = lm }
   printf "%s\t%.0f\t%s\n", (v == "" ? "-" : v), c, (v == "auth" ? m : "")
 }'
 
-auth_scan() { # mode file offset [turn]: verdict TAB next-offset TAB text
+# Where a watch of record $2 (size $3) reads from, and the turn: the record's
+# last MiB (its first line cut there skipped); for mode cop after the last
+# user.message there, with its messageId (empty when it has none). Prints
+# offset TAB id.
+AUTH_START='
+function see(s, at) {
+  if (mode != "cop" || !index(s, "\"type\":\"user.message\"")) return
+  o = at + length(s) + 1; id = ""
+  if (match(s, /"messageId":"[A-Za-z0-9._:-]+"/) && RLENGTH <= 142) id = substr(s, RSTART + 13, RLENGTH - 14)
+}
+{ if (NR > 1 && !(NR == 2 && cut)) see(p, ps); if (NR == 1 && cut) o = length($0) + 1; p = $0; ps = u; u += length($0) + 1 }
+END {
+  if (NR && !(NR == 1 && cut) && u <= avail) see(p, ps)
+  if (o > avail) o = avail
+  printf "%.0f\t%s\n", o, id
+}'
+
+auth_start() { # mode file size: offset TAB id
+  ab_b=0
+  [ "$3" -gt 1048576 ] && ab_b=$(($3 - 1048576))
+  ab_r=$(tail -c +$((ab_b + 1)) "$2" 2>/dev/null | head -c $(($3 - ab_b)) |
+    LC_ALL=C awk -v mode="$1" -v cut=$((ab_b > 0)) -v avail=$(($3 - ab_b)) "$AUTH_START" 2>/dev/null) || return 1
+  ab_o=${ab_r%%"$TAB"*}
+  is_uint "$ab_o" || return 1
+  printf '%s\t%s\n' $((ab_b + ab_o)) "${ab_r#*"$TAB"}"
+}
+
+auth_scan() { # mode file offset [turn [cut]]: verdict TAB next-offset TAB text
   as_sz=$(wc -c <"$2" 2>/dev/null | tr -d ' ')
   is_uint "$as_sz" && [ "$as_sz" -ge "$3" ] || return 1
   as_n=$((as_sz - $3))
@@ -6078,7 +6113,7 @@ auth_scan() { # mode file offset [turn]: verdict TAB next-offset TAB text
     return 0
   fi
   as_r=$(tail -c +$(($3 + 1)) "$2" 2>/dev/null | head -c "$as_n" |
-    LC_ALL=C awk -v mode="$1" -v turn="${4:-}" -v avail="$as_n" "$AUTH_SCAN" 2>/dev/null) || return 1
+    LC_ALL=C awk -v mode="$1" -v turn="${4:-}" -v base="$3" -v cut="${5:-0}" -v avail="$as_n" "$AUTH_SCAN" 2>/dev/null) || return 1
   as_v=${as_r%%"$TAB"*} as_r=${as_r#*"$TAB"}
   as_c=${as_r%%"$TAB"*}
   is_uint "$as_c" || return 1
@@ -6100,6 +6135,15 @@ auth_watch() { # mode(cop|cx) record [turn]
   aw_f=$RUN_DIR/$SID.aw aw_t=${3:--}
   aw_now=$(date +%s)
   is_uint "$aw_now" || return 0
+  # The record's size now: a reply written before it is the turn's own, not
+  # a retry that worked. Copilot's turn is its last user.message.
+  aw_cut=$(wc -c <"$2" 2>/dev/null | tr -d ' ')
+  is_uint "$aw_cut" || return 0
+  if [ "$1" = cop ]; then
+    aw_s=$(auth_start cop "$2" "$aw_cut") || return 0
+    aw_t=${aw_s#*"$TAB"}
+    aw_t=${aw_t:--}
+  fi
   # A watch of this turn still runs (a token older than a watch lasts is one
   # that died), or it sent already.
   if [ -f "$aw_f" ]; then
@@ -6107,8 +6151,8 @@ auth_watch() { # mode(cop|cx) record [turn]
     [ "$aw_t0" = "$aw_t" ] && is_uint "$aw_s0" && [ $((aw_now - aw_s0)) -lt 125 ] && return 0
   fi
   [ "$aw_t" != - ] && [ "$(cut -d' ' -f2 "$aw_f.sent" 2>/dev/null)" = "$aw_t" ] && return 0
-  aw_off=$(wc -c <"$2" 2>/dev/null | tr -d ' ')
-  is_uint "$aw_off" || return 0
+  if [ "$1" = cx ]; then aw_s=$(auth_start cx "$2" "$aw_cut") || return 0; fi
+  aw_off=${aw_s%%"$TAB"*}
   LAST='' TLAST=''
   turn_at error
   v2_prep "$TURN_AT"
@@ -6120,7 +6164,7 @@ auth_watch() { # mode(cop|cx) record [turn]
     while [ "$(date +%s)" -lt $((aw_now + 120)) ]; do
       sleep 0.5 2>/dev/null || sleep 1
       [ "$(cut -d' ' -f1 "$aw_f" 2>/dev/null)" = "$RID" ] || exit 0
-      aw_r=$(auth_scan "$1" "$2" "$aw_off" "$aw_t") || break
+      aw_r=$(auth_scan "$1" "$2" "$aw_off" "$aw_t" "$aw_cut") || break
       aw_v=${aw_r%%"$TAB"*} aw_r=${aw_r#*"$TAB"}
       aw_off=${aw_r%%"$TAB"*} aw_m=${aw_r#*"$TAB"}
       [ "$aw_v" = - ] || break
@@ -6144,9 +6188,9 @@ auth_watch() { # mode(cop|cx) record [turn]
 # session.error just after it starts this hook (0.07 s on 1.0.114): it is
 # waited for 2 seconds at most.
 cop_end() {
-  ce_f=$RUN_DIR/$SID.aw ce_off=''
+  ce_f=$RUN_DIR/$SID.aw ce_t='' ce_off=''
   if mv -f "$ce_f" "$ce_f.end" 2>/dev/null; then
-    ce_off=$(cut -d' ' -f4 "$ce_f.end" 2>/dev/null)
+    read -r ce_r0 ce_t ce_s0 ce_off 2>/dev/null <"$ce_f.end"
     rm -f "$ce_f.end" 2>/dev/null
   elif [ -f "$ce_f.sent" ]; then
     return 0
@@ -6156,13 +6200,13 @@ cop_end() {
     return 0
   fi
   if ! is_uint "$ce_off"; then
-    ce_off=$(wc -c <"$ce_rec" 2>/dev/null | tr -d ' ')
-    is_uint "$ce_off" || ce_off=0
-    if [ "$ce_off" -gt 1048576 ]; then ce_off=$((ce_off - 1048576)); else ce_off=0; fi
+    ce_s=$(wc -c <"$ce_rec" 2>/dev/null | tr -d ' ')
+    is_uint "$ce_s" && ce_s=$(auth_start cop "$ce_rec" "$ce_s") || { printf 'error\t\n'; return 0; }
+    ce_off=${ce_s%%"$TAB"*} ce_t=${ce_s#*"$TAB"}
   fi
   ce_i=0 ce_r=''
   while [ "$ce_i" -lt 10 ]; do
-    ce_r=$(auth_scan copend "$ce_rec" "$ce_off") || break
+    ce_r=$(auth_scan copend "$ce_rec" "$ce_off" "$ce_t") || break
     case $ce_r in auth"$TAB"* | error"$TAB"*) break ;; esac
     ce_i=$((ce_i + 1))
     sleep 0.2 2>/dev/null || { sleep 1; ce_i=$((ce_i + 4)); }

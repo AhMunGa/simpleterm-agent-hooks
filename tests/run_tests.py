@@ -3966,6 +3966,22 @@ def t_auth_end(s):
     def reset():
         s.ctl("/_ctl/reset", {})
 
+    run_dir = s.home / ".simpleterm" / "run"
+
+    def ended(label, sid, want, msg=""):
+        """one_auth or nothing for a watch whose turn's end may already be in the record when the hook starts. A watch
+        that missed it (the hook before this was fixed: it read from the record's size then, on for 120 s) is stopped
+        before the check."""
+        if want:
+            wait_for(lambda: ingests(s, "auth"), 5)
+        else:
+            time.sleep(1.5)
+        (run_dir / (sid + ".aw")).unlink(missing_ok=True)
+        if want:
+            one_auth(label, msg)
+        else:
+            nothing(label)
+
     # --- Codex (both hooks): PostModelRequest, once per try; the rollout's task_complete tells the turn's end ---
     tid = "01a20c5e-02d5-7e21-8bf6-9d2ee505345a"
     ro = s.tmp / "codex-auth" / "rollout.jsonl"
@@ -4007,6 +4023,20 @@ def t_auth_end(s):
     s.run("codex", json.dumps({"session_id": "cx-auth-exec", "hook_event_name": "SessionEnd", "cwd": "/w/repo"}))
     add_lines(ro, cx_line(tid, info={"http_connection_failed": {"http_status_code": 401}}, message=cx401))
     one_auth("codex auth: the session ends right after the failed turn (codex exec) -> one auth", "unexpected status 401")
+    # No retry (a refused token refresh, or request retries set to 0): the turn's task_complete can be in the rollout before
+    # its one failed request's hook reads it. The watch reads this turn's lines from the rollout's last MiB; the turn
+    # before's end is not this turn's.
+    reset()
+    write(ro, cx_line(tid, kind="task_started") + "\n"
+          + cx_line(tid, info="unauthorized", message="Your access token could not be refreshed because your refresh token has expired.") + "\n")
+    s.run("codex", cx_req("cx-auth-b1"), args=("PostModelRequest",))
+    ended("codex auth: one try, the turn's end written before the hook -> one auth", "cx-auth-b1", "auth", "Your access")
+    reset()
+    t0 = "01a20c5e-0000-7000-8000-0000000000b0"
+    write(ro, cx_line(t0, kind="task_started") + "\n" + cx_line(t0, info={"http_connection_failed": {"http_status_code": 401}}, message=cx401)
+          + "\n" + cx_line(tid, kind="task_started") + "\n")
+    s.run("codex", cx_req("cx-auth-b2"), args=("PostModelRequest",))
+    ended("codex auth: the turn before's refused sign-in is not this turn's", "cx-auth-b2", None)
     # Any other request ends the hook at once: nothing watched, nothing written.
     reset()
     run_dir = s.home / ".simpleterm" / "run"
@@ -4056,7 +4086,7 @@ def t_auth_end(s):
              lambda sid: [cop_line("assistant.message", messageId="am-1", originatingMessageId="m-" + sid, content="OK", toolRequests=[]), turn_end], None),
             ("another error (429) -> nothing", "cop-a4", {}, lambda sid: [turn_end, rate(sid)], None),
             ("a sign-in refused in the next turn is not this turn's", "cop-a5", {},
-             lambda sid: [cop_line("user.message", content="again", messageId="m2-" + sid), sign_in(sid)], None)):
+             lambda sid: [cop_line("user.message", content="again", messageId="m-2-" + sid), sign_in("2-" + sid)], None)):
         reset()
         rec_file = cop_record(cenv.get("COPILOT_HOME") or s.home / ".copilot", sid)
         for _ in range(3):
@@ -4079,13 +4109,47 @@ def t_auth_end(s):
     s.settle("copilot's first watch")
     s.run("copilot", json.dumps({"sessionId": "cop-a6", "timestamp": 1795508227000, "cwd": "/w/proj", "prompt": "again"}), env,
           args=("userPromptSubmitted",))
-    add_lines(rec_file, cop_line("user.message", content="again", messageId="m2-cop-a6"))
+    add_lines(rec_file, cop_line("user.message", content="again", messageId="m-2-cop-a6"))
     s.run("copilot", cop_err("cop-a6"), env, args=("errorOccurred",))
-    add_lines(rec_file, turn_end, sign_in("cop-a6"))
+    add_lines(rec_file, turn_end, sign_in("2-cop-a6"))
     one_auth("copilot auth: the next turn's refused sign-in -> one auth", "authorization: Authorization error")
+    # A 403 is tried once: the turn's session.error comes right after its one errorOccurred (1.0.114: 1-5 ms after the
+    # hook ends), and before it when Copilot does not wait for the hook. The watch reads from the turn's last user.message
+    # (the record's last MiB); a session.error is the turn's when its originatingMessageId is that message's id, or by
+    # position (the first after it) in a record without the ids (hist/hook-events#d11 2).
+    reply = lambda sid: cop_line("assistant.message", messageId="am-0", originatingMessageId="m-" + sid, content="",
+                                 toolRequests=[{"toolCallId": "c1", "name": "bash"}])
+    no_ids = cop_line("session.error", errorType="authorization", message="Authorization error. Your credentials may be expired or invalid.",
+                      statusCode=403, remediation="sign_in")
+    for label, sid, head, before, after, want in (
+            ("one try (403), its session.error written before the hook -> one auth", "cop-b1", None,
+             lambda sid: [reply(sid), turn_end, sign_in(sid, 403)], (), "auth"),
+            ("one try (403), its session.error written 50 ms after the hook starts -> one auth", "cop-b2", None,
+             lambda sid: [reply(sid)], lambda sid: [turn_end, sign_in(sid, 403)], "auth"),
+            ("a record without the ids: the first session.error after the turn's user.message -> one auth", "cop-b3",
+             [cop_line("user.message", content="go", turnId="0")], lambda sid: [turn_end, no_ids], (), "auth"),
+            ("the turn before's refused sign-in is not this turn's", "cop-b4",
+             lambda sid: [cop_line("user.message", content="go", messageId="m-0-" + sid), turn_end, sign_in("0-" + sid),
+                          cop_line("user.message", content="again", messageId="m-" + sid)], lambda sid: [], (), None),
+            ("another message's refused sign-in (its originatingMessageId), written after the hook, is not this turn's", "cop-b5",
+             None, lambda sid: [], (), None)):
+        reset()
+        rec_file = cop_record(s.home / ".copilot", sid)
+        if head:
+            write(rec_file, "".join(x + "\n" for x in (head(sid) if callable(head) else head)))
+        add_lines(rec_file, *before(sid))
+        p = s.start("copilot", cop_err(sid), env, args=("errorOccurred",))
+        if after:
+            time.sleep(0.05)
+            add_lines(rec_file, *after(sid))
+        s.finish(p, 30)
+        if sid == "cop-b5":
+            add_lines(rec_file, sign_in("x-" + sid))
+        ended("copilot auth: " + label, sid, want, "authorization: Authorization error")
     # -p: sessionEnd reason error, the record's session.error written just after the hook starts (1.0.114: 0.07 s).
     for label, sid, line, want in (("a refused sign-in -> auth, no error", "cop-p1", sign_in, ["auth"]),
-                                   ("another error -> error, no auth", "cop-p2", rate, ["error"])):
+                                   ("another error -> error, no auth", "cop-p2", rate, ["error"]),
+                                   ("another message's refused sign-in -> error, no auth", "cop-p3", lambda sid: sign_in("x-" + sid), ["error"])):
         reset()
         rec_file = cop_record(s.home / ".copilot", sid)
         for _ in range(3):
@@ -4097,6 +4161,16 @@ def t_auth_end(s):
         s.finish(p, 30)
         wait_for(lambda: evs(), 10)
         nothing("copilot -p auth: sessionEnd, " + label, want)
+    # -p, one try (403): the session.error already in the record when errorOccurred and sessionEnd start.
+    reset()
+    rec_file = cop_record(s.home / ".copilot", "cop-p4")
+    add_lines(rec_file, turn_end, sign_in("cop-p4", 403))
+    s.run("copilot", cop_err("cop-p4"), env, args=("errorOccurred",))
+    s.run("copilot", json.dumps({"sessionId": "cop-p4", "timestamp": 1795508228000, "cwd": "/w/proj", "reason": "error"}), env,
+          args=("sessionEnd",))
+    wait_for(lambda: evs(), 10)
+    (run_dir / "cop-p4.aw").unlink(missing_ok=True)
+    nothing("copilot -p auth: one try, the session.error written before both hooks -> auth, no error", ["auth"])
 
     # --- Antigravity CLI: Stop with Google's API error text ---
     for label, err, want in (

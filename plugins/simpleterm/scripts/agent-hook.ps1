@@ -1916,8 +1916,9 @@ function Read-FromB([string]$path, [int64]$off) {
 # PostModelRequest comes for every try, a 401 that a retry fixes too, with no
 # field that tells the last (SimpleTerm hist/hook-events#d11). As auth_watch in
 # agent-hook.sh: from the turn's first failed request a child reads the rollout
-# every half second from where it was then, 120 seconds at most, and sends one
-# `auth` (turn.end error, no req) for the turn's task_complete with
+# every half second from its last MiB (the turn's end can be written before
+# this hook reads it; only the turn's lines count), 120 seconds at most, and
+# sends one `auth` (turn.end error, no req) for the turn's task_complete with
 # codex_error_info "unauthorized" or http_status_code 401; any other end of
 # the turn, no rollout or another turn's watch ends it with nothing sent. A
 # turn end it reads (with `auth` or not: the turn ends with no hook) starts
@@ -1935,6 +1936,14 @@ function Start-AuthWatch([string]$path, [string]$turn) {
     $f = (Read-LineB ($tf + '.sent') 0).Split(' ')
     if ($f.Length -ge 2 -and $f[1] -ceq $turn) { return }
     try { $off = (New-Object IO.FileInfo($path)).Length } catch { return }
+    if ($off -gt 1048576) {
+        # The first line there is cut: the watch reads from the next.
+        $off -= 1048576
+        $text = Read-FromB $path $off
+        if ($null -eq $text) { return }
+        $n = $text.IndexOf([char]10)
+        if ($n -lt 0) { $off += $text.Length } else { $off += $n + 1 }
+    } else { $off = 0 }
     $Script:Last = ''
     Set-TurnAt 'error' '' ''
     Initialize-V2 $Script:TurnAt
