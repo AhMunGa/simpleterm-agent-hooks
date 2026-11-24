@@ -5525,8 +5525,9 @@ def t_v2_held(s):
             state(agent.pid, **change)
             done, out = finished(agent, 20)
             el = time.time() - t
-            s.check("closed: %s: the hook ends with no decision, as answered at the terminal" % name,
-                    done and out.strip() == "" and el < 12 and answered() - n0 == 1,
+            # (At least a second: one look that says closed is not enough, the second comes a second on.)
+            s.check("closed: %s: the hook ends with no decision, as answered at the terminal, after two looks" % name,
+                    done and out.strip() == "" and 1.0 <= el < 12 and answered() - n0 == 1,
                     "%r %.1fs %s" % (out, el, s.log_text()[-300:]))
             s.check("closed: %s: the request's result says terminal" % name,
                     wait_for(lambda: results(), 5) and results()[-1].get("out") == "terminal", str(results())[:300])
@@ -5578,6 +5579,62 @@ def t_v2_held(s):
             for mark in run.glob("perm.held-1.%d" % os.getpid()):
                 mark.unlink()
             s.settle("the hook's end")
+        # Another permission hook joins the window after this hook's first look (the hooks of parallel
+        # tool calls start a moment apart): the window is shared from then on, and what the hook saw
+        # alone no longer counts. The session file ends nothing.
+        setup(["sent"])
+        run.mkdir(parents=True, exist_ok=True)
+        for old in run.glob("perm.*"):
+            old.unlink()
+        n0 = answered()
+        agent, hook = start()
+        s.check("closed: a hook that joins later: the hook waits on the tunnel", wait_for(lambda: polls(), 20), s.log_text()[-300:])
+        (run / ("perm.held-1.%d" % os.getpid())).write_text("1793232000123\n")
+        time.sleep(2.5)  # (two looks at the shared window)
+        state(agent.pid, status="busy", waiting_for=None, at=1793232009000)
+        time.sleep(4.5)  # (four looks at a file that says the prompt is not open)
+        s.check("closed: a hook that joins later: the session file ends nothing", agent.poll() is None and answered() == n0,
+                s.log_text()[-300:])
+        agent.kill()
+        finished(agent, 10)
+        for mark in run.glob("perm.held-1.%d" % os.getpid()):
+            mark.unlink()
+        s.settle("the hook's end")
+        # Answered while the request is on its way to a slow link (the relay answers a request it will
+        # wait on about 4 seconds later): the hook looked at the window before it sent anything, so it
+        # has seen it open, and the answer is told from the session file once the links have answered.
+        # (No set time before the answer: the hook's mark holds the window's statusUpdatedAt once the
+        # hook has looked.)
+        s.setup([(LINK_A, {"ingest_delay": 4}), (LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})],
+                conf={"claude_wait": 40})
+        tctl("/_ctl/reset", {})
+        tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T, unknown_error="unknown", max_body=65536, push="sent", push_seq=["sent"])}})
+        shutil.rmtree(sessions, ignore_errors=True)
+        sessions.mkdir(parents=True)
+        run.mkdir(parents=True, exist_ok=True)
+        for old in run.glob("perm.*"):
+            old.unlink()
+        n0 = answered()
+
+        def looked():
+            try:
+                return any(p.read_text().strip() for p in run.glob("perm.held-1.*"))
+            except OSError:
+                return False
+
+        agent, hook = start()
+        t = time.time()
+        seen = wait_for(looked, 3.5)
+        state(agent.pid, status="busy", waiting_for=None, at=1793232009000)
+        early = time.time() - t
+        done, out = finished(agent, 25)
+        s.check("closed: answered before a slow link took the request: the hook had looked first (%.2f s)" % early,
+                bool(seen) and early < 3.5, "%.2f s %s" % (early, s.log_text()[-300:]))
+        s.check("closed: answered before a slow link took the request: answered at the terminal",
+                done and out.strip() == "" and answered() - n0 == 1
+                and wait_for(lambda: results(), 5) and results()[-1].get("out") == "terminal",
+                "%r %s %s" % (out, str(results())[:200], s.log_text()[-300:]))
+        s.settle("the hook's end")
         # Two tunnels hold it: one round is one rid for both, sent at once (the slower tunnel's answer
         # does not hold back the other's copy; its link file sorts first).
         tun2, tctl2 = s.spawn_mock()

@@ -2953,8 +2953,9 @@ rq_reject() { # i bad|changed
 # question, 2.1.316 and 2.1.317 wrote `permission prompt` [measured]. Only a
 # measured pair of tool and value counts; the version is not read.
 rq_window() {
-  # RQ_WSTATE: closed when this session no longer waits on anything (it went
-  # on: rq_closed reads it); empty for every other answer.
+  # RQ_WSTATE, for rq_closed: closed when this session no longer waits on
+  # anything (it went on), shared when its window is open with another
+  # permission hook on it; empty for every other answer.
   RQ_WSTATE=''
   [ "$AGENT" = claude ] && [ -n "$AGENT_PID" ] && [ -n "$RQ_MARK" ] || return 1
   wv=$(head -c 8192 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/$AGENT_PID.json" 2>/dev/null |
@@ -3009,19 +3010,25 @@ EOF
     return 1
   fi
   rq_alone
+  wal=$?
+  [ "$wal" = 1 ] && RQ_WSTATE=shared
+  return "$wal"
 }
 
 # True when the agent's own window for this request closed while the hook
-# lives on: answered at the terminal (SimpleTerm if/ssh-tunnel-wait#open-window, "the window closed").
+# lives on: answered at the terminal (SimpleTerm if/ssh-tunnel-wait#window-closed).
 # Claude Code keeps a permission hook until the allowed tool ends [measured],
 # so the tool's end (answered_locally) can be minutes away, and a denial
 # signals the hook instead. The hook must have seen the window open and its
 # own (rq_window 0: RQ_SEEN), and two looks in a row must then say the session
-# waits on nothing (it went on). Another window in its place (waiting, another
-# statusUpdatedAt), a window shared with another permission hook ("1 of 2"),
-# one never seen, a file that cannot be read: nothing to tell by, and the wait
-# goes on as before. Ending a request the user can still answer in the app is
-# the worse mistake, so only the plain reading ends it.
+# waits on nothing (it went on). The first look is made before the request is
+# sent (request_flow): a link can take seconds to answer, and an answer at the
+# terminal in that time would leave no look with the window open. Another
+# window in its place (waiting, another statusUpdatedAt), a window shared with
+# another permission hook ("1 of 2": one that joins after the first look takes
+# RQ_SEEN back), one never seen, a file that cannot be read: nothing to tell
+# by, and the wait goes on as before. Ending a request the user can still
+# answer in the app is the worse mistake, so only the plain reading ends it.
 rq_closed() {
   [ "$AGENT" = claude ] || return 1
   rq_window
@@ -3031,6 +3038,10 @@ rq_closed() {
       return 1
       ;;
     1:closed) ;;
+    1:shared)
+      RQ_SEEN=0 RQ_SHUT=0
+      return 1
+      ;;
     *)
       RQ_SHUT=0
       return 1
@@ -3548,6 +3559,8 @@ request_flow() { # ev mode
     printf '' 2>/dev/null >"$RQ_MARK" || RQ_MARK=''
   fi
   trap 'rq_finish $rq_sig; log "permission signal"; finish' TERM INT HUP
+  # The first look at the agent's window, before anything is sent (rq_closed).
+  rq_closed
 
   while IFS= read -r f; do
     [ -n "$f" ] || continue

@@ -4951,8 +4951,9 @@ function Get-HeldOpenGrok {
 # (statusUpdatedAt unchanged), and no other permission hook of this session
 # waits on that same window (Get-RqAlone) (rq_window).
 function Get-RqWindow([int]$agentPid) {
-    # RqWState: closed when this session no longer waits on anything (it went
-    # on: Test-RqClosed reads it); empty for every other answer.
+    # RqWState, for Test-RqClosed: closed when this session no longer waits on
+    # anything (it went on), shared when its window is open with another
+    # permission hook on it; empty for every other answer.
     $Script:RqWState = ''
     if ($Script:Agent -cne 'claude' -or $agentPid -le 0 -or -not $Script:RqMark) { return 1 }
     $dir = $env:CLAUDE_CONFIG_DIR
@@ -4999,25 +5000,36 @@ function Get-RqWindow([int]$agentPid) {
         if ($gone) { $Script:RqWState = 'closed' }
         return 1
     }
-    return (Get-RqAlone)
+    $alone = Get-RqAlone
+    if ($alone -eq 1) { $Script:RqWState = 'shared' }
+    return $alone
 }
 
 # True when the agent's own window for this request closed while the hook
-# lives on: answered at the terminal (SimpleTerm if/ssh-tunnel-wait#open-window, "the window closed").
+# lives on: answered at the terminal (SimpleTerm if/ssh-tunnel-wait#window-closed).
 # Claude Code keeps a permission hook until the allowed tool ends [measured],
 # so the tool's end (Test-AnsweredLocally) can be minutes away, and a denial
 # ends the hook instead. The hook must have seen the window open and its own
 # (Get-RqWindow 0: RqSeen), and two looks in a row must then say the session
-# waits on nothing (it went on). Another window in its place (waiting, another
-# statusUpdatedAt), a window shared with another permission hook ("1 of 2"),
-# one never seen, a file that cannot be read: nothing to tell by, and the wait
-# goes on as before. Ending a request the user can still answer in the app is
-# the worse mistake, so only the plain reading ends it (rq_closed).
+# waits on nothing (it went on). The first look is made before the request is
+# sent (Invoke-RequestFlow): a link can take seconds to answer, and an answer
+# at the terminal in that time would leave no look with the window open.
+# Another window in its place (waiting, another statusUpdatedAt), a window
+# shared with another permission hook ("1 of 2": one that joins after the
+# first look takes RqSeen back), one never seen, a file that cannot be read:
+# nothing to tell by, and the wait goes on as before. Ending a request the
+# user can still answer in the app is the worse mistake, so only the plain
+# reading ends it (rq_closed).
 function Test-RqClosed([int]$agentPid) {
     if ($Script:Agent -cne 'claude') { return $false }
     $w = Get-RqWindow $agentPid
     if ($w -eq 0) {
         $Script:RqSeen = $true
+        $Script:RqShut = 0
+        return $false
+    }
+    if ($w -eq 1 -and $Script:RqWState -ceq 'shared') {
+        $Script:RqSeen = $false
         $Script:RqShut = 0
         return $false
     }
@@ -5243,6 +5255,8 @@ function Invoke-RequestFlow([string]$ev, [string]$mode) {
         $mark = Join-Path $RunDir ('perm.' + $Sid + '.' + $PID)
         if (Write-FileB $mark '') { $Script:RqMark = $mark }
     }
+    # The first look at the agent's window, before anything is sent (rq_closed).
+    [void](Test-RqClosed $agentPid)
     function Get-Remain { $r = $deadline - (Now-Epoch); if ($r -lt 1) { $r = 1 }; if ($r -gt 20) { $r = 20 }; return $r }
     if ($mode -ceq 'shared') {
         Send-RqPass $links 'all' $true '' $ev 20 $Script:Rid

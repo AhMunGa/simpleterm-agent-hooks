@@ -550,7 +550,8 @@ fields and skip the rest). The contract is in the SimpleTerm app's specs (`index
   while that tool runs. A waiting hook reads the same session record once a second: once it has
   seen its own prompt open (alone on it) and the record then says twice in a row that the session
   waits on nothing, it ends the wait and tells the app the request was answered in the terminal
-  (`resolved`, `terminal`), about 2 seconds after the answer. Another prompt in its place, a prompt
+  (`resolved`, `terminal`), about 2 seconds after the answer (or after every link has taken the
+  request, when that is later). Another prompt in its place, a prompt
   shared by parallel tool calls ("1 of 2") or a record that cannot be read end nothing: the wait
   then ends as before, when the tool has ended (SimpleTerm `if/ssh-tunnel-wait#window-closed`,
   issue AhMunGa/simple-term#895).
