@@ -218,6 +218,15 @@ Use one way, not both (OpenCode refuses the same plugin id twice). OpenCode 2.x 
 a shared background service, so the plugin sends alerts to linked devices but writes nothing to
 the terminal.
 
+The folder has two parts. `index.js` runs in that service. `tui.js` runs in every OpenCode TUI and
+tells the service which session the TUI shows, with that terminal tab's SimpleTerm marker and its
+tmux, screen or herdr pane. The service then sends a session's alerts and requests with the tab of
+the TUI that shows it, and keeps a record for resuming a session that a SimpleTerm tab shows. A
+session that runs in another tab of the TUI is marked so that the app does not move the row to it,
+and a session that several TUIs show at once is sent without a tab. OpenCode 2.4 automations count
+as scheduled turns, as the schedules of 2.2 and 2.3 did. abduco and dtach are not detected for
+OpenCode 2.x.
+
 ### OpenCode 1.x
 
 OpenCode 1.x loads every `.js` file in `~/.config/opencode/plugins/`:

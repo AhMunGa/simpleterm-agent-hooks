@@ -1186,6 +1186,7 @@ END {
       for (k = 1; k <= ncl; k++) S("tab.cl." (k - 1), CL[k])
     }
   }
+  if (P("bg") == "1") R("bg", "1")
   R("tms", P("tms"))
   if (P("rkind") != "") req(P("rkind"))
   if (P("turn") == "1") turn()
@@ -1294,6 +1295,7 @@ function limits() {
   STR["dir"] = "1024 -"; STR["cfg"] = "0 -"; STR["cfg.path"] = "1024 -"
   STR["avs"] = "0 -"; STR["tid"] = "0 -"; STR["pm"] = "0 -"; STR["tms"] = "0 -"; STR["req.nid"] = "0 -"
   STR["msock"] = "256 -"; STR["tab"] = "0 -"
+  STR["bg"] = "0 -"
   STR["req.tool"] = "128 128"; STR["req.ask.cmd"] = "8192 400"; STR["req.ask.desc"] = "1024 200"
   STR["req.ask.path"] = "1024 256"; STR["req.ask.file"] = "1024 256"; STR["req.ask.files.#"] = "1024 256"
   STR["req.ask.change"] = "0 -"; STR["req.ask.change.old"] = "12288 -"; STR["req.ask.change.new"] = "12288 -"
@@ -1602,7 +1604,9 @@ codex_pm() {
 # herdr pane and is the nearer one (it keeps that pane's HERDR_* variables).
 mux_detect() {
   MUXV='' PANEV=''
-  if [ "$AGENT" = opencode ] && [ "$OCV" = 2 ]; then MUXV=unknown
+  # OpenCode 2.x: the service's environment is not a tab's; bound to one TUI, the
+  # hook has that TUI's (SimpleTerm if/hook-tab-opencode#hook-input).
+  if [ "$AGENT" = opencode ] && [ "$OCV" = 2 ] && [ "${OCB:-}" != one ]; then MUXV=unknown
   elif [ -n "${TMUX:-}" ]; then MUXV=tmux PANEV=${TMUX_PANE:-}
   elif [ -n "${STY:-}" ]; then MUXV=screen
   elif [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ]; then MUXV=herdr PANEV=$HERDR_PANE_ID
@@ -1980,7 +1984,20 @@ tab_detect() {
   case $MSOCK in '' | *[!\ -~]* | *[\"\\]*) MSOCK='' ;; esac
   [ "${#MSOCK}" -le 256 ] || MSOCK=''
   # Rule 1: a host shared by several tabs.
-  if [ "$AGENT" = opencode ] && [ "$OCV" = 2 ]; then ID_ST=c ID_WHY=daemon; return 0; fi
+  # OpenCode 2.x (SimpleTerm if/hook-tab-opencode#events): a session bound to one TUI is judged
+  # by rules 2 to 4 with that TUI's environment; many TUIs give n and their markers; none, or a
+  # plugin without claims, nothing more.
+  if [ "$AGENT" = opencode ] && [ "$OCV" = 2 ]; then
+    case ${OCB:-} in
+      one) ;;
+      many)
+        ID_ST=c ID_WHY=daemon ID_N=$OCN ID_CL=$OCCL
+        is_uint "$ID_N" || ID_CL=''
+        return 0
+        ;;
+      *) ID_ST=c ID_WHY=daemon; return 0 ;;
+    esac
+  fi
   case $AGENT in
     codex | codex-notify)
       # Whether the hook runs in the daemon cannot be read: the environment may be another tab's, and
@@ -2033,7 +2050,7 @@ tab_detect() {
     esac
     return 0
   fi
-  if id_detach; then ID_ST=c ID_WHY=mux; return 0; fi
+  if [ "$AGENT:$OCV" != opencode:2 ] && id_detach; then ID_ST=c ID_WHY=mux; return 0; fi
   # Rules 3 and 4: the marker, a container, an app that predates the marker, or no SimpleTerm tab.
   if [ -n "${LC_SIMPLETERM_TAB:-}" ]; then
     if id_mark_ok "$LC_SIMPLETERM_TAB"; then ID_ST=a ID_TM=$LC_SIMPLETERM_TAB; else ID_ST=c ID_WHY=form; fi
@@ -2097,6 +2114,8 @@ v2_common() {
     # `cl` goes with `n`, empty or not (SimpleTerm if/hook-tab-identity#tab-field).
     is_uint "$ID_N" && AT="$AT@.tab.n${TAB}s$TAB$ID_N$NL@.tab.cl${TAB}s$TAB,$ID_CL$NL"
   fi
+  # An OpenCode 2.x session in another tab of the TUI it is bound to (SimpleTerm if/hook-tab-opencode#events).
+  [ "$AGENT:$OCV:${OCB:-}:${OCBG:-}" = opencode:2:one:1 ] && at bg 1
 }
 
 # Event time in milliseconds where `date` has them (GNU), for `tms`.
@@ -2144,7 +2163,8 @@ send_state() { # st [extra]
     sub_start | sub_stop) ;;
     *)
       sl=$(cat "$sf" 2>/dev/null)
-      [ "${sl%% *}" = "$1" ] && return 0
+      # ST_FORCE: an OpenCode 2.x View sends its state though it went last (if/hook-tab-opencode#view-state).
+      [ "${sl%% *}" = "$1" ] && [ "${ST_FORCE:-}" != 1 ] && return 0
       ;;
   esac
   srid=$RID
@@ -2199,7 +2219,9 @@ st_end() {
 # be resumed; OpenCode 2.x not at all (SimpleTerm hist/session-record#d14: its service's environment is the
 # first TUI's).
 sess_ok() {
-  [ "$AGENT" = opencode ] && [ "$OCV" = 2 ] && return 1
+  # OpenCode 2.x: only with the tab claims (oc_tab), and only a root session (SimpleTerm
+  # if/session-record#opencode2); plugin 0.9.0 and before record none.
+  if [ "$AGENT:$OCV" = opencode:2 ]; then [ -n "${OCB:-}" ] && [ -z "$SUBPAR_SESSION" ] || return 1; fi
   case $AGENT in claude | codex | grok | agy | copilot | opencode) ;; *) return 1 ;; esac
   is_id "$RAWSID" || return 1
   SESS_DIR=$ST_DIR/sessions/$APP
@@ -2220,6 +2242,13 @@ sess_ok() {
     case $EVENT in SessionStart | UserPromptSubmit) ;; *) return 1 ;; esac
     tab_detect
     if [ -n "$ID_DAEMON" ]; then [ -n "$ID_BOUND" ] || return 1; return 0; fi
+  fi
+  if [ "$AGENT:$OCV" = opencode:2 ]; then
+    # The service's SIMPLETERM is not the session's. A record that is there is kept up at every
+    # event; a new one is made at a prompt when a TUI with SIMPLETERM=1 names the session (oc_tab st).
+    [ -f "$SESS.json" ] || [ -f "$SESS.beat" ] && return 0
+    [ "$EVENT" = UserPromptSubmit ] && [ "${OCST:-}" = true ] && return 0
+    return 1
   fi
   [ "${SIMPLETERM:-}" = 1 ] || return 1
 }
@@ -2317,6 +2346,15 @@ sess_write() { # state [prompt]
       smx=$ID_BMUX
     else
       smx=$(printf '%s\n' "$ow" | sed -n 's/^mux=//p')
+    fi
+    case $smx in tmux | screen | herdr | unknown) ;; *) smx='' ;; esac
+  fi
+  if [ "$AGENT:$OCV" = opencode:2 ]; then
+    # The multiplexer of the TUI the session is bound to when the record is made (unknown for many);
+    # afterwards only an event bound to one TUI without bg changes it (SimpleTerm if/session-record#opencode2).
+    if [ "${OCB:-}" = one ] && { [ "${OCBG:-}" != 1 ] || [ -z "$old" ]; }; then smx=$MUXV
+    elif [ -z "$old" ]; then smx=unknown
+    else smx=$(printf '%s\n' "$ow" | sed -n 's/^mux=//p')
     fi
     case $smx in tmux | screen | herdr | unknown) ;; *) smx='' ;; esac
   fi
@@ -5072,13 +5110,21 @@ if [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ "${2:-}" = __refresh ]; then
   exit 0
 fi
 
-# Nothing to do without a link or a SimpleTerm session.
+# Nothing to do without a link or a SimpleTerm session. OpenCode 2.x: a session
+# that a SimpleTerm TUI names (oc_tab st) is recorded with no link either
+# (SimpleTerm if/session-record#opencode2); an input that may say so goes on and
+# is judged again once parsed (below). Anything else leaves here, as in 0.9.0.
 LINKS=$(list_links)
 if [ -z "$LINKS" ] && [ "${SIMPLETERM:-}" != 1 ]; then
-  [ "$AGENT" = notify ] && [ -t 2 ] &&
-    echo 'simpleterm: not a SimpleTerm session and no linked device (~/.simpleterm/links); nothing sent' >&2
-  agy_default
-  exit 0
+  case $AGENT:$INPUT in
+    opencode:*'"oc_tab":{'*'"st":true'* | opencode:*'"oc_tab": {'*'"st": true'*) ;;
+    *)
+      [ "$AGENT" = notify ] && [ -t 2 ] &&
+        echo 'simpleterm: not a SimpleTerm session and no linked device (~/.simpleterm/links); nothing sent' >&2
+      agy_default
+      exit 0
+      ;;
+  esac
 fi
 
 mkdir -p "$RUN_DIR" 2>/dev/null
@@ -5161,6 +5207,9 @@ case $AGENT in
     WANT=$WANT',prompt_id,permission_mode,agent_type,reason,request_id,oc,parent_session_id,message_id,title,cost,tokens_in,tokens_out,turn_by,status_code'
     for i in 0 1 2 3 4 5 6 7 8 9; do WANT=$WANT,background_tasks.$i.id,background_tasks.$i.type,background_tasks.$i.description,background_tasks.$i.command; done
     for i in 0 1 2 3 4; do WANT=$WANT,session_crons.$i.id,session_crons.$i.schedule,session_crons.$i.prompt; done
+    # OpenCode 2.x tab claims (SimpleTerm if/hook-tab-opencode#hook-input) and a View's state.
+    WANT=$WANT',oc_tab.bind,oc_tab.bg,oc_tab.st,oc_tab.n,view_state'
+    for i in 0 1 2 3 4 5 6 7; do WANT=$WANT,oc_tab.cl.$i; done
     ;;
   codex)
     # status: PostModelRequest's (failed or completed).
@@ -5195,6 +5244,7 @@ HB_KIND='' HB_APID='' HB_RESBASE=''
 TPATH='' CTXTOK='' MODEL='' GTYPE='' FULLYIDLE='' TERMREASON='' EXTRA='' GKEY='' REASON=''
 PROMPT='' SRC='' STOPACT='' ISINT='' AGENTID='' PROMPTID='' XFLAGS='' REQIDIN='' TOOLUSEID=''
 OCTITLE='' OCBY='' OCCOST='' OCTIN='' OCTOUT='' RFB='' APATH='' AWS='' LASTIN='' SUBPAR_SESSION='' BG_SVCIDX='' AMS='' AMT='' RECOV='' ECTX='' AINV='' CXST='' OCSC=''
+OCB='' OCBG='' OCST='' OCN='' OCCL='' VIEWST=''
 BG_N=0 BG_FINITE=0 BG_PICK='' BG_TYPE='' BG_DESC='' BG_CMD='' BG_VAL=''
 BG_SVC=0 BG_IDMAP='' BG_KEEP='' BG_SHELLS='' BG_IDS='' BG_NOID=0 BG_M=''
 CRON_N=0 CRON_SCHED='' CRON_SUMS='' CRON_IDS='' PROMPT_SCHED='' COPILOT_SRC='' COPILOT_REP='' COPILOT_DET='' REPORT_ID=''
@@ -5734,6 +5784,12 @@ while IFS= read -r kv; do
     tokens_out=*) OCTOUT=${kv#*=} ;;
     title=*) OCTITLE=${kv#*=} ;;
     turn_by=*) OCBY=${kv#*=} ;;
+    oc_tab.bind=*) OCB=${kv#*=} ;;
+    oc_tab.bg=*) OCBG=${kv#*=} ;;
+    oc_tab.st=*) OCST=${kv#*=} ;;
+    oc_tab.n=*) OCN=${kv#*=} ;;
+    oc_tab.cl.[0-7]=*) id_mark_ok "${kv#*=}" && OCCL=${OCCL:+$OCCL,}${kv#*=} ;;
+    view_state=*) VIEWST=${kv#*=} ;;
     toolName=*) [ -n "$TOOL" ] || TOOL=${kv#*=} ;;
     toolUseId=*) TOOLUSEID=${kv#*=} ;;
     transcriptPath=*) [ -n "$TPATH" ] || TPATH=${kv#*=} ;;
@@ -5788,6 +5844,9 @@ done <<EOF
 $(printf '%s' "$INPUT" | awk -v want="$WANT" "$JSON_GET" 2>/dev/null)
 EOF
 
+case $OCB in one | many | none) ;; *) OCB='' ;; esac
+# OpenCode: the check before the input was read (no link, no SimpleTerm session), with oc_tab.
+if [ "$AGENT" = opencode ] && [ -z "$LINKS" ] && [ "${SIMPLETERM:-}" != 1 ] && [ "$OCST" != true ]; then exit 0; fi
 [ "$AGENT" = codex-notify ] && EVENT=notify
 # Antigravity hooks name their event on the command line.
 [ "$AGENT" = agy ] && EVENT=$MODE
@@ -5848,6 +5907,8 @@ FP=$(printf '%s\t%s' "$TOOL" "$(json_trim "$DETAIL" 200 800)" | cksum | awk '{ p
 # thread going on.
 case $AGENT:$EVENT in
   claude:Stop | codex:Stop | grok:Stop | gemini:AfterAgent | copilot:agentStop | opencode:Stop | *:SessionEnd | *:sessionEnd) ;;
+  # A screen change, not the agent going on.
+  opencode:View) ;;
   *)
     if [ -z "$AGENTID" ] && [ -f "$RUN_DIR/$SID.pend" ]; then rm -f "$RUN_DIR/$SID.pend" 2>/dev/null; fi
     ;;
@@ -6935,6 +6996,7 @@ sess_turn() { # running|idle [prompt]
 # The heartbeat of the session's record (SimpleTerm if/session-record#files): every hook event.
 case $AGENT:$EVENT in
   agy:PreToolUse | grok:PreToolUse) sess_beat ;;
+  opencode:View) ;; # a screen change writes no record (SimpleTerm if/hook-tab-opencode#view-state)
   *:UserPromptSubmit | *:userPromptSubmitted | *:SessionStart | *:sessionStart | *:SessionEnd | *:sessionEnd) ;;
   *) sess_beat ;;
 esac
@@ -7444,6 +7506,21 @@ case $AGENT:$EVENT in
     turn_mark
     send_state running
     sess_turn running
+    ;;
+  opencode:View)
+    # A TUI's screen shows the session now (SimpleTerm if/hook-tab-opencode#view-state): its state
+    # once, though the same one went last, so the app's row follows the screen. No turn end, no record.
+    # An idle session at a pause (background, scheduled, a question) gives none: idle would end the
+    # pause in the app, and the state it rests in already went.
+    case $VIEWST in
+      running | idle)
+        if [ "$VIEWST" = running ] || ! bg_paused; then
+          ST_FORCE=1
+          send_state "$VIEWST"
+          ST_FORCE=''
+        fi
+        ;;
+    esac
     ;;
   opencode:StopFailure)
     note turn
