@@ -14,7 +14,8 @@
   agents, never the service's. A session in another tab of that TUI carries `"bg":1` (to tunnels only);
   a session that several TUIs show, or none, stays `c` `daemon` with `mux` `unknown`. When a TUI's
   screen stays on a session for 1 s, the hook sends that session's state once (`View`), so the app's
-  row follows the screen. Without the plugin RPC, or with a 0.9.0 TUI part, every hook works as before.
+  row follows the screen; not `idle` for a session resting on background work, a schedule or a question,
+  which would end that rest in the app. Without the plugin RPC, or with a 0.9.0 TUI part, every hook works as before.
 - **OpenCode 2.x sessions get a session record** (SimpleTerm `if/session-record#opencode2`,
   `hist/session-record#d28`): a root session is recorded at its prompt when a TUI with `SIMPLETERM=1`
   shows it or has it as a tab, with the multiplexer of the TUI it is bound to; a record is kept up at

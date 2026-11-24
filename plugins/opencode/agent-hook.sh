@@ -7191,11 +7191,15 @@ case $AGENT:$EVENT in
   opencode:View)
     # A TUI's screen shows the session now (SimpleTerm if/hook-tab-opencode#view-state): its state
     # once, though the same one went last, so the app's row follows the screen. No turn end, no record.
+    # An idle session at a pause (background, scheduled, a question) gives none: idle would end the
+    # pause in the app, and the state it rests in already went.
     case $VIEWST in
       running | idle)
-        ST_FORCE=1
-        send_state "$VIEWST"
-        ST_FORCE=''
+        if [ "$VIEWST" = running ] || ! bg_paused; then
+          ST_FORCE=1
+          send_state "$VIEWST"
+          ST_FORCE=''
+        fi
         ;;
     esac
     ;;

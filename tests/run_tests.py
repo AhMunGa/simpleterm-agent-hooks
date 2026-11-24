@@ -7584,6 +7584,13 @@ def t_opencode_automation(s):
                 and not tunnel("done") and not ingests(s, "done"), str(st)[:400] + str(ingests(s))[:200])
         s.check("opencode automation: automation_list of the automation namespace, not the browser's list",
                 [c.get("tool") for c in calls if "tool" in c] == ["automation_list"], str(calls)[:400])
+        # The screen turns to the session at its scheduled pause: no View state (idle would end the pause in the app,
+        # if/hook-tab-opencode#view-state).
+        view = [{"claim": {"v": 1, "pid": "$p0", "t": "$now", "tab": MK_A, "st": True, "env": {}, "cur": sid, "seen": []}},
+                {"sleep": 2500}]
+        run(view, left, rpc=True, sleepers=1)
+        s.settle("the plugin's hooks' background work")
+        s.check("opencode automation: a View at the scheduled pause sends no state", not tunnel("state"), str(tunnel("state"))[:300])
         # The last run: only a code automation, another session's and a paused one are left -> done by schedule, tunnel only.
         run(run_of(2), [auto(aut, status="done"), auto("aut_other", to="ses_other"), auto("aut_code", typ="code"),
                         auto("aut_paused", status="paused")])
@@ -7591,6 +7598,12 @@ def t_opencode_automation(s):
         s.settle("the plugin's hooks' background work")
         s.check("opencode automation: nothing of this session's left -> done by schedule to the tunnel only",
                 dn and (dn[0].get("turn") or {}).get("by") == "schedule" and not ingests(s, "done"), str(dn)[:300] + str(ingests(s))[:300])
+        # No pause after that done: a View sends idle.
+        run(view, [], rpc=True, sleepers=1)
+        vi = wait_for(lambda: tunnel("state"), 10)
+        s.settle("the plugin's hooks' background work")
+        s.check("opencode automation: a View after the last run's done sends idle", [x.get("st") for x in vi or []] == ["idle"],
+                str(vi)[:300])
         # No enqueued item (a plugin that came up late): the inbox id alone tells it, with or without _send.
         for label, inbox in (("msg_aut_", "msg_%s_3" % aut), ("msg_aut_ _send", "msg_%s_4_send" % aut)):
             run(run_of(3, inbox=inbox, meta=False), [])
