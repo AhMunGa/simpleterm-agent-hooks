@@ -33,6 +33,14 @@ const WAKE = new Set(["session.created", "session.execution.started", "permissio
 // Sent again this often though nothing changed: the server part drops a
 // claim 90 s after its time.
 const BEAT_MS = 30000;
+// A call with no answer in CALL_MS failed (a service gone without closing).
+// After FAST_TRIES failures in a row (2 s of looks, longer than a new service
+// takes to register the server part) the next call waits BACKOFF_MS, doubled
+// each time up to BACKOFF_MAX, until one succeeds or server.connected comes.
+const CALL_MS = 5000;
+const FAST_TRIES = 8;
+const BACKOFF_MS = 2000;
+const BACKOFF_MAX = 5000;
 
 function identity(env) {
   const vars = {};
@@ -44,6 +52,16 @@ function identity(env) {
   return { tab, st: env.SIMPLETERM === "1", env: vars };
 }
 
+// p, or a rejection after ms.
+function within(p, ms) {
+  let timer;
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("timeout")), ms);
+    if (timer && typeof timer.unref === "function") timer.unref();
+  });
+  return Promise.race([p, late]).finally(() => clearTimeout(timer));
+}
+
 function setup(ctx) {
   const me = identity(process.env);
   // Root sessions this TUI has had as cur, most recent first.
@@ -52,6 +70,8 @@ function setup(ctx) {
   let lastAt = 0;
   let sending = false;
   let stopped = false;
+  let fails = 0; // failed calls in a row
+  let nextAt = 0; // no call before this, but a forced one
 
   const root = (id) => {
     try {
@@ -94,6 +114,7 @@ function setup(ctx) {
 
   async function look(force) {
     if (stopped || sending) return;
+    if (!force && Date.now() < nextAt) return;
     const { cur, seen } = current();
     const key = cur + "\n" + seen.join(",");
     if (!force && key === lastKey && Date.now() - lastAt < BEAT_MS) return;
@@ -107,14 +128,18 @@ function setup(ctx) {
       // At this TUI's location, read now (none at setup on a new service).
       const loc = ctx.location;
       const dir = loc && typeof loc.directory === "string" ? loc.directory : "";
-      if (dir) await rpc.claim(input, { location: { directory: dir } });
-      else await rpc.claim(input);
+      await within(dir ? rpc.claim(input, { location: { directory: dir } }) : rpc.claim(input), CALL_MS);
       lastKey = key;
       lastAt = Date.now();
+      fails = 0;
+      nextAt = 0;
     } catch {
       // rpc.unavailable (the server part not registered yet, the service
-      // restarting) or any failure: sent again at the next look.
+      // restarting), no answer, or any failure: sent again at the next look,
+      // spaced out after FAST_TRIES in a row.
       lastKey = null;
+      fails += 1;
+      nextAt = fails > FAST_TRIES ? Date.now() + Math.min(BACKOFF_MS * 2 ** (fails - FAST_TRIES - 1), BACKOFF_MAX) : 0;
     } finally {
       sending = false;
     }

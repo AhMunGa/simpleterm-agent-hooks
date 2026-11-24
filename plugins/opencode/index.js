@@ -533,6 +533,10 @@ function takeClaim(input) {
     cur: typeof input.cur === "string" ? input.cur : "",
     seen: Array.isArray(input.seen) ? input.seen.filter((s) => typeof s === "string" && s).slice(0, 32) : [],
   };
+  // An older claim of that TUI (a call that timed out, arriving late) does not
+  // replace a newer one; one older by 90 s or more is a clock set back.
+  const held = tab.claims.get(c.pid);
+  if (held && c.t < held.t && held.t - c.t < CLAIM_TTL_MS) return null;
   tab.claims.delete(c.pid);
   tab.claims.set(c.pid, c);
   if (tab.claims.size > 256) tab.claims.delete(tab.claims.keys().next().value);

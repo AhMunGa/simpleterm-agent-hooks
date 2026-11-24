@@ -9,10 +9,11 @@
 // rpc: true gives the plugin ctx.rpc (2.4's plugin RPC); a step {claim: {...}, via?: directory} calls the `claim`
 //   handler registered at that directory (default: the first instance's). In a claim "$self" is this process's pid,
 //   "$p0".."$pN" the pids of scenario.sleepers child processes, "$dead" one that has exited, "$now" and "$old"
-//   (91 s ago) times.
+//   (91 s ago) times, "$ago:<ms>" that many ms ago.
 // tui: the TUI part with a fake TUI context: scenario {env, route, tabs, enabled, roots, location, noClient, steps:
-//   [{route} | {tabs: [session ids]} | {enabled} | {roots} | {location} | {fail: n} | {client: label} | {emit: type}
-//   | {mark} | {sleep}]}; every claim call is recorded with its time.
+//   [{route} | {tabs: [session ids]} | {enabled} | {roots} | {location} | {fail: n} | {hang: n} | {client: label}
+//   | {emit: type} | {mark} | {sleep}]}; every claim call is recorded with its time. fail: the next n calls throw
+//   rpc.unavailable; hang: the next n calls never answer (the service gone without closing).
 // Prints the plugin's calls (permission replies) as JSON on the last line.
 import { spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
@@ -60,6 +61,7 @@ function fill(v) {
   if (typeof v === "string" && v in pids) return pids[v];
   if (v === "$now") return Date.now();
   if (v === "$old") return Date.now() - 91000;
+  if (typeof v === "string" && /^\$ago:\d+$/.test(v)) return Date.now() - Number(v.slice(5));
   if (Array.isArray(v)) return v.map(fill);
   if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, fill(x)]));
   return v;
@@ -96,7 +98,8 @@ if (kind === "v1") {
   const def = mod.default;
   calls.push({ id: def.id, setup: typeof def.setup });
   const st = { route: scenario.route || { type: "home" }, tabs: scenario.tabs || [], enabled: scenario.enabled !== false,
-               roots: scenario.roots || {}, location: scenario.location || "", fail: scenario.fail || 0 };
+               roots: scenario.roots || {}, location: scenario.location || "", fail: scenario.fail || 0,
+               hang: scenario.hang || 0 };
   const listeners = new Set();
   const t0 = Date.now();
   const mkClient = (label) => ({
@@ -108,6 +111,11 @@ if (kind === "v1") {
           const e = new Error("rpc.unavailable");
           e.type = "rpc.unavailable";
           throw e;
+        }
+        if (st.hang > 0) {
+          st.hang -= 1;
+          calls.push({ hung: label, cur: input && input.cur, at: Date.now() - t0 });
+          return new Promise(() => {});
         }
         calls.push({ claim: input, opts: opts === undefined ? null : opts, rpc: d && d.id, client: label, at: Date.now() - t0 });
         return {};
@@ -139,6 +147,7 @@ if (kind === "v1") {
     else if ("roots" in step) st.roots = step.roots;
     else if ("location" in step) st.location = step.location;
     else if ("fail" in step) st.fail = step.fail;
+    else if ("hang" in step) st.hang = step.hang;
     else if ("client" in step) client = mkClient(step.client);
     else if ("emit" in step) for (const h of [...listeners]) h({ details: { type: step.emit, data: {} } });
     else if ("mark" in step) calls.push({ mark: step.mark, at: Date.now() - t0 });

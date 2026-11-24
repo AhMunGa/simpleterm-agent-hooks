@@ -5047,14 +5047,21 @@ if [ "${SIMPLETERM_HOOK_TEST:-}" = 1 ] && [ "${2:-}" = __refresh ]; then
   exit 0
 fi
 
-# Nothing to do without a link or a SimpleTerm session.
+# Nothing to do without a link or a SimpleTerm session. OpenCode 2.x: a session
+# that a SimpleTerm TUI names (oc_tab st) is recorded with no link either
+# (SimpleTerm if/session-record#opencode2); an input that may say so goes on and
+# is judged again once parsed (below). Anything else leaves here, as in 0.9.0.
 LINKS=$(list_links)
-# OpenCode decides after its input is read (below): its oc_tab may name a SimpleTerm tab.
-if [ -z "$LINKS" ] && [ "${SIMPLETERM:-}" != 1 ] && [ "$AGENT" != opencode ]; then
-  [ "$AGENT" = notify ] && [ -t 2 ] &&
-    echo 'simpleterm: not a SimpleTerm session and no linked device (~/.simpleterm/links); nothing sent' >&2
-  agy_default
-  exit 0
+if [ -z "$LINKS" ] && [ "${SIMPLETERM:-}" != 1 ]; then
+  case $AGENT:$INPUT in
+    opencode:*'"oc_tab":{'*'"st":true'* | opencode:*'"oc_tab": {'*'"st": true'*) ;;
+    *)
+      [ "$AGENT" = notify ] && [ -t 2 ] &&
+        echo 'simpleterm: not a SimpleTerm session and no linked device (~/.simpleterm/links); nothing sent' >&2
+      agy_default
+      exit 0
+      ;;
+  esac
 fi
 
 mkdir -p "$RUN_DIR" 2>/dev/null

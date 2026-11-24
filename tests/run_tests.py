@@ -7739,7 +7739,8 @@ def t_opencode_tui(s):
     of the route; seen: the roots this TUI had as cur that are still tabs, newest first, none while tabs are off;
     the tab's marker, SIMPLETERM and multiplexer variables, a value over 1,024 bytes left out), when (at start, a change
     seen by the 250 ms look, server.connected, a failed call again at the next look) and how (the RPC simpleterm-tab at
-    this TUI's location, none without one, the client read at each call)."""
+    this TUI's location, none without one, the client read at each call); a call with no answer in 5 s counts as failed;
+    after 8 failures in a row the calls space out (2 s, 4 s, 5 s at most) until one succeeds or server.connected."""
     if not NODE or s.kind != "sh":
         return
     env = {"LC_SIMPLETERM_TAB": MK_A, "SIMPLETERM": "1", "TMUX": "/tmp/tmux-501/default,77,0", "TMUX_PANE": "%3",
@@ -7786,6 +7787,23 @@ def t_opencode_tui(s):
             len([c for c in calls if "failed" in c]) == 2
             and [(c["claim"]["cur"], c["claim"]["seen"], c["opts"], c["client"]) for c in cl] ==
             [("ses_A", [], None, 1), ("ses_B", [], None, 1), ("ses_A", [], None, 2)], str(calls)[:600])
+    # A call that never answers (the service gone without closing): failed after 5 s, then the screen's claim goes.
+    calls = run([{"sleep": 1000}, route("ses_B"), {"sleep": 5600}], hang=1)
+    cl, hung = claims(calls), [c for c in calls if "hung" in c]
+    s.check("opencode tui: a call with no answer for 5 s counts as failed and the next look sends",
+            len(hung) == 1 and cl and cl[0]["claim"]["cur"] == "ses_B" and 4900 <= cl[0]["at"] - hung[0]["at"] <= 5600,
+            str(calls)[:600])
+    # Failing calls: 8 at the 250 ms looks, then 2 s and 4 s apart; server.connected and the first success end that.
+    calls = run([{"sleep": 6500}, {"fail": 0}, {"mark": "up"}, {"emit": "server.connected"}, {"sleep": 300}, route("ses_B"),
+                 {"sleep": 500}], fail=1000)
+    fl = [c["at"] for c in calls if "failed" in c]
+    up = at(calls, "up")
+    gaps = [b - a for a, b in zip(fl, fl[1:])]
+    s.check("opencode tui: failures in a row space out after 8, server.connected sends at once, a success ends it",
+            9 <= len(fl) <= 11 and max(gaps[:7] or [0]) < 600 and len(gaps) > 8 and 1800 <= gaps[8] <= 2600
+            and [c["claim"]["cur"] for c in claims(calls, up)] == ["ses_A", "ses_B"]
+            and claims(calls, up)[0]["at"] - up < 200 and claims(calls, up)[1]["at"] - claims(calls, up)[0]["at"] < 900,
+            str(fl) + str(claims(calls, up))[:300])
     calls = run([{"sleep": 400}], noClient=True)
     s.check("opencode tui: no client (no RPC): nothing sent, nothing broken", not claims(calls) and calls[-1].get("end") is not None,
             str(calls)[:300])
@@ -7895,6 +7913,10 @@ def t_opencode_tabs(s):
     s.check("opencode tabs: a dead, old, other-version, pid-less or oversized claim is dropped",
             [of(rows, x)[0][1].get("oc_tab") if of(rows, x) else None for x in ("ses_1", "ses_2", "ses_3", "ses_4", "ses_5")]
             == [{"bind": "none"}] * 5, str(rows)[:600])
+    # A claim older than the one held for that TUI (a timed-out call that arrives late) does not replace it.
+    calls, rows = run([claim("$p0", "ses_1"), claim("$p0", "ses_2", t="$ago:3000"), ask("ses_1"), ask("ses_2")])
+    s.check("opencode tabs: an older claim of the same TUI is dropped",
+            one(rows, "ses_1", 0) and [r[1].get("oc_tab") for r in of(rows, "ses_2")] == [{"bind": "none"}], str(rows)[:600])
     # The screen's session: one View after 1 s on screen; a route that changes within 1 s and "" give none; a
     # claim sent again with the same cur gives no second one; running when the session runs a turn.
     calls, rows = run([claim("$p0", "ses_v1"), {"sleep": 1300}, claim("$p0", "ses_v1"), {"sleep": 1300},
@@ -8022,6 +8044,19 @@ def t_opencode_tab_events(s):
                 sv == ["running", "running"] and not tunnel("done", "ses_v"), str(sv))
         s.check("opencode records: View leaves the record as the prompt made it", (record("ses_v") or {}).get("state") == "running",
                 str(record("ses_v")))
+        # No link and no SimpleTerm (the plugin only): the hook leaves before ~/.simpleterm/run as 0.9.0 did; a session
+        # that a SimpleTerm TUI names (oc_tab st) is recorded all the same.
+        s.setup([])
+        run_dir = s.home / ".simpleterm" / "run"
+        shutil.rmtree(run_dir, ignore_errors=True)
+        base = {"hook_event_name": "UserPromptSubmit", "cwd": d, "oc": "2", "prompt": "hi"}
+        s.run("opencode", json.dumps(dict(base, session_id="ses_n1", oc_tab={"bind": "none"}), separators=(",", ":")))
+        s.check("opencode: no link, no SimpleTerm, no SimpleTerm TUI: the hook leaves before its run folder",
+                not run_dir.exists() and record("ses_n1") is None, str(list(run_dir.glob("*")) if run_dir.exists() else ""))
+        s.run("opencode", json.dumps(dict(base, session_id="ses_n2", oc_tab={"bind": "many", "n": 2, "cl": [], "st": True}),
+                                     separators=(",", ":")))
+        s.check("opencode records: no link, a session a SimpleTerm TUI names: recorded", record("ses_n2") is not None,
+                str(list(rec.glob("*")) if rec.exists() else ""))
     finally:
         tun.terminate()
         tun.wait(5)
