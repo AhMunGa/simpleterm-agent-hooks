@@ -19,6 +19,18 @@
   on a Mac).
   Tested against stand-ins of the six agents, and with agy 1.5.16 and 1.5.5 in an isolated home with
   a model stub and a stand-in tunnel; the PowerShell hook was not run (no `pwsh` on the test machine).
+- **A Claude Code subagent's approval request no longer keeps its window off the terminal**
+  (SimpleTerm `spec/request-wait#hook-wait`, `if/ssh-tunnel-wait#window-closed`, issue AhMunGa/simple-term#895).
+  Claude Code 2.1.331 (the latest) runs every subagent in the background and opens a subagent's
+  approval window only after its `PermissionRequest` hook ends, so a hook that waited for the app
+  left the terminal without the window for up to `claude_wait` (540 s). A request whose hook input
+  has `agent_id` now goes as `wait: hidden`, as Codex's: with the app connected the hook does not
+  wait and the window opens at once; on relay links alone it waits at most 60 seconds, or
+  `claude_wait` when that is shorter. Such a request is never judged from the session file (no mark,
+  no resend, no end when the main thread's window closes). A window shared by parallel tool calls
+  ("1 of 2") now also ends as answered at the terminal once the session waits on nothing, which it
+  does only after every item is answered (measured on 2.1.331). Both hooks (sh, PowerShell); the
+  PowerShell hook was not run (no `pwsh` on the test machine).
 
 - **Codex sends its pane from a screen that runs the hook itself** (SimpleTerm
   `if/hook-events-identification#identification`, `if/hook-tab-identity#scope-fields`, issue
