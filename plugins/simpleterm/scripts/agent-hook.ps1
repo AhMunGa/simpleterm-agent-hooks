@@ -2192,8 +2192,7 @@ function Get-Mux {
     if ($env:TMUX) { $Script:MuxV = 'tmux'; $Script:PaneV = [string]$env:TMUX_PANE }
     elseif ($env:STY) { $Script:MuxV = 'screen' }
     elseif ($env:HERDR_ENV -ceq '1' -and $env:HERDR_PANE_ID) { $Script:MuxV = 'herdr'; $Script:PaneV = [string]$env:HERDR_PANE_ID }
-    # Codex's default daemon runs every hook with the environment of the TUI that started it.
-    if ($Script:Agent -ceq 'codex') { $Script:PaneV = '' }
+    # Codex's pane goes only from a screen that runs the hook itself: Get-Tab.
     if ($Script:PaneV -cnotmatch '\A[A-Za-z0-9%._:-]{1,64}\z') { $Script:PaneV = '' }
 }
 
@@ -2434,7 +2433,7 @@ function Test-IdContainer {
     return $false
 }
 # The Codex process that runs the hook: the nearest ancestor whose command name is codex, 6 steps at
-# most: @(pid, ' args ') or $null (id_host).
+# most: @(pid, ' args ', command name) or $null (id_host).
 function Find-IdHost {
     $id = [string]$Script:IdStart
     $k = 0
@@ -2442,11 +2441,66 @@ function Find-IdHost {
         $pc = Get-IdPc $id
         if ($null -eq $pc) { return $null }
         $b = Get-IdBase $pc[1]
-        if ($b -ceq 'codex' -or $b -ceq 'codex.exe') { return @($id, (' ' + (Get-IdArgs $id) + ' ')) }
+        if ($b -ceq 'codex' -or $b -ceq 'codex.exe') { return @($id, (' ' + (Get-IdArgs $id) + ' '), [string]$pc[1]) }
         $id = $pc[0]
         $k++
     }
     return $null
+}
+# Whether the Codex process of Find-IdHost is an interactive screen, which runs the hook itself
+# (codex_screen, if/hook-events-identification#identification): its first argument that is not an
+# option is absent, resume, fork, or a prompt with a blank (two words or more as ps joins them, not a
+# command of codex --help 0.172.0). The program is its command name when the arguments start with it,
+# else the first word whose last part is codex; options are skipped with their values as that help
+# lists them. False for any other command or one word, an option not in the list or without its value,
+# and an argument after -i.
+function Test-IdCodexScreen([string]$comm, [string]$hargs) {
+    $s = $hargs
+    if ($s.StartsWith(' ', $Ord)) { $s = $s.Substring(1) }
+    $i = 0
+    if ($comm -and ($s -ceq $comm -or $s.StartsWith($comm + ' ', $Ord))) { $w = @(Get-IdWords $s.Substring($comm.Length)) }
+    else {
+        $w = @(Get-IdWords $s)
+        $x = $false
+        while ($i -lt $w.Count) {
+            $b = Get-IdBase $w[$i]
+            $i++
+            if ($b -ceq 'codex' -or $b -ceq 'codex.exe') { $x = $true; break }
+        }
+        if (-not $x) { return $false }
+    }
+    $valOpts = @('-c', '--config', '--enable', '--disable', '--remote', '--remote-auth-token-env', '-m', '--model', '--local-provider',
+        '-p', '--profile', '-s', '--sandbox', '-C', '--cd', '--add-dir', '-a', '--ask-for-approval')
+    $flags = @('--strict-config', '--oss', '--approve-for-me', '--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust',
+        '--worktree', '--search', '--no-alt-screen', '--no-daemon')
+    $cmds = @('agents', 'exec', 'e', 'review', 'login', 'logout', 'mcp', 'mcp-server', 'plugin', 'app-server', 'remote-control', 'app',
+        'completion', 'update', 'doctor', 'sandbox', 'debug', 'apply', 'a', 'queue', 'archive', 'delete', 'migrate-rollouts', 'migrate-nfs-db',
+        'unarchive', 'cloud', 'exec-server', 'features', 'help')
+    $img = $false; $dd = $false
+    while ($i -lt $w.Count) {
+        $t = $w[$i]
+        if ($t -ceq '--') { $dd = $true; $i++; break }
+        if ($t -ceq '-i' -or $t -ceq '--image') {
+            if ($i + 1 -ge $w.Count) { return $false }
+            $img = $true; $i += 2; continue
+        }
+        if ($t.StartsWith('--image=', $Ord) -or ($t.Length -gt 2 -and $t.StartsWith('-i', $Ord))) { $img = $true; $i++; continue }
+        if ($valOpts -ccontains $t) {
+            if ($i + 1 -ge $w.Count) { return $false }
+            $i += 2; continue
+        }
+        if ($t -cmatch '\A(--(config|enable|disable|remote|remote-auth-token-env|model|local-provider|profile|sandbox|cd|add-dir|ask-for-approval)=|-[cmpsCa].)') { $i++; continue }
+        if ($flags -ccontains $t) { $i++; continue }
+        if ($t.StartsWith('-', $Ord)) { return $false }
+        break
+    }
+    if ($i -ge $w.Count) { return $true }
+    if ($img) { return $false }
+    if (-not $dd) {
+        if ($w[$i] -ceq 'resume' -or $w[$i] -ceq 'fork') { return $true }
+        if ($cmds -ccontains $w[$i]) { return $false }
+    }
+    return ($w.Count - $i) -ge 2
 }
 # Codex's daemon: the TUI of this session, by arguments only (id_codex_bind). $Script:IdTui: the one TUI
 # whose arguments are "resume <this session>". Without one: n and cl from the candidates, and
@@ -2493,9 +2547,9 @@ function Get-Tab {
         $h = Find-IdHost
         # Whether the hook runs in the daemon cannot be read: the environment may be another tab's, and
         # its scope fields with it.
-        if ($null -eq $h) { $Script:IdSt = 'c'; $Script:IdWhy = 'daemon'; $Script:MSess = ''; $Script:MSock = ''; return }
+        if ($null -eq $h) { $Script:IdSt = 'c'; $Script:IdWhy = 'daemon'; $Script:PaneV = ''; $Script:MSess = ''; $Script:MSock = ''; return }
         if ($h[1].Contains(' app-server ') -and $h[1].Contains(' --managed-daemon ')) {
-            $Script:IdDaemon = $true; $Script:MSess = ''; $Script:MSock = ''
+            $Script:IdDaemon = $true; $Script:PaneV = ''; $Script:MSess = ''; $Script:MSock = ''
             if ($IsWin) { $Script:IdSt = 'c'; $Script:IdWhy = 'daemon'; return }
             Find-IdCodexTui $h[0]
             $bt = $Script:IdTui
@@ -2525,7 +2579,11 @@ function Get-Tab {
         }
         # Another app-server (an IDE's): its environment is not a tab's either, and the TUIs of the
         # daemon are not its clients.
-        if ($h[1].Contains(' app-server ')) { $Script:IdSt = 'c'; $Script:IdWhy = 'daemon'; $Script:MSess = ''; $Script:MSock = ''; return }
+        if ($h[1].Contains(' app-server ')) { $Script:IdSt = 'c'; $Script:IdWhy = 'daemon'; $Script:PaneV = ''; $Script:MSess = ''; $Script:MSock = ''; return }
+        # Any other host than a screen (a run without one, another command), and any host on Windows: its
+        # environment is what started it, often another agent's pane (hist/hook-events#d12). The tab rules
+        # go on as before.
+        if ($IsWin -or -not (Test-IdCodexScreen $h[2] $h[1])) { $Script:PaneV = ''; $Script:MSess = ''; $Script:MSock = '' }
     }
     # Rule 2: a multiplexer. Its pane has the environment of the tab that started the server.
     if ($Script:MuxV) {
