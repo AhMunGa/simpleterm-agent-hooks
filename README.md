@@ -545,6 +545,15 @@ fields and skip the rest). The contract is in the SimpleTerm app's specs (`index
   nothing more is sent and the hook ends as before. Older apps never say `held` and older hooks
   ignore it. Other agents' requests are not sent again: their hooks do not wait, and no record of
   theirs tells an open prompt (SimpleTerm `if/ssh-tunnel-wait#held`, `hist/event-v2-request#r16`, issue #446).
+- **Answered in the terminal**: Claude Code keeps its permission hook until the tool it allowed has
+  ended, so a hook waiting on the app would go on waiting, and the app go on showing the request,
+  while that tool runs. A waiting hook reads the same session record once a second: once it has
+  seen its own prompt open (alone on it) and the record then says twice in a row that the session
+  waits on nothing, it ends the wait and tells the app the request was answered in the terminal
+  (`resolved`, `terminal`), about 2 seconds after the answer. Another prompt in its place, a prompt
+  shared by parallel tool calls ("1 of 2") or a record that cannot be read end nothing: the wait
+  then ends as before, when the tool has ended (SimpleTerm `if/ssh-tunnel-wait#window-closed`,
+  issue AhMunGa/simple-term#895).
 - **Ends and states**: a turn's end carries how it ended, who started it, whether its last message
   asks you something, its last message (tunnel), the background work still running (new this turn
   or older, services), the schedules and an active Codex goal. To the SSH tunnel only: `state`
