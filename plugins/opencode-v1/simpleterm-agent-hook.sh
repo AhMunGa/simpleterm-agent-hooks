@@ -1611,9 +1611,7 @@ mux_detect() {
   elif [ -n "${STY:-}" ]; then MUXV=screen
   elif [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ]; then MUXV=herdr PANEV=$HERDR_PANE_ID
   fi
-  # Codex's default daemon runs every hook with the environment of the TUI
-  # that started it: the id would name another pane.
-  [ "$AGENT" = codex ] && PANEV=''
+  # Codex's pane goes only from a screen that runs the hook itself: tab_detect.
   case $PANEV in '' | *[!A-Za-z0-9%._:-]*) PANEV='' ;; esac
   [ "${#PANEV}" -le 64 ] || PANEV=''
 }
@@ -1865,16 +1863,78 @@ id_container() {
 }
 
 # The Codex process that runs the hook: the nearest ancestor whose command name is codex (whatever
-# shell or wrapper Codex starts a hook with is passed over), 6 steps at most. ID_HOST, its arguments
-# ID_HARGS. False when there is none or an ancestor cannot be read.
+# shell or wrapper Codex starts a hook with is passed over), 6 steps at most. ID_HOST, its command
+# name ID_HPC and arguments ID_HARGS. False when there is none or an ancestor cannot be read.
 id_host() {
-  ID_HOST='' ID_HARGS='' iw=$ID_START ik=0
+  ID_HOST='' ID_HPC='' ID_HARGS='' iw=$ID_START ik=0
   while [ "$ik" -lt 6 ] && is_uint "$iw" && [ "$iw" -gt 1 ]; do
     id_pc "$iw" || return 1
-    if [ "${ID_PC##*/}" = codex ]; then ID_HOST=$iw ID_HARGS=" $(id_args "$iw") "; return 0; fi
+    if [ "${ID_PC##*/}" = codex ]; then ID_HOST=$iw ID_HPC=$ID_PC ID_HARGS=" $(id_args "$iw") "; return 0; fi
     iw=$ID_PP ik=$((ik + 1))
   done
   return 1
+}
+
+# Whether the Codex process of id_host is an interactive screen, which runs the hook itself
+# (if/hook-events-identification#identification): its first argument that is not an option is
+# absent, resume, fork, or a prompt with a blank (two words or more as ps joins them, not a command of
+# codex --help 0.172.0). The program is its command name when the arguments start with it (a path may
+# hold a blank), else the first word whose last part is codex; options are skipped with their values
+# as that help lists them. False for any other command or one word, an option in neither list or
+# without its value, an argument after -i (it takes several files, so the rest may be images), and a
+# command anywhere among the words left after the options (ps splits a value with a blank).
+codex_screen() {
+  csa=${ID_HARGS# }
+  case $csa in
+    "$ID_HPC" | "$ID_HPC "*) csa=${csa#"$ID_HPC"} csp=1 ;;
+    *) csp='' ;;
+  esac
+  case $- in *f*) csf=1 ;; *) csf='' ;; esac
+  set -f
+  cso=$IFS IFS=' '
+  # shellcheck disable=SC2086 # split on blanks into words, no globbing
+  set -- $csa
+  IFS=$cso
+  [ -n "$csf" ] || set +f
+  if [ -z "$csp" ]; then
+    csx=''
+    while [ $# -gt 0 ]; do
+      csw=${1##*/}
+      shift
+      case $csw in codex | codex.exe) csx=1 && break ;; esac
+    done
+    [ -n "$csx" ] || return 1
+  fi
+  csi='' csd=''
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --) csd=1 && shift && break ;;
+      -i | --image) [ $# -ge 2 ] || return 1; csi=1 && shift ;;
+      --image=* | -i?*) csi=1 ;;
+      -c | --config | --enable | --disable | --remote | --remote-auth-token-env | -m | --model | --local-provider | -p | --profile | -s | --sandbox | -C | --cd | --add-dir | -a | --ask-for-approval)
+        [ $# -ge 2 ] || return 1
+        shift
+        ;;
+      --config=* | --enable=* | --disable=* | --remote=* | --remote-auth-token-env=* | --model=* | --local-provider=* | --profile=* | --sandbox=* | --cd=* | --add-dir=* | --ask-for-approval=* | -[cmpsCa]?*) ;;
+      --strict-config | --oss | --approve-for-me | --dangerously-bypass-approvals-and-sandbox | --dangerously-bypass-hook-trust | --worktree | --search | --no-alt-screen | --no-daemon) ;;
+      -*) return 1 ;;
+      *) break ;;
+    esac
+    shift
+  done
+  [ $# -gt 0 ] || return 0
+  [ -z "$csi" ] || return 1
+  # A command anywhere among the words left, also after --: ps joins the arguments with blanks, so a
+  # value with a blank comes split and the command after it would read as a prompt.
+  for csw in "$@"; do
+    case $csw in
+      agents | exec | e | review | login | logout | mcp | mcp-server | plugin | app-server | remote-control | app | completion | update | doctor | sandbox | debug | apply | a | queue | archive | delete | migrate-rollouts | migrate-nfs-db | unarchive | cloud | exec-server | features | help) return 1 ;;
+    esac
+  done
+  if [ -z "$csd" ]; then
+    case $1 in resume | fork) return 0 ;; esac
+  fi
+  [ $# -ge 2 ]
 }
 
 # Codex's daemon $1 (if/hook-tab-identity#shared-host): the TUI of this session, by arguments only.
@@ -1942,10 +2002,10 @@ tab_detect() {
     codex | codex-notify)
       # Whether the hook runs in the daemon cannot be read: the environment may be another tab's, and
       # its scope fields with it.
-      if ! id_host; then ID_ST=c ID_WHY=daemon MSESS='' MSOCK=''; return 0; fi
+      if ! id_host; then ID_ST=c ID_WHY=daemon PANEV='' MSESS='' MSOCK=''; return 0; fi
       case $ID_HARGS in
         *" app-server "*" --managed-daemon "* | *" --managed-daemon "*" app-server "*)
-          ID_DAEMON=1 MSESS='' MSOCK=''
+          ID_DAEMON=1 PANEV='' MSESS='' MSOCK=''
           id_codex_bind "$ID_HOST"
           ibt=$ID_TUI
           [ -n "$ibt" ] || ibt=$ID_SOLE
@@ -1972,10 +2032,13 @@ tab_detect() {
         *" app-server "*)
           # Another app-server (an IDE's): its environment is not a tab's either, and the TUIs of
           # the daemon are not its clients.
-          ID_ST=c ID_WHY=daemon MSESS='' MSOCK=''
+          ID_ST=c ID_WHY=daemon PANEV='' MSESS='' MSOCK=''
           return 0
           ;;
       esac
+      # Any other host than a screen (a run without one, another command): its environment is what
+      # started it, often another agent's pane (hist/hook-events#d12). The tab rules go on as before.
+      codex_screen || PANEV='' MSESS='' MSOCK=''
       ;;
   esac
   # Rule 2: a multiplexer. Its pane has the environment of the tab that started the server.

@@ -7345,10 +7345,76 @@ def t_v2_tab(s):
         # Codex runs the hook itself (--no-daemon): the hook's own environment, as any agent, scope fields too.
         case("tb-cx-builtin", {"LC_SIMPLETERM_TAB": MK_A}, {"st": "a", "tm": MK_A},
              procs={80: {"ppid": 1, "comm": "-zsh"}, 500: {"ppid": 510, "comm": "sh"}, 510: tui({"LC_SIMPLETERM_TAB": MK_A}, "codex -C /w resume tb-cx-builtin --no-daemon")}, **cx)
-        case("tb-cx-builtin-tmux", {"TMUX": sock + ",1,0", "TMUX_PANE": "%9", "LC_SIMPLETERM_TAB": MK_C}, dict(mux, n=1, cl=[MK_A]), "tmux", None, None, sock,
+        case("tb-cx-builtin-tmux", {"TMUX": sock + ",1,0", "TMUX_PANE": "%9", "LC_SIMPLETERM_TAB": MK_C}, dict(mux, n=1, cl=[MK_A]), "tmux", "%9", None, sock,
              procs=merged({80: {"ppid": 84, "comm": "-zsh"}, 84: {"ppid": 1, "comm": "tmux", "args": "tmux"}, 500: {"ppid": 510, "comm": "sh"},
                            510: tui({}, "codex --no-daemon"), 201: {"comm": "tmux", "tty": "ttys001", "env": {"LC_SIMPLETERM_TAB": MK_A}}}),
              tmux=("%9", "$1", [(201, "$1")]), **cx)
+        # A Codex screen runs the hook itself (if/hook-events-identification#identification, hist/hook-events#d12):
+        # the first argument of the nearest codex that is not an option is absent, resume, fork or a prompt with
+        # a blank, options skipped with their values as codex --help 0.172.0 lists them. Then the hook's own
+        # pane and scope fields go, as for any agent. Any other host (a command, one word, an option not in the
+        # list or one without its value, -i followed by an argument: it takes several) sends none. The tab
+        # field and mux do not change.
+        cx_tm = {"TMUX": sock + ",1,0", "TMUX_PANE": "%9", "LC_SIMPLETERM_TAB": MK_C}
+        cx_tab = dict(mux, n=1, cl=[MK_A])
+        cx_cl = ("%9", "$1", [(201, "$1")])
+
+        def on_screen(args, comm="codex"):
+            return merged({80: {"ppid": 84, "comm": "-zsh"}, 84: {"ppid": 1, "comm": "tmux", "args": "tmux"}, 500: {"ppid": 510, "comm": "sh"},
+                           510: tui({}, args, comm=comm), 201: {"comm": "tmux", "tty": "ttys001", "env": {"LC_SIMPLETERM_TAB": MK_A}}})
+        screens = [
+            ("codex", True),
+            ("/opt/homebrew/lib/node_modules/@openai/codex/vendor/aarch64-apple-darwin/codex/codex -C /w resume 019a-x --no-daemon", True),
+            ("codex fork --last", True),
+            ("codex -m gpt-5.5 -c model_reasoning_effort=high --search -s workspace-write fix the failing test", True),
+            ("codex --model=gpt-5.5 -cfoo=1 -a never -- fix the plan", True),
+            # ps joins the arguments with blanks: a value with a blank comes split, and a command
+            # anywhere among the words left after the options keeps it no screen (also after --).
+            ("codex -c k=a b fix the bug", True),
+            ("codex -c k=a b resume x", True),
+            ("codex -c k=a b exec foo", False),
+            ("codex --cd /tmp/a b exec foo", False),
+            ("codex -c k=a resume exec foo", False),
+            ("codex -c k=a -- b exec foo", False),
+            ("codex -a never -- exec the plan", False),
+            ("codex please review this change", False),
+            ("codex --enable x --disable y --add-dir /tmp -p work --no-alt-screen", True),
+            ("codex -i shot.png", True),
+            ("codex exec fix the failing test", False),
+            ("codex e fix it now", False),
+            ("codex -C /w exec --json fix it", False),
+            ("codex review", False),
+            ("codex mcp-server", False),
+            ("codex agents", False),
+            ("codex exec-server --listen ws://127.0.0.1:9", False),
+            ("codex newcmd", False),
+            ("codex hello", False),
+            ("codex --frobnicate fix the bug", False),
+            ("codex --frobnicate=1 fix the bug", False),
+            ("codex -i shot.png fix the bug", False),
+            ("codex -C", False),
+        ]
+        for k, (args, sends) in enumerate(screens):
+            case("tb-cx-screen-%d" % k, cx_tm, cx_tab, "tmux", "%9" if sends else None, None, sock if sends else None,
+                 procs=on_screen(args), tmux=cx_cl, **cx)
+        # A path with a blank: the program ends at the word whose last part is codex.
+        case("tb-cx-screen-space", cx_tm, cx_tab, "tmux", "%9", None, sock,
+             procs=on_screen("/Users/u/Application Support/codex/bin/codex resume x", comm="/Users/u/Application Support/codex/bin/codex"), tmux=cx_cl, **cx)
+        case("tb-cx-exec-space", cx_tm, cx_tab, "tmux", None, None, None,
+             procs=on_screen("/Users/u/Application Support/codex/bin/codex exec fix the bug", comm="/Users/u/Application Support/codex/bin/codex"), tmux=cx_cl, **cx)
+        case("tb-cx-exec-space-dir", cx_tm, cx_tab, "tmux", None, None, None,
+             procs=on_screen("/Users/u/codex dir/codex exec fix the bug", comm="/Users/u/codex dir/codex"), tmux=cx_cl, **cx)
+        # herdr: the screen's pane and session; codex exec there sends neither.
+        hscr = merged(hd, {500: {"ppid": 510, "comm": "sh"}, 510: tui({}, "codex --no-daemon")})
+        case("tb-cx-screen-herdr", hd_env, dict(mux, n=2, cl=[MK_A, MK_B]), "herdr", "w1:p1", "s2", procs=hscr, **cx)
+        case("tb-cx-exec-herdr", hd_env, dict(mux, n=2, cl=[MK_A, MK_B]), "herdr",
+             procs=merged(hscr, {510: tui({}, "codex exec go on")}), **cx)
+        # The same from /proc (its arguments split at NUL, read back joined by blanks).
+        lxs = merged(lx, {90: {"ppid": 80, "comm": "codex", "args": "codex --no-daemon"}})
+        case("tb-cx-screen-linux", tm_env, dict(mux, n=2, cl=[MK_A]), "tmux", "%3", None, sock, linux=lxs,
+             tmux=("%3", "$1", [(201, "$1"), (204, "$1")]), agent="codex")
+        case("tb-cx-exec-linux", tm_env, dict(mux, n=2, cl=[MK_A]), "tmux", linux=merged(lxs, {90: {"ppid": 80, "comm": "codex", "args": "codex exec x y"}}),
+             tmux=("%3", "$1", [(201, "$1"), (204, "$1")]), agent="codex")
         # No codex among the ancestors, or nothing can be read: whether it is the daemon is not known,
         # so unknown, and no scope field of an environment that may be another tab's.
         case("tb-cx-nohost", stale, {"st": "c", "why": "daemon"}, "tmux",
@@ -7398,8 +7464,18 @@ def t_v2_tab(s):
               args=(json.dumps({"type": "agent-turn-complete", "cwd": "/w/cxnotify", "last-assistant-message": "notify-probe done"}),))
         probe = wait_for(lambda: [r for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and "notify-probe" in (r.get("plain") or "")], 15)
         jn = (probe[0].get("plain_json") or {}) if probe else {}
-        s.check("tab cx-notify: the notify program in the daemon is c daemon with the candidate, not the daemon's marker",
-                jn.get("tab") == {"st": "c", "why": "daemon", "n": 1, "cl": [MK_A]} and "msock" not in jn, str(probe)[:400])
+        s.check("tab cx-notify: the notify program in the daemon is c daemon with the candidate, not the daemon's marker, "
+                "and sends none of the daemon's pane and scope fields",
+                jn.get("tab") == {"st": "c", "why": "daemon", "n": 1, "cl": [MK_A]} and "msock" not in jn and "pane" not in jn
+                and jn.get("mux") == "tmux", str(probe)[:400])
+        # In a screen that runs it itself it is the screen's: its pane and socket (hist/hook-events#d12).
+        root = tab_bin(base / "cx-notify-screen", procs=on_screen("codex --no-daemon"), tmux=cx_cl)
+        s.run("codex-notify", "", dict(cx_tm, SIMPLETERM_HOOK_TEST="1", SIMPLETERM_HOOK_TEST_IDBIN=str(root), SIMPLETERM_HOOK_TEST_IDPPID="500"),
+              args=(json.dumps({"type": "agent-turn-complete", "cwd": "/w/cxscreen", "last-assistant-message": "screen-notify done"}),))
+        probe = wait_for(lambda: [r for r in tctl("/_ctl/records")["records"] if r["path"] == "/v1/ingest" and "screen-notify" in (r.get("plain") or "")], 15)
+        jn = (probe[0].get("plain_json") or {}) if probe else {}
+        s.check("tab cx-notify-screen: the notify program of a screen sends the screen's pane and socket",
+                jn.get("tab") == cx_tab and jn.get("mux") == "tmux" and jn.get("pane") == "%9" and jn.get("msock") == sock, str(probe)[:400])
         # The session record of a Codex hook (if/session-record#scope): in the daemon only for a TUI whose
         # own environment has the marker (the one tied by its arguments, else the only TUI); SIMPLETERM of
         # the daemon says nothing. Made at a prompt or a session's start only; one that is there is kept up.
@@ -7421,6 +7497,8 @@ def t_v2_tab(s):
             ("cx-rec-noenv", stale, daemon("cx-rec-noenv", {510: {"ppid": 80, "comm": "codex", "args": "codex"}}), False, None),
             ("cx-rec-builtin", {"SIMPLETERM": "1"}, builtin, True, None),
             ("cx-rec-builtin-other", {}, builtin, False, None),
+            ("cx-rec-screen-tmux", dict(cx_tm, SIMPLETERM="1"), on_screen("codex --no-daemon"), True, "tmux"),
+            ("cx-rec-exec-tmux", dict(cx_tm, SIMPLETERM="1"), on_screen("codex exec x y"), True, "tmux"),
         ]
         for sid, env, procs, want, rmux in recs:
             r = rec_run(sid, env, procs)

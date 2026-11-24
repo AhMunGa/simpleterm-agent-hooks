@@ -74,6 +74,30 @@
   does only after every item is answered (measured on 2.1.331). Both hooks (sh, PowerShell); the
   PowerShell hook was not run (no `pwsh` on the test machine).
 
+- **Codex sends its pane from a screen that runs the hook itself** (SimpleTerm
+  `if/hook-events-identification#identification`, `if/hook-tab-identity#scope-fields`, issue
+  AhMunGa/simple-term#341). The hook sent no `pane` for Codex at all: Codex's shared daemon (its
+  default) runs every hook with the environment of the screen that started it, so `TMUX_PANE` and
+  `HERDR_PANE_ID` may name another pane. A screen that runs its hooks itself (`codex --no-daemon`,
+  the daemon turned off, the options that keep a screen off it) has its own, so its requests and
+  turn ends now land on that tmux or herdr pane's row. The hook sends `pane`, `msess` and `msock`
+  for Codex only when the nearest `codex` among its ancestors is an interactive screen by its
+  arguments: no argument that is not an option, `resume`, `fork`, or a prompt of two words or
+  more, the options of `codex --help` (0.172.0) skipped with their values. The managed daemon, an
+  IDE's `app-server`, `exec` and every other command, a single word, an option not in that list,
+  an ancestor that cannot be read, and Windows send none. A command anywhere among the words left
+  after the options counts too, also after `--`: `ps` joins the arguments with blanks, so
+  `-c 'k=a b' exec foo` reads `-c k=a b exec foo`; a screen started with a prompt that holds such
+  a word (`review`, the alias `a`) sends no pane. The notify program (`agent-hook.sh
+  codex-notify`) follows the same rule; up to 0.9.0 it sent the daemon's pane from the daemon.
+  `mux`, `tab` and the session record are as before. Both hooks (sh, PowerShell).
+  Measured with Codex 0.172.0 (the latest) in an isolated home with a model stub, in two panes of
+  tmux 3.8, a herdr 0.9.5 pane and a plain terminal: `--no-daemon`, `resume --last --no-daemon`
+  and a screen started with a prompt sent their own pane (`%0`, `%1`, `w1:p1`) and the tmux
+  socket; the daemon's hooks (their environment was pane `%0`'s for prompts typed in `%1`, the
+  plain terminal and herdr) and `codex exec` sent none. The PowerShell hook was not run (no
+  `pwsh` on the test machine).
+
 ## 0.9.0 - 2026-11-24
 
 - **A Claude Code request answered in the terminal ends at once** (SimpleTerm `if/ssh-tunnel-wait#window-closed`,
