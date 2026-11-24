@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 - 2026-11-24
 
 - **A Claude Code request answered in the terminal ends at once** (SimpleTerm `if/ssh-tunnel-wait#window-closed`,
   issue AhMunGa/simple-term#895). Claude Code keeps a `PermissionRequest` hook alive until the tool it allowed
@@ -17,7 +17,9 @@
   the tool's end. Another prompt in its place (the session still `waiting`, another `statusUpdatedAt`) ends
   nothing while it is there; once the session then waits on nothing, the wait ends as above. Ending a request
   the user can still answer in the app would be the worse mistake.
-  Not measured: what the record says while a prompt is open and a subagent of the session works.
+  While a prompt is open the record says `waiting` whatever else the session does, a subagent at work
+  included: Claude Code 2.1.331 puts a waiting dialog ahead of `busy` when it writes the status (read from its
+  code, not measured).
   Both hooks (sh, PowerShell). Tested against a stand-in agent and session record; the PowerShell hook was not
   run (no `pwsh` on the test machine), and neither hook was run under a real Claude Code.
 
