@@ -507,10 +507,12 @@ fields and skip the rest). The contract is in the SimpleTerm app's specs (`index
   cached `--version`, run in the background when the executable changes), the session and turn
   ids, the subagent, the working folder, the permission mode, a multiplexer (`tmux`, `screen`,
   `herdr`; `unknown` for OpenCode 2.x, whose service keeps the first TUI's environment) and the id of
-  the agent's pane there (`pane`: `TMUX_PANE`, `HERDR_PANE_ID`; never for Codex or OpenCode 2.x),
+  the agent's pane there (`pane`: `TMUX_PANE`, `HERDR_PANE_ID`; for Codex only from a screen that
+  runs the hook itself, see [Known limitations](#known-limitations); never for OpenCode 2.x),
   with which the app ties an event to a herdr or tmux session row. Two fields say which server of
   that kind the pane is in: `msess`, herdr's named session (`HERDR_SESSION`), and `msock`, the
-  tmux socket path (the part of `TMUX` before the first comma; SSH tunnel only). These are for
+  tmux socket path (the part of `TMUX` before the first comma; SSH tunnel only); for Codex they go
+  with `pane`. These are for
   diagnosis and records; nothing is switched on or off by a version.
 - **Which terminal tab** (`tab`, SSH tunnel only, from 0.8.0): the app gives every shell it opens
   a marker in the environment (`LC_SIMPLETERM_TAB`), and the hook says what it can tell from it:
@@ -965,7 +967,17 @@ Not tested on Windows yet.
   `SIMPLETERM` of the daemon is no longer read for that (Windows still goes by it). A Codex
   session's end comes when the daemon closes the conversation (about 30 minutes after you quit or
   the SSH connection drops). `codex --no-daemon` runs hooks in the session itself; the app adds
-  it to the Codex lines it types. SimpleTerm `if/hook-tab-identity#shared-host`,
+  it to the Codex lines it types. Such a screen sends its own `pane`, `msess` and `msock`: the hook
+  takes the nearest `codex` among its ancestors for a screen only when its first argument that is
+  not an option is absent, `resume`, `fork` or a prompt of two words or more (the options of `codex
+  --help` skipped with their values); `codex exec`, any other command, a single word, an option the
+  hook does not know and Windows send none (SimpleTerm `if/hook-events-identification#identification`).
+  `ps` joins the arguments with blanks, so a value with a blank comes split (`-c 'k=a b' exec foo`
+  reads `-c k=a b exec foo`): a Codex command anywhere among the words left after the options
+  makes it no screen, so a screen started with a prompt that holds one (`review`, the alias `a`)
+  sends no pane; such a value can also hide a screen (`-c 'k=a b'` alone), and a later Codex
+  command that takes words of its own could read as a prompt until the hook learns it.
+  SimpleTerm `if/hook-tab-identity#shared-host`,
   `if/session-record#scope`, issue #447.
 - **The tab of an agent is not always known.** Inside screen, abduco and dtach the hook says only
   that it is inside a multiplexer; a tmux or herdr client that runs inside another multiplexer is
