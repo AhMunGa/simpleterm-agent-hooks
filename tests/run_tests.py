@@ -3527,7 +3527,7 @@ def t_agy(s):
     rc, out, err, el = s.run("agy", agy_stop(), args=("Stop",))
     rec = wait_for(lambda: ingests(s, "done"), 20)
     s.check("agy: Stop fully idle -> done, {}", out.strip() == "{}" and rec and rec[0]["plain_json"].get("app") == "antigravity", out)
-    # PreInvocation: {} as Stop (agy 1.5.5 went on with it, measured); nothing to the relay (state is the tunnels').
+    # PreInvocation: {} as Stop (agy 1.5.16 and 1.5.5 went on with it, measured); nothing to the relay (state is the tunnels').
     s.ctl("/_ctl/reset", {})
     for n in (0, 1):
         rc, out, err, el = s.run("agy", json.dumps({"conversationId": "conv-1", "workspacePaths": ["/w/agyproj"], "invocationNum": n}),
@@ -3731,7 +3731,7 @@ def t_agy_paths(s):
             hj["PreToolUse"][0]["matcher"] == "run_command|ask_question|write_file|edit_file|read_file|call_mcp_tool", str(hj["PreToolUse"][0]["matcher"]))
     s.check("agy hooks: write_file's PostToolUse (a plan for review), Stop timeout above agy_wait (110)",
             hj["PostToolUse"][0]["matcher"] == "write_file" and hj["Stop"][0]["timeout"] > 110 and hj["PreToolUse"][0]["hooks"][0]["timeout"] > 110, str(hj)[:300])
-    # agy waits for PreInvocation before every model call (measured on 1.5.5): a short timeout.
+    # agy waits for PreInvocation before every model call (measured on 1.5.16 and 1.5.5): a short timeout.
     s.check("agy hooks: PreInvocation (a turn's start), timeout 30 s at most",
             0 < hj["PreInvocation"][0]["timeout"] <= 30 and "agy PreInvocation" in hj["PreInvocation"][0]["command"], str(hj.get("PreInvocation"))[:300])
     # The real plugin installed where agy puts it, run from the workspace. The device's answer
@@ -6173,11 +6173,11 @@ def t_v2_state_turns(s):
 
         def evs(sid):
             """The session's tunnel events in the order they came: the state for a `state`, else the event (not
-            the `resolved` of a request)."""
+            the `resolved` of a request, nor a `usage` report, which is not a state)."""
             out = []
             for r in tctl("/_ctl/records")["records"]:
                 p = r.get("plain_json") or {}
-                if r["path"] == "/v1/ingest" and p.get("sid") == sid and r["body"]["ev"] != "resolved":
+                if r["path"] == "/v1/ingest" and p.get("sid") == sid and r["body"]["ev"] not in ("resolved", "usage"):
                     out.append(p.get("st") if r["body"]["ev"] == "state" else r["body"]["ev"])
             return out
 

@@ -171,10 +171,10 @@ timed-out hook as a failed tool call, measured).
 
 agy has no hook for a prompt either. The plugin takes its `PreInvocation` hook, which runs before
 every model call, as a turn's start when `invocationNum` is 0: a person's prompt, a background
-command's report and a scheduled run all start that way (measured on 1.5.5). It sends the SSH
+command's report and a scheduled run all start that way (measured on 1.5.16 and 1.5.5). It sends the SSH
 tunnel `state` `running`; at a later call of the turn the script ends at once. agy waits for this
-hook before it calls the model: about 0.2 s at a turn's start and 0.05 s at each later call
-(measured on a Mac).
+hook before it calls the model: 0.28 to 0.39 s at a turn's start and 0.06 to 0.08 s at each later
+call (1.5.16, measured on a Mac).
 
 agy has no "waiting for permission" event: its `PreToolUse` hook runs before every tool call,
 before agy decides whether to ask. So by default the plugin only alerts for agy's own questions

@@ -6,19 +6,19 @@
   `if/event-v2-turn#state`, issue AhMunGa/simple-term#805). A `state` went only when it was not the
   one sent before, and a turn that ended in `done`, a question, `error` or `auth` did not count as a
   change, so the next turn's `running` was dropped: a tmux or herdr row stayed "done" or "waiting"
-  while the agent worked (Grok Build 1.0.77: no turn that followed a done sent it, measured). A
-  turn's end now starts the comparison over: the next state goes even when it is the one sent
+  while the agent worked. A turn's end now starts the comparison over: the next state goes even when it is the one sent
   before, and a state still waiting for its second is dropped rather than arriving after the turn's
   end. Both hooks (sh, PowerShell).
 - **Antigravity CLI sends `running` at each turn's start, and every pause.** agy has no prompt hook.
   The plugin now registers `PreInvocation`, which agy runs before every model call, and takes the
   first of a turn (`invocationNum` 0) as the turn's start: a person's prompt, a background command's
-  report and a scheduled run alike (measured on 1.5.5). The second pause of a session now sends
+  report and a scheduled run alike (measured on 1.5.16, the latest, and on 1.5.5; a `UserPromptSubmit`
+  in `hooks.json` did not run on 1.5.16). The second pause of a session now sends
   `state: background` as the first does (it was dropped as a repeat). agy waits for the hook before
-  it calls the model: about 0.2 s at a turn's start and 0.05 s at each later call (measured on a
-  Mac).
-  Tested against stand-ins of the six agents, and with agy 1.5.5 in an isolated home with a model
-  stub and a stand-in tunnel; the PowerShell hook was not run (no `pwsh` on the test machine).
+  it calls the model: 0.28 to 0.39 s at a turn's start and 0.06 to 0.08 s at each later call (1.5.16
+  on a Mac).
+  Tested against stand-ins of the six agents, and with agy 1.5.16 and 1.5.5 in an isolated home with
+  a model stub and a stand-in tunnel; the PowerShell hook was not run (no `pwsh` on the test machine).
 
 ## 0.9.0 - 2026-11-24
 
