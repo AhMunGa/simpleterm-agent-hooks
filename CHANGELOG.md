@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- **OpenCode 2.x: alerts, requests and states name the tab that shows the session** (SimpleTerm
+  `if/hook-tab-opencode`, `hist/hook-tab-identity#d10`, issue AhMunGa/simple-term#654). OpenCode 2.x runs
+  the plugin in one background service whose environment is that of the process that started it, so
+  0.9.0 could not tell a session's tab (`c` `daemon`, `mux` `unknown`). The plugin now has a TUI part
+  (`tui.js`, package export `./tui`) that OpenCode loads in every TUI: it tells the service, over the
+  plugin RPC `simpleterm-tab`, the session on its screen and the ones it showed that are still tabs,
+  with its tab's marker, `SIMPLETERM` and tmux, screen or herdr variables. The service binds each
+  session to the one TUI that shows it, or else to the one that has it as a tab, and runs the hook with
+  that TUI's values: the event carries its `tab`, `mux`, `pane`, `msess` and `msock` as for the other
+  agents, never the service's. A session in another tab of that TUI carries `"bg":1` (to tunnels only);
+  a session that several TUIs show, or none, stays `c` `daemon` with `mux` `unknown`. When a TUI's
+  screen stays on a session for 1 s, the hook sends that session's state once (`View`), so the app's
+  row follows the screen. Without the plugin RPC, or with a 0.9.0 TUI part, every hook works as before.
+- **OpenCode 2.x sessions get a session record** (SimpleTerm `if/session-record#opencode2`,
+  `hist/session-record#d28`): a root session is recorded at its prompt when a TUI with `SIMPLETERM=1`
+  shows it or has it as a tab, with the multiplexer of the TUI it is bound to; a record is kept up at
+  every event, and `session.deleted` removes it.
+- **OpenCode 2.4 automations are scheduled turns** (SimpleTerm `if/hook-events-scheduled#by-schedule`,
+  `hist/turn-state#d27`). 2.4 replaced schedules with automations: a prompt with
+  `payload.metadata.automation`, or the inbox id `msg_aut_<id>_<run>` (with `_send` for a code
+  automation's prompt), opens a scheduled turn, and what is left is read with the automation tool
+  `list` (namespace `automation`; a browser tool is named `list` too), counting the active prompt
+  automations to that session. 0.9.0 took an automation's run for a person's turn. A build with
+  `schedule_list` (2.2.3 to 2.3.x) still reads that.
+  Measured on OpenCode 2.4.1 (the latest) in an isolated home with a model stub and a stand-in tunnel: a
+  plain tab, two tmux panes, a real herdr 0.9.5 pane, TUIs in the same folder and an automation's runs.
+  The OpenCode hook is `sh` only.
+
 - **The next turn's `running` reaches the app after every kind of turn end** (SimpleTerm
   `if/event-v2-turn#state`, issue AhMunGa/simple-term#805). A `state` went only when it was not the
   one sent before, and a turn that ended in `done`, a question, `error` or `auth` did not count as a

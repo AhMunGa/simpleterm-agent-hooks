@@ -3917,7 +3917,8 @@ NODE = shutil.which("node")
 
 
 def node_plugin(s, kind, scenario, timeout=90):
-    plugin = {"v1": ROOT / "plugins" / "opencode-v1" / "simpleterm.js", "v2": ROOT / "plugins" / "opencode" / "index.js"}[kind]
+    plugin = {"v1": ROOT / "plugins" / "opencode-v1" / "simpleterm.js", "v2": ROOT / "plugins" / "opencode" / "index.js",
+              "tui": ROOT / "plugins" / "opencode" / "tui.js"}[kind]
     p = s.proc_run([NODE, str(HERE / "opencode_harness.mjs"), kind, str(plugin), json.dumps(scenario)],
                    env=s.env(), timeout=timeout, cwd=str(s.tmp))
     p.stdout = p.stdout.decode("utf-8", "replace")
@@ -7226,6 +7227,392 @@ def t_opencode_schedule(s):
         tun.wait(5)
 
 
+def t_opencode_tui(s):
+    """OpenCode 2.x TUI part (tui.js, SimpleTerm if/hook-tab-opencode#claims): what it claims (cur: the root session
+    of the route; seen: the roots this TUI had as cur that are still tabs, newest first, none while tabs are off;
+    the tab's marker, SIMPLETERM and multiplexer variables, a value over 1,024 bytes left out), when (at start, a change
+    seen by the 250 ms look, server.connected, a failed call again at the next look) and how (the RPC simpleterm-tab at
+    this TUI's location, none without one, the client read at each call)."""
+    if not NODE or s.kind != "sh":
+        return
+    env = {"LC_SIMPLETERM_TAB": MK_A, "SIMPLETERM": "1", "TMUX": "/tmp/tmux-501/default,77,0", "TMUX_PANE": "%3",
+           "HERDR_TAB_ID": "w1:t1", "OPENCODE_OTHER": "x", "HERDR_SOCKET_PATH": "/x" * 600}
+
+    def run(steps, **kw):
+        sc = dict({"env": env, "route": {"type": "session", "sessionID": "ses_A"}, "tabs": ["ses_A", "ses_B"],
+                   "location": "/w/proj", "steps": steps}, **kw)
+        return node_plugin(s, "tui", sc, timeout=60)
+
+    def at(calls, mark):
+        return next((c["at"] for c in calls if c.get("mark") == mark), None)
+
+    def claims(calls, after=-1, before=10 ** 9):
+        return [c for c in calls if "claim" in c and after <= c["at"] < before]
+
+    def route(sid):
+        return {"route": {"type": "session", "sessionID": sid}}
+
+    calls = run([{"sleep": 450}, route("ses_B"), {"sleep": 500}, {"route": {"type": "home"}}, {"sleep": 500},
+                 {"tabs": ["ses_B"]}, {"sleep": 500}, {"roots": {"ses_sub": "ses_B"}}, route("ses_sub"), {"sleep": 500},
+                 {"mark": "quiet"}, {"sleep": 900}, {"mark": "connected"}, {"emit": "server.connected"}, {"sleep": 300}])
+    cl = claims(calls)
+    seq = [(c["claim"].get("cur"), c["claim"].get("seen")) for c in cl]
+    s.check("opencode tui: its own id, the claim of the route's root and of the tabs it showed, newest first",
+            calls[0].get("id") == "simpleterm.tui" and seq[:5] == [("ses_A", []), ("ses_B", ["ses_A"]), ("", ["ses_B", "ses_A"]),
+                                                                  ("", ["ses_B"]), ("ses_B", [])], str(seq) + str(calls)[:300])
+    first = cl[0]["claim"] if cl else {}
+    s.check("opencode tui: the claim's fields (the tab's values only, a long one left out) at this TUI's location",
+            first.get("v") == 1 and isinstance(first.get("pid"), int) and first["pid"] > 1 and isinstance(first.get("t"), int)
+            and first.get("tab") == MK_A and first.get("st") is True
+            and first.get("env") == {"TMUX": env["TMUX"], "TMUX_PANE": "%3"}
+            and cl[0].get("rpc") == "simpleterm-tab" and cl[0].get("opts") == {"location": {"directory": "/w/proj"}}, str(cl[:1]))
+    q, c2 = at(calls, "quiet"), at(calls, "connected")
+    s.check("opencode tui: no claim while nothing changes; server.connected sends it again",
+            q is not None and claims(calls, q, c2) == [] and [c["claim"]["cur"] for c in claims(calls, c2)] == ["ses_B"], str(seq))
+    s.check("opencode tui: its cleanup stops listening", calls[-1].get("listeners") == 0, str(calls[-1:]))
+    # Tabs off (herdr's default): no seen. Two failed calls (rpc.unavailable): sent at the next looks. No location: no
+    # location option. A new client (the service restarted) is the one called.
+    calls = run([{"sleep": 900}, route("ses_B"), {"sleep": 500}, {"client": 2}, route("ses_A"), {"sleep": 500}],
+                enabled=False, location="", fail=2)
+    cl = claims(calls)
+    s.check("opencode tui: failed calls go again, tabs off claim no seen, no location, the client read at each call",
+            len([c for c in calls if "failed" in c]) == 2
+            and [(c["claim"]["cur"], c["claim"]["seen"], c["opts"], c["client"]) for c in cl] ==
+            [("ses_A", [], None, 1), ("ses_B", [], None, 1), ("ses_A", [], None, 2)], str(calls)[:600])
+    calls = run([{"sleep": 400}], noClient=True)
+    s.check("opencode tui: no client (no RPC): nothing sent, nothing broken", not claims(calls) and calls[-1].get("end") is not None,
+            str(calls)[:300])
+
+
+def oc_capture_hook(s):
+    """A stand-in for agent-hook.sh that writes, one line per run, the tab variables it got and its input."""
+    cap = s.tmp / "oc-cap.txt"
+    hook = s.tmp / "oc-cap.sh"
+    hook.write_text(
+        "#!/bin/sh\n"
+        "in=$(cat)\n"
+        "e=$(awk 'BEGIN { for (k in ENVIRON) if (k ~ /^(LC_SIMPLETERM_TAB|SIMPLETERM|TMUX|TMUX_PANE|STY|HERDR_[A-Z_]+)$/)"
+        " printf \"%s=%s\\001\", k, ENVIRON[k] }')\n"
+        "printf '%s\\t%s\\n' \"$e\" \"$in\" >>\"$SIMPLETERM_OC_CAPTURE\"\n")
+    cap.write_text("")
+
+    def got():
+        out = []
+        for line in cap.read_text().splitlines():
+            e, _, i = line.partition("\t")
+            env_ = dict(kv.split("=", 1) for kv in e.split("\x01") if "=" in kv)
+            try:
+                inp = json.loads(i)
+            except ValueError:
+                inp = {"raw": i}
+            out.append((env_, inp))
+        return out
+    return hook, cap, got
+
+
+def t_opencode_tabs(s):
+    """OpenCode 2.x server part (index.js) with its TUIs' tab claims (SimpleTerm if/hook-tab-opencode#binding,
+    #hook-input, #view-state, if/session-record#opencode2): a session bound to the one TUI whose screen shows it
+    (cur), else to the one that has it as a tab (seen, bg 1), else many or none; the hook gets the bound TUI's tab
+    values and oc_tab, never the service's; a dead, old or malformed claim is dropped; a hook waits for a claim that
+    comes late; the screen's session gets one View once it stayed 1 s; a deleted session's record goes; without the
+    plugin RPC the hook gets what 0.9.0 gave. The hook is a stand-in that writes what it got."""
+    if not NODE or s.kind != "sh":
+        return
+    d = str(s.tmp)
+    hook, cap, got = oc_capture_hook(s)
+    svc = {"LC_SIMPLETERM_TAB": MK_C, "SIMPLETERM": "1", "TMUX": "/tmp/tmux-501/first,1,0", "TMUX_PANE": "%0",
+           "HERDR_TAB_ID": "w9:t9", "HERDR_WORKSPACE_ID": "w9", "HERDR_STARTUP_CWD": "/x"}
+    env = dict(svc, SIMPLETERM_HOOK_TEST="1", SIMPLETERM_OC_HOOK=str(hook), SIMPLETERM_OC_CAPTURE=str(cap))
+    n = [0]
+
+    def ev(typ, **data):
+        n[0] += 1
+        return {"event": {"id": "evt_t%d" % n[0], "type": typ, "location": {"directory": d}, "data": data}}
+
+    def ask(sid):
+        return ev("permission.asked", id="per_" + sid, sessionID=sid, action="shell", resources=["make"])
+
+    def claim(pid, cur, seen=(), tab=MK_A, st=True, env_=None, **kw):
+        return {"claim": dict({"v": 1, "pid": pid, "t": "$now", "tab": tab, "st": st, "env": env_ or {}, "cur": cur,
+                               "seen": list(seen)}, **kw)}
+
+    sess = {sid: {"title": sid, "location": {"directory": d}} for sid in
+            ("ses_1", "ses_2", "ses_3", "ses_4", "ses_5", "ses_6", "ses_7", "ses_9", "ses_v1", "ses_v2", "ses_v3", "ses_v4")}
+    sess["ses_1c"] = {"parentID": "ses_1", "location": {"directory": d}}
+
+    def run(steps, wait=4000, **kw):
+        cap.write_text("")
+        sc = dict({"directory": d, "env": env, "rpc": True, "sleepers": 3, "sessions": sess, "steps": steps, "wait": wait}, **kw)
+        return node_plugin(s, "v2", sc), got()
+
+    def of(rows, sid, event="PermissionRequest"):
+        return [r for r in rows if r[1].get("session_id") == sid and r[1].get("hook_event_name") == event]
+
+    def one(rows, sid, bg, st=True):
+        r = of(rows, sid)
+        t = r[0][1].get("oc_tab", {}) if r else {}
+        return len(r) == 1 and t.get("bind") == "one" and isinstance(t.get("pid"), int) and t.get("bg") == bg and t.get("st") is st
+
+    tm = {"TMUX": "/tmp/tmux-501/default,77,0", "TMUX_PANE": "%3"}
+    A = claim("$p0", "ses_1", ["ses_2", "ses_4"], env_=tm)
+    B = claim("$p1", "ses_3", ["ses_2"], tab=MK_B, st=False)
+    calls, rows = run([A, B] + [ask(x) for x in ("ses_1", "ses_4", "ses_2", "ses_3", "ses_1c", "ses_9")], wait=6000)
+    r1 = of(rows, "ses_1")
+    s.check("opencode tabs: the one TUI showing the session: its tab, SIMPLETERM and tmux variables, never the service's",
+            one(rows, "ses_1", 0) and r1[0][0] == dict(tm, LC_SIMPLETERM_TAB=MK_A, SIMPLETERM="1"), str(rows)[:600])
+    s.check("opencode tabs: a session only one TUI has as a tab: bound to it with bg 1", one(rows, "ses_4", 1), str(of(rows, "ses_4")))
+    r2 = of(rows, "ses_2")
+    s.check("opencode tabs: a tab of two TUIs: many with n, their markers and st; the service's values taken out",
+            len(r2) == 1 and r2[0][1].get("oc_tab") == {"bind": "many", "n": 2, "cl": [MK_A, MK_B], "st": True} and r2[0][0] == {},
+            str(r2))
+    r3 = of(rows, "ses_3")
+    s.check("opencode tabs: a TUI outside SimpleTerm's tab: its marker, no SIMPLETERM, st false",
+            one(rows, "ses_3", 0, st=False) and r3[0][0] == {"LC_SIMPLETERM_TAB": MK_B}, str(r3))
+    s.check("opencode tabs: a subagent's request is its root session's", one(rows, "ses_1c", 0), str(of(rows, "ses_1c")))
+    r9 = of(rows, "ses_9")
+    s.check("opencode tabs: a session no TUI names: none, nothing of the service's",
+            len(r9) == 1 and r9[0][1].get("oc_tab") == {"bind": "none"} and r9[0][0] == {}, str(r9))
+    # Two TUIs whose screens show the same session: many. A claim that comes 100 ms after the request: one.
+    calls, rows = run([claim("$p0", "ses_5"), claim("$p1", "ses_5", tab=MK_B, st=False), ask("ses_5"), ask("ses_7"),
+                       {"sleep": 100}, claim("$p2", "ses_7", tab=MK_C)])
+    r5, r7 = of(rows, "ses_5"), of(rows, "ses_7")
+    s.check("opencode tabs: two screens show it: many", len(r5) == 1 and r5[0][1].get("oc_tab", {}).get("bind") == "many"
+            and r5[0][1]["oc_tab"].get("n") == 2, str(r5))
+    s.check("opencode tabs: a request waits for a claim that comes late",
+            one(rows, "ses_7", 0) and r7[0][0].get("LC_SIMPLETERM_TAB") == MK_C, str(r7))
+    # Dropped claims: a gone process, 91 s old, another version, no pid, over 8 KiB, not an object.
+    calls, rows = run([claim("$dead", "ses_1"), claim("$p0", "ses_2", t="$old"), claim("$p1", "ses_3", v=2),
+                       claim(0, "ses_4"), claim("$p2", "ses_5", env_={"TMUX": "x" * 9000}), {"claim": "ses_6"},
+                       ask("ses_1"), ask("ses_2"), ask("ses_3"), ask("ses_4"), ask("ses_5")], wait=6000)
+    s.check("opencode tabs: a dead, old, other-version, pid-less or oversized claim is dropped",
+            [of(rows, x)[0][1].get("oc_tab") if of(rows, x) else None for x in ("ses_1", "ses_2", "ses_3", "ses_4", "ses_5")]
+            == [{"bind": "none"}] * 5, str(rows)[:600])
+    # The screen's session: one View after 1 s on screen; a route that changes within 1 s and "" give none; a
+    # claim sent again with the same cur gives no second one; running when the session runs a turn.
+    calls, rows = run([claim("$p0", "ses_v1"), {"sleep": 1300}, claim("$p0", "ses_v1"), {"sleep": 1300},
+                       claim("$p0", "ses_v2"), {"sleep": 400}, claim("$p0", "ses_v3"), {"sleep": 1300},
+                       claim("$p0", ""), {"sleep": 1300},
+                       ev("session.execution.started", sessionID="ses_v4"), claim("$p0", "ses_v4"), {"sleep": 1500}])
+    views = [(r[1].get("session_id"), r[1].get("view_state"), (r[1].get("oc_tab") or {}).get("bg"), r[1].get("cwd"))
+             for r in rows if r[1].get("hook_event_name") == "View"]
+    s.check("opencode tabs: View once per session that stayed 1 s on screen (idle, or running in a turn), bound without bg",
+            views == [("ses_v1", "idle", 0, d), ("ses_v3", "idle", 0, d), ("ses_v4", "running", 0, d)], str(views))
+    # A deleted session's record goes; another's stays.
+    rec = s.home / ".simpleterm" / "sessions" / "opencode"
+    rec.mkdir(parents=True, exist_ok=True)
+    for name in ("ses_del.json", "ses_del.beat", "ses_keep.json"):
+        (rec / name).write_text("{}\n")
+    run([ev("session.deleted", sessionID="ses_del")], wait=2000)
+    s.check("opencode tabs: session.deleted removes the session's record", sorted(p.name for p in rec.iterdir()) == ["ses_keep.json"],
+            str(sorted(p.name for p in rec.iterdir())))
+    # No plugin RPC (a build without it): the hook gets no oc_tab and the service's environment, as with 0.9.0.
+    calls, rows = run([ask("ses_1")], rpc=False)
+    r1 = of(rows, "ses_1")
+    s.check("opencode tabs: without the plugin RPC, no oc_tab and the service's environment",
+            len(r1) == 1 and "oc_tab" not in r1[0][1] and r1[0][0].get("LC_SIMPLETERM_TAB") == MK_C, str(r1))
+
+
+def t_opencode_tab_events(s):
+    """OpenCode 2.x events and records with the tab claims, end to end through the real hook (SimpleTerm
+    if/hook-tab-opencode#events, #view-state, if/event-v2#common-fields bg, if/session-record#opencode2): the bound
+    TUI's tab, multiplexer, pane and msock; bg 1 to the tunnel only; many and none as c daemon with mux unknown; View
+    as one state though the same state went last, with no record; a new record only for a session a SimpleTerm TUI
+    names, at its prompt, with the bound TUI's multiplexer, kept up at every event, its mux changed only by an event
+    bound to one TUI without bg."""
+    if not NODE or s.kind != "sh":
+        return
+    d = str(s.tmp)
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2}), (LINK_A, {"fmt": 2})])
+        rec = s.home / ".simpleterm" / "sessions" / "opencode"
+        n = [0]
+
+        def ev(typ, **data):
+            n[0] += 1
+            return {"event": {"id": "evt_e%d" % n[0], "type": typ, "location": {"directory": d}, "data": data}}
+
+        def turn(sid):
+            return [ev("session.execution.started", sessionID=sid), ev("session.execution.succeeded", sessionID=sid)]
+
+        def claim(pid, cur, seen=(), tab=MK_A, st=True, env_=None):
+            return {"claim": {"v": 1, "pid": pid, "t": "$now", "tab": tab, "st": st, "env": env_ or {}, "cur": cur, "seen": list(seen)}}
+
+        sess = {sid: {"title": "T " + sid, "location": {"directory": d}} for sid in ("ses_1", "ses_2", "ses_3", "ses_4", "ses_9", "ses_v")}
+        tm = {"TMUX": "/tmp/tmux-501/default,77,0", "TMUX_PANE": "%3"}
+
+        def run(steps, wait=5000):
+            s.ctl("/_ctl/reset", {})
+            tctl("/_ctl/reset", {})
+            tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T)}})
+            return node_plugin(s, "v2", {"directory": d, "rpc": True, "sleepers": 3, "sessions": sess, "steps": steps, "wait": wait})
+
+        def tunnel(ev_, sid):
+            return [(r.get("plain_json") or {}) for r in ingests(s, ctl=tctl)
+                    if (r.get("body") or {}).get("ev") == ev_ and (r.get("plain_json") or {}).get("sid") == sid]
+
+        def relay(ev_, sid):
+            return [(r.get("plain_json") or {}) for r in ingests(s, ev_) if (r.get("plain_json") or {}).get("sid") == sid]
+
+        def record(sid):
+            p = rec / (sid + ".json")
+            return json.loads(p.read_text()) if p.exists() else None
+
+        # ses_9 has a record from before: it is kept up whatever the claims say.
+        rec.mkdir(parents=True, exist_ok=True)
+        (rec / "ses_9.json").write_text(json.dumps({"v": 1, "app": "opencode", "sid": "ses_9", "dir": d, "last_at": 1,
+                                                    "started_at": 1, "state": "running", "mux": "tmux"}) + "\n")
+        A = claim("$p0", "ses_1", ["ses_2", "ses_4"], env_=tm)
+        B = claim("$p1", "ses_3", ["ses_2"], tab=MK_B, st=False)
+        run([A, B] + turn("ses_1") + turn("ses_4") + turn("ses_2") + turn("ses_3") + turn("ses_9"), wait=8000)
+        wait_for(lambda: len(tunnel("done", "ses_9")) and len(relay("done", "ses_4")), 20)
+        s.settle("the plugin's hooks' background work")
+        st1 = tunnel("state", "ses_1")
+        s.check("opencode events: a tmux TUI's session: its multiplexer, pane, msock and tab, no bg",
+                st1 and st1[0].get("mux") == "tmux" and st1[0].get("pane") == "%3" and st1[0].get("msock") == "/tmp/tmux-501/default"
+                and (st1[0].get("tab") or {}).get("st") == "c" and (st1[0].get("tab") or {}).get("why") == "mux" and "bg" not in st1[0],
+                str(st1)[:400])
+        t4, r4 = tunnel("done", "ses_4"), relay("done", "ses_4")
+        s.check("opencode events: a session in another tab of the TUI: bg 1 on the tunnel only",
+                t4 and t4[0].get("bg") == 1 and t4[0].get("pane") == "%3" and r4 and "bg" not in r4[0], str(t4)[:300] + str(r4)[:300])
+        t2 = tunnel("done", "ses_2")
+        s.check("opencode events: many: c daemon with n and the markers, mux unknown, no pane",
+                t2 and t2[0].get("tab") == {"st": "c", "why": "daemon", "n": 2, "cl": [MK_A, MK_B]} and t2[0].get("mux") == "unknown"
+                and "pane" not in t2[0], str(t2)[:300])
+        t3 = tunnel("done", "ses_3")
+        s.check("opencode events: a TUI in a tab with a marker: a", t3 and t3[0].get("tab") == {"st": "a", "tm": MK_B}
+                and "mux" not in t3[0], str(t3)[:300])
+        t9 = tunnel("done", "ses_9")
+        s.check("opencode events: none: c daemon without n, mux unknown", t9 and t9[0].get("tab") == {"st": "c", "why": "daemon"}
+                and t9[0].get("mux") == "unknown", str(t9)[:300])
+        r1, r2, r3, r9 = record("ses_1"), record("ses_2"), record("ses_3"), record("ses_9")
+        s.check("opencode records: made for the sessions a SimpleTerm TUI names, with the bound TUI's multiplexer",
+                r1 and r1.get("mux") == "tmux" and r1.get("dir") == d and r1.get("state") == "idle"
+                and r2 and r2.get("mux") == "unknown" and record("ses_4") and r3 is None, str((r1, r2, r3)))
+        s.check("opencode records: a record from before is kept up though no TUI names its session",
+                r9 and r9.get("state") == "idle" and r9.get("last_at", 0) > 1 and r9.get("mux") == "tmux", str(r9))
+        # The mux of a record: not changed by an event bound to many or with bg, changed by one bound to one TUI.
+        run([claim("$p0", "ses_x", ["ses_1"]), claim("$p1", "ses_y", ["ses_1"], tab=MK_B)] + turn("ses_1"))
+        wait_for(lambda: len(tunnel("done", "ses_1")), 20)
+        s.settle("the plugin's hooks' background work")
+        m_many = (record("ses_1") or {}).get("mux")
+        run([claim("$p0", "ses_x", ["ses_1"])] + turn("ses_1"))
+        wait_for(lambda: len(tunnel("done", "ses_1")), 20)
+        s.settle("the plugin's hooks' background work")
+        m_bg = (record("ses_1") or {}).get("mux")
+        run([claim("$p2", "ses_1", tab=MK_C)] + turn("ses_1"))
+        wait_for(lambda: len(tunnel("done", "ses_1")), 20)
+        s.settle("the plugin's hooks' background work")
+        s.check("opencode records: mux kept at many and bg, the plain tab's (none) at one without bg",
+                m_many == "tmux" and m_bg == "tmux" and "mux" not in (record("ses_1") or {"mux": 1}), str((m_many, m_bg, record("ses_1"))))
+        # View: one state though the same state went last; no done, no record of its own.
+        run([claim("$p0", "ses_v"), ev("session.execution.started", sessionID="ses_v"), {"sleep": 2500}])
+        wait_for(lambda: len(tunnel("state", "ses_v")) >= 2, 10)
+        s.settle("the plugin's hooks' background work")
+        sv = [x.get("st") for x in tunnel("state", "ses_v")]
+        s.check("opencode events: View sends its state though the same one went last, and no done",
+                sv == ["running", "running"] and not tunnel("done", "ses_v"), str(sv))
+        s.check("opencode records: View leaves the record as the prompt made it", (record("ses_v") or {}).get("state") == "running",
+                str(record("ses_v")))
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+
+def t_opencode_automation(s):
+    """OpenCode 2.4 automations (SimpleTerm if/hook-events-scheduled#by-schedule, hist/turn-state#d27; the events and
+    automation_list output of 2.4.1, 2026-11-24): an automation's prompt (payload.metadata.automation, or the inbox id
+    msg_aut_<id>_<run> with or without _send) opens a scheduled turn; what is left is read with the automation tool of
+    the namespace automation (not the browser's list), counting only active prompt automations to this session; a
+    build that still has schedule_list reads that one."""
+    if not NODE or s.kind != "sh":
+        return
+    d = str(s.tmp)
+    tun, tctl = s.spawn_mock()
+    try:
+        s.setup([(LINK_A, {}), (LINK_T, {"kind": "tunnel", "relay_url": tctl.url, "fmt": 2})])
+        n = [500]
+        sid = "ses_df351777cffe2nLK4hfaSmumDU"
+        aut = "aut_20cae892a001jolEx5V6vpKYaw"
+
+        def ev(typ, **data):
+            n[0] += 1
+            return {"event": {"id": "evt_%d" % n[0], "type": typ, "location": {"directory": d}, "data": data}}
+
+        def run_of(run, inbox=None, meta=True):
+            inbox = inbox or "msg_%s_%d" % (aut, run)
+            steps = []
+            if meta:
+                steps.append(ev("session.inbox.enqueued", sessionID=sid, inboxID=inbox, item={"type": "user", "payload": {
+                    "text": "AUTO-A run", "metadata": {"automation": {"id": aut, "name": "A", "run": run, "dueAt": 1795509154698,
+                                                                      "late": False}}}, "delivery": "steer"}))
+            return steps + [ev("session.execution.started", sessionID=sid), ev("session.inbox.delivered", sessionID=sid, inboxID=inbox),
+                            ev("session.execution.succeeded", sessionID=sid)]
+
+        def auto(id_, status="active", typ="prompt", to=sid, trig=None):
+            a = {"id": id_, "name": id_, "trigger": trig or {"type": "every", "every": "60 seconds"}, "tz": "Asia/Seoul",
+                 "action": {"type": "prompt", "prompt": "P " + id_, "to": {"session": to}}, "status": status, "runCount": 1}
+            if typ != "prompt":
+                a["action"] = {"type": typ, "code": "x"}
+            return a
+
+        left = [auto(aut), auto("aut_other", to="ses_other"), auto("aut_code", typ="code"), auto("aut_paused", status="paused"),
+                auto("aut_at", trig={"type": "at", "at": "2026-11-24T08:32:49.701Z"})]
+
+        def run(steps, automations, **kw):
+            s.ctl("/_ctl/reset", {})
+            tctl("/_ctl/reset", {})
+            tctl("/_ctl/config", {"links": {LINK_T["id"]: dict(LINK_T)}})
+            return node_plugin(s, "v2", dict({"directory": d, "sessions": {sid: {"title": "Auto"}}, "automations": automations,
+                                              "steps": steps, "wait": 3000}, **kw))
+
+        def tunnel(ev_):
+            return [(r.get("plain_json") or {}) for r in ingests(s, ctl=tctl) if (r.get("body") or {}).get("ev") == ev_]
+
+        def scheduled():
+            return [x for x in tunnel("state") if x.get("st") == "scheduled"]
+
+        calls = run(run_of(1), left)
+        st = wait_for(scheduled, 10)
+        s.settle("the plugin's hooks' background work")
+        crons = ((st[0].get("turn") or {}).get("crons") if st else None) or []
+        s.check("opencode automation: a run with prompt automations to this session left -> scheduled, no done",
+                st and (st[0].get("turn") or {}).get("by") == "schedule"
+                and [c.get("sched") for c in crons] == ["every 60 seconds", "at 2026-11-24T08:32:49.701Z"]
+                and [c.get("prompt") for c in crons] == ["P " + aut, "P aut_at"]
+                and not tunnel("done") and not ingests(s, "done"), str(st)[:400] + str(ingests(s))[:200])
+        s.check("opencode automation: automation_list of the automation namespace, not the browser's list",
+                [c.get("tool") for c in calls if "tool" in c] == ["automation_list"], str(calls)[:400])
+        # The last run: only a code automation, another session's and a paused one are left -> done by schedule, tunnel only.
+        run(run_of(2), [auto(aut, status="done"), auto("aut_other", to="ses_other"), auto("aut_code", typ="code"),
+                        auto("aut_paused", status="paused")])
+        dn = wait_for(lambda: tunnel("done"), 10)
+        s.settle("the plugin's hooks' background work")
+        s.check("opencode automation: nothing of this session's left -> done by schedule to the tunnel only",
+                dn and (dn[0].get("turn") or {}).get("by") == "schedule" and not ingests(s, "done"), str(dn)[:300] + str(ingests(s))[:300])
+        # No enqueued item (a plugin that came up late): the inbox id alone tells it, with or without _send.
+        for label, inbox in (("msg_aut_", "msg_%s_3" % aut), ("msg_aut_ _send", "msg_%s_4_send" % aut)):
+            run(run_of(3, inbox=inbox, meta=False), [])
+            dn = wait_for(lambda: tunnel("done"), 10)
+            s.settle("the plugin's hooks' background work")
+            s.check("opencode automation: a delivered %s id alone -> the automation's turn" % label,
+                    dn and (dn[0].get("turn") or {}).get("by") == "schedule" and not ingests(s, "done"), str(dn)[:300])
+        # A build with schedule_list (2.2.3 to 2.3.x) reads it, not the automations.
+        calls = run(run_of(5), left, schedules={sid: [{"id": "sch_1", "sessionID": sid, "name": "s", "when": {"type": "every",
+                                                                                                         "every": "15 seconds"},
+                                                       "action": {"type": "prompt", "prompt": "tick"}, "status": "active"}]})
+        st = wait_for(scheduled, 10)
+        s.settle("the plugin's hooks' background work")
+        s.check("opencode automation: schedule_list first when the build has it",
+                [c for c in calls if "schedule_list" in c] and not [c for c in calls if "tool" in c]
+                and [c.get("sched") for c in (((st[0].get("turn") or {}).get("crons") or []) if st else [])] == ["every 15 seconds"],
+                str(calls)[:400] + str(st)[:300])
+    finally:
+        tun.terminate()
+        tun.wait(5)
+
+
 def t_opencode_js(s):
     """The OpenCode plugins themselves (node with fake OpenCode objects; skipped without node)."""
     if not NODE or s.kind != "sh":
@@ -7619,6 +8006,7 @@ TESTS = [t_vectors, t_background, t_allow_deny, t_codex_allow, t_invalid_dmac, t
          t_hostile_input, t_log, t_argv, t_external_printf,
          t_usage_claude, t_usage_window, t_usage_claude_big, t_usage_claude_huge, t_usage_statusline, t_usage_relay_policy, t_usage_delivery, t_usage_codex, t_codex_hooks, t_gemini, t_notify,
          t_cli_wrapper, t_notify_no_tty, t_agy, t_agy_schedule, t_agy_paths, t_grok, t_opencode_sh, t_opencode_js, t_opencode_schedule,
+         t_opencode_automation, t_opencode_tui, t_opencode_tabs, t_opencode_tab_events,
          t_v2_fixtures, t_v2_dext_vector, t_v2_decisions, t_v2_param_keys, t_v2_input_drain, t_v2_usage, t_v2_usage_ask, t_v2_usage_ask_gate, t_v2_usage_ask_refresh, t_usage_ask_refresh_vectors, t_conf_vectors, t_v2_n10, t_v2_link_results, t_v2_link_waits, t_v2_held, t_v2_held_bg, t_v2_not_sent,
          t_v2_state, t_v2_state_turns, t_v2_sessions, t_v2_mux, t_v2_tab, t_v2_opencode_js, t_copilot_hooks, t_copilot, t_copilot_schedules,
          t_v2_versions, t_v2_claude_question_once, t_hooks_removed_plugin]
@@ -7632,7 +8020,8 @@ COMPAT = {"t_vectors", "t_allow_deny", "t_invalid_dmac", "t_missing_deps", "t_ho
 
 # Tests of the sh hook only (scripts and behaviour the PowerShell hook does not have).
 SH_ONLY = {"t_copilot_session_end", "t_v2_versions", "t_v2_n10", "t_v2_opencode_js", "t_copilot_hooks", "t_copilot", "t_copilot_schedules", "t_usage_claude_big", "t_usage_claude_huge", "t_codex_hooks", "t_usage_delivery", "t_usage_statusline", "t_usage_relay_policy", "t_gemini", "t_notify", "t_notify_no_tty", "t_cli_wrapper",
-           "t_agy", "t_agy_schedule", "t_agy_paths", "t_opencode_sh", "t_opencode_js", "t_opencode_schedule"}
+           "t_agy", "t_agy_schedule", "t_agy_paths", "t_opencode_sh", "t_opencode_js", "t_opencode_schedule",
+           "t_opencode_automation", "t_opencode_tui", "t_opencode_tabs", "t_opencode_tab_events"}
 
 
 # PowerShell 7-only syntax and APIs that Windows PowerShell 5.1 (.NET Framework 4.5+) lacks.
