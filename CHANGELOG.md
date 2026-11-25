@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 - 2026-11-25
 
 - **OpenCode 2.x: alerts, requests and states name the tab that shows the session** (SimpleTerm
   `if/hook-tab-opencode`, `hist/hook-tab-identity#d10`, issue AhMunGa/simple-term#654). OpenCode 2.x runs
